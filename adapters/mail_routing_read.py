@@ -431,7 +431,10 @@ def observe(event_path: str, environ: Mapping[str, str], opener: Opener | None =
                         raise ItemShapeFailure("matcher_field_invalid")
                 if kind == "literal" or "value" in matcher:
                     value = matcher.get("value")
-                    if not isinstance(value, str) or not value.strip() or len(value) > 90:
+                    # Native all.value is optional string (max 90, no minimum);
+                    # a literal recipient alone requires a nonblank target.
+                    if (not isinstance(value, str) or len(value) > 90
+                            or (kind == "literal" and not value.strip())):
                         raise ItemShapeFailure("matcher_value_invalid")
         return rows
 

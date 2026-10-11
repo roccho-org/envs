@@ -278,6 +278,11 @@ def main() -> None:
         rule_ok([valid_rule("wrangler"), with_matcher({"type": "all"})], wrangler=1)
         rule_ok([with_matcher({"type": "all", "field": "to"})])
         rule_ok([with_matcher({"type": "all", "value": "m0@" + DOMAIN})])
+        # Official all.value is optional string with maxLength=90 and NO minLength.
+        rule_ok([with_matcher({"type": "all", "value": ""})])
+        rule_ok([with_matcher({"type": "all", "value": " "})])
+        rule_ok([with_matcher({"type": "all", "value": "x" * 90})])
+        rule_ok([with_matcher({"type": "all", "field": "to", "value": ""})])
         rule_ok([{"enabled": True, "source": "api",
                  "actions": [{"type": "drop"}], "matchers": [{"type": "all"}]}])
 
@@ -309,7 +314,12 @@ def main() -> None:
             (with_matcher({"type": "literal", "field": "to", "value": ""}), "matcher_value_invalid"),
             (with_matcher({"type": "literal", "field": "to", "value": "  "}), "matcher_value_invalid"),
             (with_matcher({"type": "literal", "field": "to", "value": False}), "matcher_value_invalid"),
-            (with_matcher({"type": "all", "value": ""}), "matcher_value_invalid"),
+            (with_matcher({"type": "all", "value": None}), "matcher_value_invalid"),
+            (with_matcher({"type": "all", "value": False}), "matcher_value_invalid"),
+            (with_matcher({"type": "all", "value": []}), "matcher_value_invalid"),
+            (with_matcher({"type": "all", "value": "x" * 91}), "matcher_value_invalid"),
+            (with_matcher({"type": "literal", "field": "to", "value": "x" * 90 + " "}),
+             "matcher_value_invalid"),
             (with_matcher({"type": "literal", "field": "to", "value": "a" * 91}),
              "matcher_value_invalid"),
         ):
