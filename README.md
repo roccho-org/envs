@@ -372,3 +372,9 @@ nix build .#check-age --no-update-lock-file                             # check-
 ```
 
 The repository oracle calculates accepted structure and state. Its tests deliberately create invalid states and require RED rather than repeating only happy-path execution.
+
+## Family calendar Cloudflare Pages (bounded exception)
+
+The static product bytes are owned by `roccho-dev/apps/packages/calendar/src`. This repo owns only one explicitly authorized provider upload of an exact, CI-green apps source to the fixed `roccho-family-calendar-2026` Direct Upload Pages project. `dev-projection` supplies its existing `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` to a single bounded effect step. No secret is transferred to apps, no Pages secret is projected into the browser, and this is not a generic deployment platform.
+
+On [envs Issue #69](https://github.com/roccho-org/envs/issues/69), the existing `roccho-dev` principal comments `/deploy-calendar <40-character apps SHA>`. The comment becomes data for a strict validator; envs only fetches that commit after its `calendar acceptance` and `nix-check` runs are both success. It uses the envs exact-commit Nix toolchain artifact, deploys only the two static files to Pages, and accepts completion only after public byte-for-byte readback of both. A failure never represents success. All data in `events.jsonl` is public. The provider secret scope must independently include `Pages Write` (a working zone read alone does not prove it).

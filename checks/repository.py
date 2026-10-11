@@ -23,17 +23,20 @@ REQUIRED_FILES = {
     ".github/workflows/probe-dev-rent-state.yml",
     ".github/workflows/probe-dev-linode-read.yml",
     ".github/workflows/probe-dev-mail-routing.yml",
+    ".github/workflows/deploy-calendar-pages.yml",
     ".gitignore",
     "LICENSE_POLICY.md",
     "LICENSES/README.md",
     "README.md",
     "THIRD_PARTY_NOTICES.md",
     "adapters/jev_api.py",
+    "adapters/calendar_pages.py",
     "adapters/mail_routing_read.py",
     "adapters/place.ps1",
     "adapters/rent-receive.sh",
     "checks/repository.py",
     "checks/test_jev_api.py",
+    "checks/test_calendar_pages.py",
     "checks/test_rent_access_probe.py",
     "checks/test_rent_state_proof.py",
     "checks/test_linode_read_probe.py",
@@ -513,7 +516,7 @@ def check_workflows(root: Path, environments: dict[str, dict[str, Any]],
     workflow_root = root / ".github/workflows"
     names = {path.name for path in workflow_root.iterdir() if path.is_file()}
     require(
-        names == {"check.yml", "jev-issue-comment.yml", *EFFECT_WORKFLOWS},
+        names == {"check.yml", "jev-issue-comment.yml", "deploy-calendar-pages.yml", *EFFECT_WORKFLOWS},
         f"workflow set differs: {sorted(names)}",
     )
     texts = {path.name: path.read_text(encoding="utf-8") for path in workflow_root.iterdir() if path.is_file()}
@@ -638,6 +641,7 @@ def check_workflows(root: Path, environments: dict[str, dict[str, Any]],
         require(marker in clean_start, f"clean-start destructive case missing: {marker}")
 
     require(consumer_run(effect_shape, "check.yml effect-shape") == canonical, "effect-shape must run the canonical consumer")
+    check_calendar_pages_workflow(texts["deploy-calendar-pages.yml"], canonical)
     for token in ("nix ", "install-nix"):
         require(token not in effect_shape, f"effect-shape must not use {token.strip()}")
     for marker in (
@@ -759,6 +763,69 @@ def check_workflows(root: Path, environments: dict[str, dict[str, Any]],
     require("github.actor == 'roccho-dev'" in mail and "github.actor_id == '40359643'" in mail
             and "github.triggering_actor == 'roccho-dev'" in mail,
             "Mail dispatch must admit only the fixed GitHub controller, without claiming chat role identity")
+
+
+
+def check_calendar_pages_workflow(source: str, canonical_consumer: str) -> None:
+    """Strictly admit only the one controller + issue scoped Pages effect."""
+    require("on:\n  issue_comment:\n    types: [created]\n" in source,
+            "calendar deploy must require an issue comment")
+    require("\n  push:" not in source and "\n  pull_request:" not in source
+            and "workflow_dispatch:" not in source, "calendar deploy must be comment-only")
+    require("permissions:\n  actions: read\n  contents: read\n" in source,
+            "calendar deploy may only read repo/actions")
+    require("    environment: dev-projection\n" in source,
+            "calendar deploy may only use the existing Cloudflare Environment")
+    for guard in (
+        "github.event.repository.owner.type == 'Organization'",
+        "github.repository == 'roccho-org/envs'",
+        "github.event.issue.number == 69",
+        "github.event.issue.pull_request == null",
+        "github.event.comment.user.id == 40359643",
+        "github.actor == 'roccho-dev'",
+        "github.actor_id == '40359643'",
+        "github.triggering_actor == 'roccho-dev'",
+        "github.ref_name == 'proposals'",
+        "github.run_attempt == 1",
+        "startsWith(github.event.comment.body, '/deploy-calendar ')",
+    ):
+        require(guard in source, f"calendar controller guard lost: {guard}")
+    require(source.count("github.event.comment.body") == 1,
+            "calendar comment cannot enter a shell or environment expression")
+    require(consumer_run(source, "deploy-calendar-pages.yml") == canonical_consumer,
+            "calendar must consume the exact already-checked envs toolchain")
+    require(source.count("actions/checkout@") == 2
+            and source.count("persist-credentials: false") == 2,
+            "calendar checkouts must be pinned and credential-free")
+    require("          repository: roccho-dev/apps\n" in source
+            and "          ref: ${{ steps.select.outputs.app_sha }}\n" in source,
+            "calendar must fetch the accepted exact apps SHA")
+    require("ref: ${{ github.sha }}\n" in source,
+            "calendar provider code must be the canonical envs SHA")
+    require(source.count("adapters/calendar_pages.py select'") == 1
+            and source.count("adapters/calendar_pages.py verify'") == 1
+            and source.count("adapters/calendar_pages.py deploy'") == 1,
+            "calendar can use only the three bounded adapter commands")
+    stage = [source.find("adapters/calendar_pages.py select'"),
+             source.find("adapters/calendar_pages.py verify'"),
+             source.find("secrets.CLOUDFLARE_API_TOKEN"),
+             source.find("adapters/calendar_pages.py deploy'")]
+    require(stage[0] >= 0 and stage == sorted(stage),
+            "calendar proof must precede any Cloudflare secret or effect")
+    require(set(INPUT_REFERENCE.findall(source)) == {
+                ("secrets", "CLOUDFLARE_API_TOKEN"), ("vars", "CLOUDFLARE_ACCOUNT_ID")},
+            "calendar must use only the existing dev-projection Cloudflare pair")
+    require(source.count("secrets.CLOUDFLARE_API_TOKEN") == 1
+            and source.count("vars.CLOUDFLARE_ACCOUNT_ID") == 1,
+            "calendar provider inputs may be exposed only in the final step")
+    require("SOPS_AGE_KEY" not in source and "AWS_" not in source
+            and "CLOUDFLARE_ZONE_ID" not in source and "secrets: inherit" not in source,
+            "calendar may not borrow unrelated credential classes")
+    adapter = (ROOT / "adapters/calendar_pages.py").read_text(encoding="utf-8")
+    require('CONTROL_ISSUE = 69' in adapter
+            and 'PROJECT = "roccho-family-calendar-2026"' in adapter
+            and 'APPS_REPO = "roccho-dev/apps"' in adapter,
+            "calendar adapter may target only the fixed issue, Pages project, and source repo")
 
 
 def check_toolchain(root: Path, adapter) -> None:
