@@ -92,6 +92,17 @@ def main() -> None:
                      ("      github.event.issue.pull_request == null", "      true")):
         expect_red(replace_text(caller, old, new))
     expect_red(append_branch_effect)
+    calendar = ".github/workflows/deploy-calendar-pages.yml"
+    for old, new in (
+        ("github.event.issue.number == 69", "github.event.issue.number == 70"),
+        ("github.event.comment.user.id == 40359643", "github.event.comment.user.id == 44"),
+        ("github.ref_name == 'proposals'", "github.ref_name == 'main'"),
+        ("          repository: roccho-dev/apps", "          repository: other/apps"),
+        ("          ref: ${{ steps.select.outputs.app_sha }}", "          ref: proposals"),
+        ("          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}", ""),
+        ("    environment: dev-projection", "    environment: dev-rent-tunnel"),
+    ):
+        expect_red(replace_text(calendar, old, new))
 
     def add_database_path(root: Path) -> None:
         name = "duck" + "db"

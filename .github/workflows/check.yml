@@ -54,6 +54,9 @@ jobs:
       - name: Test credential-safe Mail Routing read probe
         run: python3 checks/test_mail_routing_read.py
 
+      - name: Test bounded calendar Pages upload gates
+        run: python3 checks/test_calendar_pages.py
+
       - name: Verify explicit main compatibility refresh
         if: github.ref_name == 'main'
         run: python3 checks/repository.py --verify-main-compatibility-refresh
