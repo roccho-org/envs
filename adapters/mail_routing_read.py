@@ -32,13 +32,26 @@ ZONE_UNKNOWN_REASONS = frozenset((
     "transport", "http_other", "invalid_payload_or_pagination",
     "zero_match", "multiple_match", "owner_or_id_mismatch", "unclassified",
 ))
+# A structural gate rejected by THIS client's strict list parser.
+# Expose only on a rules/addresses invalid_payload_or_pagination UNKNOWN.
+# Never emit field values, counts from rejected lists, URLs or HTTP codes.
+LIST_UNKNOWN_SHAPES = frozenset((
+    "response_size", "invalid_json", "invalid_envelope", "invalid_result",
+    "nonobject_item", "pagination_missing", "pagination_invalid",
+    "total_pages_missing", "total_pages_type", "total_pages_range",
+    "total_count_missing", "total_count_type", "total_count_range",
+    "page_index_mismatch", "page_size_mismatch", "page_count_mismatch",
+    "total_count_inconsistent",
+))
 Opener = Callable[..., Any]
 
 
 class ReadFailure(Exception):
-    def __init__(self, state: str = "UNKNOWN", reason: str = "invalid_payload_or_pagination") -> None:
+    def __init__(self, state: str = "UNKNOWN", reason: str = "invalid_payload_or_pagination",
+                 shape: str | None = None) -> None:
         self.state = state
         self.reason = reason if state == "UNKNOWN" and reason in ZONE_UNKNOWN_REASONS else None
+        self.shape = shape if self.reason == "invalid_payload_or_pagination" and shape in LIST_UNKNOWN_SHAPES else None
 
 
 class ItemShapeFailure(ReadFailure):
@@ -103,12 +116,15 @@ def _request(opener: Opener, token: str, path: str, params: Mapping[str, object]
                 raise ReadFailure("DENIED" if response.status in (401, 403) else "UNKNOWN", "http_other")
             raw = response.read(MAX_RESPONSE + 1)
         if len(raw) > MAX_RESPONSE:
-            raise ReadFailure()
-        payload = json.loads(raw)
+            raise ReadFailure(shape="response_size")
+        try:
+            payload = json.loads(raw)
+        except (ValueError, UnicodeError):
+            raise ReadFailure(shape="invalid_json") from None
         if not isinstance(payload, dict) or payload.get("success") is not True:
-            raise ReadFailure()
+            raise ReadFailure(shape="invalid_envelope")
         if not isinstance(payload.get("result"), (dict, list)):
-            raise ReadFailure()
+            raise ReadFailure(shape="invalid_result")
         return payload
     except urllib.error.HTTPError as error:
         raise ReadFailure("DENIED" if error.code in (401, 403) else "UNKNOWN", "http_other") from None
@@ -127,35 +143,59 @@ def _list(opener: Opener, token: str, path: str,
         payload = _request(opener, token, path, args)
         info = payload.get("result_info")
         batch = payload["result"]
-        if (not isinstance(batch, list) or any(not isinstance(item, dict) for item in batch)
-                or not isinstance(info, dict)):
-            raise ReadFailure()
-        total_pages = info.get("total_pages")
-        total_count = info.get("total_count")
-        if (type(total_pages) is not int or type(total_count) is not int
-                or total_pages < 0 or total_pages > MAX_PAGES or total_count < 0
-                or total_count > MAX_PAGES * PAGE_SIZE
-                or info.get("page", page) != page
-                or info.get("count", len(batch)) != len(batch)
-                or info.get("per_page", PAGE_SIZE) != PAGE_SIZE):
-            raise ReadFailure()
+        # First rejecting condition wins. These are diagnostics, not new
+        # acceptance rules: optional page/count/per_page still default as
+        # before; result_info with int totals and full-page agreement remains
+        # mandatory. A valid empty result remains an observed zero.
+        if not isinstance(batch, list):
+            raise ReadFailure(shape="invalid_result")
+        if any(not isinstance(item, dict) for item in batch):
+            raise ReadFailure(shape="nonobject_item")
+        if info is None:
+            raise ReadFailure(shape="pagination_missing")
+        if not isinstance(info, dict):
+            raise ReadFailure(shape="pagination_invalid")
+        # First failing REQUIRED total wins in this fixed order. An omitted
+        # Cloudflare-optional field still violates this client's strict local
+        # completeness contract; the diagnostic describes OUR rejection only.
+        # No numeric value, request/response fragment or identifier escapes.
+        if "total_pages" not in info:
+            raise ReadFailure(shape="total_pages_missing")
+        total_pages = info["total_pages"]
+        if type(total_pages) is not int:  # bool is not an integer total
+            raise ReadFailure(shape="total_pages_type")
+        if total_pages < 0 or total_pages > MAX_PAGES:
+            raise ReadFailure(shape="total_pages_range")
+        if "total_count" not in info:
+            raise ReadFailure(shape="total_count_missing")
+        total_count = info["total_count"]
+        if type(total_count) is not int:  # bool is not an integer total
+            raise ReadFailure(shape="total_count_type")
+        if total_count < 0 or total_count > MAX_PAGES * PAGE_SIZE:
+            raise ReadFailure(shape="total_count_range")
+        if info.get("page", page) != page:
+            raise ReadFailure(shape="page_index_mismatch")
+        if info.get("count", len(batch)) != len(batch):
+            raise ReadFailure(shape="page_count_mismatch")
+        if info.get("per_page", PAGE_SIZE) != PAGE_SIZE:
+            raise ReadFailure(shape="page_size_mismatch")
         # Cloudflare may express an empty paginated list as total_pages=0
         # or 1. Both mean zero matches, not a malformed response.
         if page == 1 and total_count == 0 and total_pages == 0 and not batch:
             return []
         if total_pages == 0:
-            raise ReadFailure()
+            raise ReadFailure(shape="pagination_invalid")
         if expected_total is not None and total_count != expected_total:
-            raise ReadFailure()
+            raise ReadFailure(shape="total_count_inconsistent")
         expected_total = total_count
         results.extend(batch)
         if page == total_pages:
             if len(results) != total_count:
-                raise ReadFailure()
+                raise ReadFailure(shape="total_count_inconsistent")
             return results
         if page > total_pages:
-            raise ReadFailure()
-    raise ReadFailure()
+            raise ReadFailure(shape="page_index_mismatch")
+    raise ReadFailure(shape="pagination_invalid")
 
 
 def _single(opener: Opener, token: str, path: str) -> dict[str, Any]:
@@ -202,6 +242,11 @@ def observe(event_path: str, environ: Mapping[str, str], opener: Opener | None =
                     if reason not in ("transport", "http_other", "invalid_payload_or_pagination", shape):
                         reason = "unclassified"
                     output[f"{step}_unknown_reason"] = reason
+                    if (reason == "invalid_payload_or_pagination"
+                            and failure.shape in LIST_UNKNOWN_SHAPES):
+                        # Exactly one structural gate; never attach to local
+                        # item-shape refusal, DENIED, another step or success.
+                        output[f"{step}_unknown_shape"] = failure.shape
             return None
         except Exception:
             # Fail closed even for malformed provider/opener implementations.
