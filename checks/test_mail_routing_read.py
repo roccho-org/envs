@@ -413,14 +413,45 @@ def main() -> None:
             list_case(Fake(list_reply={endpoint: packet([], "not-an-object")}),
                       "invalid_payload_or_pagination", "pagination_invalid")
             info = json.loads(wrap([]))["result_info"]
-            for invalid in (
-                {key: value for key, value in info.items() if key != "total_count"},
-                {**info, "total_pages": True},
-                {**info, "total_pages": mail.MAX_PAGES + 1},
-                {**info, "total_pages": 0, "total_count": 1},
+            # The first rejected REQUIRED total is now precise by field and
+            # category. These are only closed reason codes, never real values.
+            for invalid, gate in (
+                ({key: value for key, value in info.items() if key != "total_pages"},
+                 "total_pages_missing"),
+                ({key: value for key, value in info.items() if key != "total_count"},
+                 "total_count_missing"),
+                ({**info, "total_pages": True}, "total_pages_type"),
+                ({**info, "total_count": False}, "total_count_type"),
+                ({**info, "total_pages": "1"}, "total_pages_type"),
+                ({**info, "total_count": "0"}, "total_count_type"),
+                ({**info, "total_pages": -1}, "total_pages_range"),
+                ({**info, "total_count": -1}, "total_count_range"),
+                ({**info, "total_pages": mail.MAX_PAGES + 1}, "total_pages_range"),
+                ({**info, "total_count": mail.MAX_PAGES * mail.PAGE_SIZE + 1},
+                 "total_count_range"),
+                # A logically contradictory zero-pages/nonzero-total envelope
+                # remains the original pagination_invalid gate.
+                ({**info, "total_pages": 0, "total_count": 1}, "pagination_invalid"),
             ):
                 list_case(Fake(list_reply={endpoint: packet([], invalid)}),
-                          "invalid_payload_or_pagination", "pagination_invalid")
+                          "invalid_payload_or_pagination", gate)
+            # When several fields fail, the FIRST field-specific rejection
+            # wins: pages missing/type/range, then count missing/type/range,
+            # before optional pagination metadata.
+            for invalid, first_gate in (
+                ({"total_count": "0", "page": 2}, "total_pages_missing"),
+                ({**info, "total_pages": True, "total_count": "0"},
+                 "total_pages_type"),
+                ({**info, "total_pages": -1, "total_count": None},
+                 "total_pages_range"),
+                ({key: value for key, value in {**info, "page": 2}.items()
+                  if key != "total_count"}, "total_count_missing"),
+                ({**info, "total_count": True, "page": 2}, "total_count_type"),
+                ({**info, "total_count": mail.MAX_PAGES * mail.PAGE_SIZE + 1,
+                  "page": 2}, "total_count_range"),
+            ):
+                list_case(Fake(list_reply={endpoint: packet([], invalid)}),
+                          "invalid_payload_or_pagination", first_gate)
             for name, changed, gate in (
                 ("page", 2, "page_index_mismatch"),
                 ("count", 1, "page_count_mismatch"),
@@ -434,7 +465,7 @@ def main() -> None:
             list_case(Fake(list_reply={endpoint: packet({}, {"page": 2})}),
                       "invalid_payload_or_pagination", "invalid_result")
             list_case(Fake(list_reply={endpoint: packet([], {**info, "total_count": None, "page": 2})}),
-                      "invalid_payload_or_pagination", "pagination_invalid")
+                      "invalid_payload_or_pagination", "total_count_type")
 
             # The full two-page contract is still enforced. A changed total
             # on page two is a failure, but a consistent 50+1 read completes.
@@ -471,6 +502,33 @@ def main() -> None:
             assert count_key not in mismatch["counts"]
             assert inconsistent_pages.calls.count(endpoint) == 2
             safe(mismatch)
+
+            # Same first-rejection contract applies on subsequent pages, not
+            # merely the initial empty-list fixture. It changes no GET count.
+            for broken_info, first_gate in (
+                ({key: value for key, value in json.loads(second_page)["result_info"].items()
+                  if key != "total_pages"}, "total_pages_missing"),
+                ({**json.loads(second_page)["result_info"], "total_pages": False},
+                 "total_pages_type"),
+                ({**json.loads(second_page)["result_info"],
+                  "total_pages": mail.MAX_PAGES + 1}, "total_pages_range"),
+                ({key: value for key, value in json.loads(second_page)["result_info"].items()
+                  if key != "total_count"}, "total_count_missing"),
+                ({**json.loads(second_page)["result_info"], "total_count": "51"},
+                 "total_count_type"),
+                ({**json.loads(second_page)["result_info"],
+                  "total_count": mail.MAX_PAGES * mail.PAGE_SIZE + 1},
+                 "total_count_range"),
+            ):
+                bad_second = packet([valid_item], broken_info)
+                failing = Fake(list_pages={endpoint: [first_page, bad_second]})
+                actual = mail.observe(selected, ENV, failing)
+                assert actual["read"][step] == "UNKNOWN"
+                assert actual[diagnostic_key] == "invalid_payload_or_pagination"
+                assert actual[f"{step}_unknown_shape"] == first_gate
+                assert count_key not in actual["counts"]
+                assert failing.calls.count(endpoint) == 2
+                safe(actual)
 
             # A local item validator has its pre-existing distinct reason,
             # not a payload/pagination gate fabricated by this diagnostic.
@@ -559,6 +617,49 @@ def main() -> None:
                 mail.safe_opener = saved_opener
                 os.environ.clear()
                 os.environ.update(saved_env)
+
+        # The actual main()->observe()->_list() PUBLIC JSON distinguishes
+        # all six new required-field conditions for both list endpoints.
+        # This does not access a live provider or reveal a numeric value.
+        for step, endpoint in (
+            ("rules", f"/zones/{ZONE}/email/routing/rules"),
+            ("addresses", f"/accounts/{ACCOUNT}/email/routing/addresses"),
+        ):
+            basic = json.loads(wrap([]))["result_info"]
+            for info_value, gate in (
+                ({key: value for key, value in basic.items() if key != "total_pages"},
+                 "total_pages_missing"),
+                ({**basic, "total_pages": True}, "total_pages_type"),
+                ({**basic, "total_pages": -1}, "total_pages_range"),
+                ({key: value for key, value in basic.items() if key != "total_count"},
+                 "total_count_missing"),
+                ({**basic, "total_count": "0"}, "total_count_type"),
+                ({**basic, "total_count": mail.MAX_PAGES * mail.PAGE_SIZE + 1},
+                 "total_count_range"),
+            ):
+                saved_opener = mail.safe_opener
+                saved_env = dict(os.environ)
+                try:
+                    mail.safe_opener = lambda endpoint=endpoint, info_value=info_value: Fake(
+                        list_reply={endpoint: packet([], info_value)},
+                    )
+                    os.environ.clear()
+                    os.environ.update({**ENV, "GITHUB_EVENT_PATH": selected})
+                    output = io.StringIO()
+                    with redirect_stdout(output):
+                        assert mail.main() == 2
+                    closed = json.loads(output.getvalue())
+                    assert closed[f"{step}_unknown_reason"] == "invalid_payload_or_pagination"
+                    assert closed[f"{step}_unknown_shape"] == gate
+                    assert closed["read"][step] == "UNKNOWN"
+                    assert "zone_unknown_reason" not in closed
+                    other = "addresses" if step == "rules" else "rules"
+                    assert f"{other}_unknown_shape" not in closed
+                    safe(closed)
+                finally:
+                    mail.safe_opener = saved_opener
+                    os.environ.clear()
+                    os.environ.update(saved_env)
 
         # Exercise main() with synthetic *valid* account and mocked opener
         # to establish that its actual public JSON retains only the enum.

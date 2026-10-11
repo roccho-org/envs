@@ -38,6 +38,8 @@ ZONE_UNKNOWN_REASONS = frozenset((
 LIST_UNKNOWN_SHAPES = frozenset((
     "response_size", "invalid_json", "invalid_envelope", "invalid_result",
     "nonobject_item", "pagination_missing", "pagination_invalid",
+    "total_pages_missing", "total_pages_type", "total_pages_range",
+    "total_count_missing", "total_count_type", "total_count_range",
     "page_index_mismatch", "page_size_mismatch", "page_count_mismatch",
     "total_count_inconsistent",
 ))
@@ -153,12 +155,24 @@ def _list(opener: Opener, token: str, path: str,
             raise ReadFailure(shape="pagination_missing")
         if not isinstance(info, dict):
             raise ReadFailure(shape="pagination_invalid")
-        total_pages = info.get("total_pages")
-        total_count = info.get("total_count")
-        if (type(total_pages) is not int or type(total_count) is not int
-                or total_pages < 0 or total_pages > MAX_PAGES or total_count < 0
-                or total_count > MAX_PAGES * PAGE_SIZE):
-            raise ReadFailure(shape="pagination_invalid")
+        # First failing REQUIRED total wins in this fixed order. An omitted
+        # Cloudflare-optional field still violates this client's strict local
+        # completeness contract; the diagnostic describes OUR rejection only.
+        # No numeric value, request/response fragment or identifier escapes.
+        if "total_pages" not in info:
+            raise ReadFailure(shape="total_pages_missing")
+        total_pages = info["total_pages"]
+        if type(total_pages) is not int:  # bool is not an integer total
+            raise ReadFailure(shape="total_pages_type")
+        if total_pages < 0 or total_pages > MAX_PAGES:
+            raise ReadFailure(shape="total_pages_range")
+        if "total_count" not in info:
+            raise ReadFailure(shape="total_count_missing")
+        total_count = info["total_count"]
+        if type(total_count) is not int:  # bool is not an integer total
+            raise ReadFailure(shape="total_count_type")
+        if total_count < 0 or total_count > MAX_PAGES * PAGE_SIZE:
+            raise ReadFailure(shape="total_count_range")
         if info.get("page", page) != page:
             raise ReadFailure(shape="page_index_mismatch")
         if info.get("count", len(batch)) != len(batch):
