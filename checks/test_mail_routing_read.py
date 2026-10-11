@@ -61,7 +61,8 @@ class Fake:
                  zone_transport: bool = False, zone_id: str = ZONE,
                  wrong_name: bool = False, zone_unexpected: bool = False,
                  list_http: tuple[str, int] | None = None, list_transport: str = "",
-                 list_unexpected: str = "", list_reply: dict[str, bytes] | None = None) -> None:
+                 list_unexpected: str = "", list_reply: dict[str, bytes] | None = None,
+                 list_pages: dict[str, list[bytes]] | None = None) -> None:
         self.calls: list[str] = []
         self.deny = deny
         self.bad = bad
@@ -78,6 +79,7 @@ class Fake:
         self.list_transport = list_transport
         self.list_unexpected = list_unexpected
         self.list_reply = list_reply or {}
+        self.list_pages = list_pages or {}
 
     def __call__(self, req: urllib.request.Request, **kwargs: object):
         assert req.get_method() == "GET"
@@ -94,6 +96,11 @@ class Fake:
             raise urllib.error.URLError("private transport " + TOKEN)
         if path == self.list_unexpected:
             raise RuntimeError("private internal " + TOKEN)
+        if path in self.list_pages:
+            # Production's same strict page loop, with bounded synthetic
+            # page envelopes. Never a second provider reader.
+            page = int(urllib.parse.parse_qs(url.query)["page"][0])
+            return Response(self.list_pages[path][page - 1])
         if path in self.list_reply:
             return Response(self.list_reply[path])
         if path == self.deny:
@@ -357,36 +364,116 @@ def main() -> None:
         ):
             diagnostic_key = f"{step}_unknown_reason"
 
-            def list_case(fixture: Fake, expected: str) -> None:
+            def list_case(fixture: Fake, expected: str, gate: str | None = None) -> None:
                 got = mail.observe(selected, ENV, fixture)
                 assert got["status"] == "INCOMPLETE"
                 assert got["read"]["token"] == got["read"]["zone"] == "OBSERVED"
                 assert got["read"][step] == "UNKNOWN"
                 assert got[diagnostic_key] == expected, (got, expected)
+                shape_key = f"{step}_unknown_shape"
+                if gate is None:
+                    assert shape_key not in got, (got, shape_key)
+                else:
+                    assert expected == "invalid_payload_or_pagination"
+                    assert gate in mail.LIST_UNKNOWN_SHAPES
+                    assert got.get(shape_key) == gate, (got, gate)
                 assert count_key not in got["counts"]
                 assert "zone_unknown_reason" not in got
                 other = "addresses" if step == "rules" else "rules"
                 assert got["read"][other] == "OBSERVED"
                 assert f"{other}_unknown_reason" not in got
+                assert f"{other}_unknown_shape" not in got
                 assert fixture.calls.count(endpoint) == 1
                 assert len(fixture.calls) == len(set(fixture.calls))
                 assert got["write_authority"] == got["mail_arrival"] == "NOT_PROVEN"
                 safe(got)
 
+            def packet(value: object, info: object = ...) -> bytes:
+                response = {"success": True, "result": value}
+                if info is not ...:
+                    response["result_info"] = info
+                return json.dumps(response).encode()
+
             list_case(Fake(list_transport=endpoint), "transport")
             for status in (302, 429, 500):
                 list_case(Fake(list_http=(endpoint, status)), "http_other")
-            list_case(Fake(bad=endpoint), "invalid_payload_or_pagination")
+            list_case(Fake(bad=endpoint), "invalid_payload_or_pagination", "invalid_envelope")
             list_case(Fake(list_reply={endpoint: b'{private-invalid-json:'}),
-                      "invalid_payload_or_pagination")
-            missing_info = json.loads(wrap([]))
-            missing_info.pop("result_info")
-            list_case(Fake(list_reply={endpoint: json.dumps(missing_info).encode()}),
-                      "invalid_payload_or_pagination")
-            inconsistent = json.loads(wrap([]))
-            inconsistent["result_info"]["total_count"] = 1
-            list_case(Fake(list_reply={endpoint: json.dumps(inconsistent).encode()}),
-                      "invalid_payload_or_pagination")
+                      "invalid_payload_or_pagination", "invalid_json")
+            list_case(Fake(list_reply={endpoint: b' ' * (mail.MAX_RESPONSE + 1)}),
+                      "invalid_payload_or_pagination", "response_size")
+            list_case(Fake(list_reply={endpoint: packet([])}),
+                      "invalid_payload_or_pagination", "pagination_missing")
+            list_case(Fake(list_reply={endpoint: packet(None, {})}),
+                      "invalid_payload_or_pagination", "invalid_result")
+            list_case(Fake(list_reply={endpoint: packet({}, {})}),
+                      "invalid_payload_or_pagination", "invalid_result")
+            list_case(Fake(list_reply={endpoint: packet(["private"], {})}),
+                      "invalid_payload_or_pagination", "nonobject_item")
+            list_case(Fake(list_reply={endpoint: packet([], "not-an-object")}),
+                      "invalid_payload_or_pagination", "pagination_invalid")
+            info = json.loads(wrap([]))["result_info"]
+            for invalid in (
+                {key: value for key, value in info.items() if key != "total_count"},
+                {**info, "total_pages": True},
+                {**info, "total_pages": mail.MAX_PAGES + 1},
+                {**info, "total_pages": 0, "total_count": 1},
+            ):
+                list_case(Fake(list_reply={endpoint: packet([], invalid)}),
+                          "invalid_payload_or_pagination", "pagination_invalid")
+            for name, changed, gate in (
+                ("page", 2, "page_index_mismatch"),
+                ("count", 1, "page_count_mismatch"),
+                ("per_page", 25, "page_size_mismatch"),
+                ("total_count", 1, "total_count_inconsistent"),
+            ):
+                list_case(Fake(list_reply={endpoint: packet([], {**info, name: changed})}),
+                          "invalid_payload_or_pagination", gate)
+            # First failing gate wins: result shape precedes pagination,
+            # required numeric totals precede optional page metadata.
+            list_case(Fake(list_reply={endpoint: packet({}, {"page": 2})}),
+                      "invalid_payload_or_pagination", "invalid_result")
+            list_case(Fake(list_reply={endpoint: packet([], {**info, "total_count": None, "page": 2})}),
+                      "invalid_payload_or_pagination", "pagination_invalid")
+
+            # The full two-page contract is still enforced. A changed total
+            # on page two is a failure, but a consistent 50+1 read completes.
+            valid_item = (
+                {"source": "api", "enabled": True, "actions": [],
+                 "matchers": [{"type": "literal", "field": "to", "value": "m0@" + DOMAIN}]}
+                if step == "rules" else {"email": RECIPIENT, "verified": None}
+            )
+            first_page = packet([valid_item] * mail.PAGE_SIZE, {
+                "page": 1, "per_page": mail.PAGE_SIZE, "count": mail.PAGE_SIZE,
+                "total_pages": 2, "total_count": mail.PAGE_SIZE + 1,
+            })
+            second_page = packet([valid_item], {
+                "page": 2, "per_page": mail.PAGE_SIZE, "count": 1,
+                "total_pages": 2, "total_count": mail.PAGE_SIZE + 1,
+            })
+            complete = Fake(list_pages={endpoint: [first_page, second_page]})
+            complete_result = mail.observe(selected, ENV, complete)
+            assert complete_result["status"] == "READ_OBSERVED"
+            assert complete_result["counts"][count_key] == mail.PAGE_SIZE + 1
+            assert diagnostic_key not in complete_result
+            assert f"{step}_unknown_shape" not in complete_result
+            assert complete.calls.count(endpoint) == 2
+            safe(complete_result)
+            changed_total = json.loads(second_page)
+            changed_total["result_info"]["total_count"] += 1
+            inconsistent_pages = Fake(list_pages={endpoint: [
+                first_page, json.dumps(changed_total).encode(),
+            ]})
+            mismatch = mail.observe(selected, ENV, inconsistent_pages)
+            assert mismatch["read"][step] == "UNKNOWN"
+            assert mismatch[diagnostic_key] == "invalid_payload_or_pagination"
+            assert mismatch[f"{step}_unknown_shape"] == "total_count_inconsistent"
+            assert count_key not in mismatch["counts"]
+            assert inconsistent_pages.calls.count(endpoint) == 2
+            safe(mismatch)
+
+            # A local item validator has its pre-existing distinct reason,
+            # not a payload/pagination gate fabricated by this diagnostic.
             list_case(Fake(overrides={endpoint: [{}]}), shape)
             list_case(Fake(list_unexpected=endpoint), "unclassified")
 
@@ -395,6 +482,7 @@ def main() -> None:
                 denied = mail.observe(selected, ENV, Fake(list_http=(endpoint, refused)))
                 assert denied["read"][step] == "DENIED"
                 assert diagnostic_key not in denied
+                assert f"{step}_unknown_shape" not in denied
                 assert "zone_unknown_reason" not in denied
                 safe(denied)
 
@@ -405,6 +493,7 @@ def main() -> None:
                 assert completed["status"] == "READ_OBSERVED"
                 assert completed["counts"][count_key] == 0
                 assert diagnostic_key not in completed
+                assert f"{step}_unknown_shape" not in completed
                 safe(completed)
             empty_zero_page = json.loads(wrap([]))
             empty_zero_page["result_info"]["total_pages"] = 0
@@ -413,6 +502,7 @@ def main() -> None:
             assert completed["status"] == "READ_OBSERVED"
             assert completed["counts"][count_key] == 0
             assert diagnostic_key not in completed
+            assert f"{step}_unknown_shape" not in completed
             safe(completed)
 
         # Exercise the actual closed stdout path for BOTH step diagnostics,
@@ -432,6 +522,37 @@ def main() -> None:
                     assert mail.main() == 2
                 closed = json.loads(output.getvalue())
                 assert closed[f"{step}_unknown_reason"] == "transport"
+                assert "zone_unknown_reason" not in closed
+                safe(closed)
+            finally:
+                mail.safe_opener = saved_opener
+                os.environ.clear()
+                os.environ.update(saved_env)
+
+        # The actual main()->observe()->_request()->_list() output also
+        # carries ONLY the fixed structural gate, never a raw response.
+        for step, endpoint in (
+            ("rules", f"/zones/{ZONE}/email/routing/rules"),
+            ("addresses", f"/accounts/{ACCOUNT}/email/routing/addresses"),
+        ):
+            saved_opener = mail.safe_opener
+            saved_env = dict(os.environ)
+            missing_info = json.loads(wrap([]))
+            missing_info.pop("result_info")
+            try:
+                mail.safe_opener = lambda endpoint=endpoint: Fake(list_reply={
+                    endpoint: json.dumps(missing_info).encode(),
+                })
+                os.environ.clear()
+                os.environ.update({**ENV, "GITHUB_EVENT_PATH": selected})
+                stream = io.StringIO()
+                with redirect_stdout(stream):
+                    assert mail.main() == 2
+                closed = json.loads(stream.getvalue())
+                assert closed[f"{step}_unknown_reason"] == "invalid_payload_or_pagination"
+                assert closed[f"{step}_unknown_shape"] == "pagination_missing"
+                other = "addresses" if step == "rules" else "rules"
+                assert f"{other}_unknown_shape" not in closed
                 assert "zone_unknown_reason" not in closed
                 safe(closed)
             finally:
