@@ -416,8 +416,6 @@ def main() -> None:
             # The first rejected REQUIRED total is now precise by field and
             # category. These are only closed reason codes, never real values.
             for invalid, gate in (
-                ({key: value for key, value in info.items() if key != "total_pages"},
-                 "total_pages_missing"),
                 ({key: value for key, value in info.items() if key != "total_count"},
                  "total_count_missing"),
                 ({**info, "total_pages": True}, "total_pages_type"),
@@ -436,10 +434,10 @@ def main() -> None:
                 list_case(Fake(list_reply={endpoint: packet([], invalid)}),
                           "invalid_payload_or_pagination", gate)
             # When several fields fail, the FIRST field-specific rejection
-            # wins: pages missing/type/range, then count missing/type/range,
+            # wins: pages type/range, then count missing/type/range,
             # before optional pagination metadata.
             for invalid, first_gate in (
-                ({"total_count": "0", "page": 2}, "total_pages_missing"),
+                ({"total_count": "0", "page": 2}, "total_count_type"),
                 ({**info, "total_pages": True, "total_count": "0"},
                  "total_pages_type"),
                 ({**info, "total_pages": -1, "total_count": None},
@@ -502,6 +500,143 @@ def main() -> None:
             assert count_key not in mismatch["counts"]
             assert inconsistent_pages.calls.count(endpoint) == 2
             safe(mismatch)
+
+            # The optional total_pages compatibility is ONLY for these two
+            # endpoints. Every accepted page has an explicit, stable
+            # total_count and an exact non-final/final item count.
+            def omitted(items: list[dict], total: object, page: int = 1,
+                        fields: tuple[str, ...] = ("page", "count", "per_page"),
+                        extra: dict | None = None) -> bytes:
+                info: dict = {"total_count": total}
+                values = {"page": page, "count": len(items), "per_page": mail.PAGE_SIZE}
+                info.update({key: values[key] for key in fields})
+                info.update(extra or {})
+                return packet(items, info)
+
+            def omitted_case(pages: list[bytes], total: int,
+                             error: str | None = None, calls: int | None = None) -> None:
+                fixture = Fake(list_pages={endpoint: pages})
+                got = mail.observe(selected, ENV, fixture)
+                assert fixture.calls.count(endpoint) == (calls if calls is not None else len(pages))
+                if error is None:
+                    assert got["status"] == "READ_OBSERVED", got
+                    assert got["read"][step] == "OBSERVED"
+                    assert got["counts"][count_key] == total
+                    assert diagnostic_key not in got
+                    assert f"{step}_unknown_shape" not in got
+                else:
+                    assert got["status"] == "INCOMPLETE", got
+                    assert got["read"][step] == "UNKNOWN"
+                    assert got[diagnostic_key] == "invalid_payload_or_pagination"
+                    assert got[f"{step}_unknown_shape"] == error, (got, error)
+                    assert count_key not in got["counts"]
+                assert got["write_authority"] == got["mail_arrival"] == "NOT_PROVEN"
+                safe(got)
+
+            # 0 is accepted only with an explicitly reported zero and [].
+            # Includes 1..50, 51, exact multiples, remainders, and the
+            # existing 100-page budget without a 101st GET.
+            for total in (0, 1, 49, 50, 51, 100, 101, 150, 151,
+                          mail.MAX_PAGES * mail.PAGE_SIZE):
+                page_count = max(1, (total + mail.PAGE_SIZE - 1) // mail.PAGE_SIZE)
+                pages = [
+                    omitted(
+                        [valid_item] * min(mail.PAGE_SIZE, max(0, total - (page - 1) * mail.PAGE_SIZE)),
+                        total, page,
+                    ) for page in range(1, page_count + 1)
+                ]
+                omitted_case(pages, total)
+
+            # All three optional page/count/per_page keys may be absent,
+            # but no metadata shape can silently flip across pages.
+            for total in (0, 1, 51, 100):
+                page_count = max(1, (total + mail.PAGE_SIZE - 1) // mail.PAGE_SIZE)
+                pages = [
+                    omitted(
+                        [valid_item] * min(mail.PAGE_SIZE, max(0, total - (page - 1) * mail.PAGE_SIZE)),
+                        total, page, fields=(),
+                    ) for page in range(1, page_count + 1)
+                ]
+                omitted_case(pages, total)
+
+            for items, info, gate in (
+                ([], {}, "total_count_missing"),
+                ([], {"total_count": True}, "total_count_type"),
+                ([], {"total_count": "0"}, "total_count_type"),
+                ([], {"total_count": None}, "total_count_type"),
+                ([], {"total_count": -1}, "total_count_range"),
+                ([], {"total_count": mail.MAX_PAGES * mail.PAGE_SIZE + 1}, "total_count_range"),
+                ([], {"total_count": 1}, "total_count_inconsistent"),
+                ([valid_item], {"total_count": 0}, "pagination_invalid"),
+                ([valid_item] * 49, {"total_count": 51}, "total_count_inconsistent"),
+                ([], {"total_count": 51}, "total_count_inconsistent"),
+                ([], {"total_count": 0, "page": 2}, "page_index_mismatch"),
+                ([], {"total_count": 0, "page": True}, "page_index_mismatch"),
+                ([], {"total_count": 0, "count": 1}, "page_count_mismatch"),
+                ([], {"total_count": 0, "count": False}, "page_count_mismatch"),
+                ([], {"total_count": 0, "per_page": 25}, "page_size_mismatch"),
+                ([], {"total_count": 0, "per_page": True}, "page_size_mismatch"),
+            ):
+                omitted_case([packet(items, info)], 0, error=gate, calls=1)
+
+            first = omitted([valid_item] * mail.PAGE_SIZE, 51, 1)
+            good_final = omitted([valid_item], 51, 2)
+            # Never accept a changed total, short/overlong final page,
+            # metadata contradiction or mixed total_pages presence.
+            for last, gate in (
+                (omitted([valid_item], 52, 2), "total_count_inconsistent"),
+                (omitted([], 51, 2), "total_count_inconsistent"),
+                (omitted([valid_item] * 2, 51, 2), "total_count_inconsistent"),
+                (omitted([valid_item], 51, 2, extra={"page": 1}), "page_index_mismatch"),
+                (omitted([valid_item], 51, 2, extra={"count": 0}), "page_count_mismatch"),
+                (omitted([valid_item], 51, 2, extra={"per_page": 25}), "page_size_mismatch"),
+                (omitted([valid_item], 51, 2, fields=("page", "per_page")), "pagination_invalid"),
+                (omitted([valid_item], 51, 2, extra={"total_pages": 2}), "pagination_invalid"),
+            ):
+                omitted_case([first, last], 51, error=gate, calls=2)
+            assert good_final
+
+            # Early empty/short middle pages cannot be repaired by a
+            # hypothetical future page: refusal happens before the next GET.
+            first101 = omitted([valid_item] * mail.PAGE_SIZE, 101, 1)
+            for short in (omitted([], 101, 2), omitted([valid_item] * 49, 101, 2)):
+                omitted_case([first101, short], 101,
+                             error="total_count_inconsistent", calls=2)
+            second101 = omitted([valid_item] * mail.PAGE_SIZE, 101, 2)
+            omitted_case([first101, second101, omitted([], 101, 3)], 101,
+                         error="total_count_inconsistent", calls=3)
+
+            # Present first page -> absent later page is a refusal: never
+            # downgrade the original strict mode mid-enumeration.
+            omitted_case([first_page, good_final], 51,
+                         error="total_pages_missing", calls=2)
+
+            # Item validators run on the same reader after full-count proof.
+            list_case(Fake(list_reply={endpoint: omitted([{}], 1)}), shape)
+
+            # main() reads the exact synthetic production path, but prints
+            # only the closed results (never token/account/domain/contact).
+            saved_opener = mail.safe_opener
+            saved_env = dict(os.environ)
+            try:
+                mail.safe_opener = lambda endpoint=endpoint: Fake(list_reply={
+                    endpoint: omitted([], 0),
+                })
+                os.environ.clear()
+                os.environ.update({**ENV, "GITHUB_EVENT_PATH": selected})
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    assert mail.main() == 0
+                closed = json.loads(output.getvalue())
+                assert closed["status"] == "READ_OBSERVED"
+                assert closed["counts"][count_key] == 0
+                assert diagnostic_key not in closed
+                assert f"{step}_unknown_shape" not in closed
+                safe(closed)
+            finally:
+                mail.safe_opener = saved_opener
+                os.environ.clear()
+                os.environ.update(saved_env)
 
             # Same first-rejection contract applies on subsequent pages, not
             # merely the initial empty-list fixture. It changes no GET count.
@@ -619,7 +754,7 @@ def main() -> None:
                 os.environ.update(saved_env)
 
         # The actual main()->observe()->_list() PUBLIC JSON distinguishes
-        # all six new required-field conditions for both list endpoints.
+        # the remaining strict invalid-total conditions for both list endpoints.
         # This does not access a live provider or reveal a numeric value.
         for step, endpoint in (
             ("rules", f"/zones/{ZONE}/email/routing/rules"),
@@ -627,8 +762,6 @@ def main() -> None:
         ):
             basic = json.loads(wrap([]))["result_info"]
             for info_value, gate in (
-                ({key: value for key, value in basic.items() if key != "total_pages"},
-                 "total_pages_missing"),
                 ({**basic, "total_pages": True}, "total_pages_type"),
                 ({**basic, "total_pages": -1}, "total_pages_range"),
                 ({key: value for key, value in basic.items() if key != "total_count"},
