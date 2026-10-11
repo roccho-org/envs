@@ -91,6 +91,7 @@ jobs:
         env:
           APP_SHA: ${{ steps.select.outputs.app_sha }}
           GH_TOKEN: ${{ github.token }}
+          SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt
         run: '"$ENVS_EFFECT_BIN/python3" -I adapters/calendar_pages.py verify'
 
       # One Cloudflare effect step: the existing Environment's token and
@@ -100,4 +101,5 @@ jobs:
           APP_SHA: ${{ steps.select.outputs.app_sha }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt
         run: '"$ENVS_EFFECT_BIN/python3" -I adapters/calendar_pages.py deploy'
