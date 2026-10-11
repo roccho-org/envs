@@ -141,7 +141,7 @@ class Fake:
         if path == f"/zones/{ZONE}/email/routing/rules":
             return Response(wrap([{
                 "source": "wrangler", "enabled": True,
-                "actions": [{"value": [RECIPIENT]}],
+                "actions": [{"type": "forward", "value": [RECIPIENT]}],
                 "matchers": [{"type": "literal", "field": "to", "value": "m0@" + DOMAIN}],
             }]))
         if path == f"/zones/{ZONE}/email/routing/rules/catch_all":
@@ -222,7 +222,162 @@ def main() -> None:
         assert answer["facts"]["token_active"] is True
         assert answer["facts"]["routing_ready"] is True and answer["facts"]["catch_all_enabled"] is False
         assert answer["counts"]["verified_destinations"] == 1
+        assert "rules_unknown_gate" not in answer
         safe(answer)
+
+        # Actual production read_rules validator, via existing Fake GET-only
+        # _request/_list/observe path; no second parser or provider action.
+        rules_endpoint = f"/zones/{ZONE}/email/routing/rules"
+
+        def valid_rule(source: str = "api") -> dict:
+            return {"enabled": True, "source": source,
+                    "actions": [{"type": "forward", "value": [RECIPIENT]}],
+                    "matchers": [{"type": "literal", "field": "to", "value": "m0@" + DOMAIN}]}
+
+        def with_matcher(matcher: object) -> dict:
+            return {**valid_rule(), "matchers": [matcher]}
+
+        def rule_ok(rows: list[dict], wrangler: int = 0) -> None:
+            mock = Fake(overrides={rules_endpoint: rows})
+            got = mail.observe(selected, ENV, mock)
+            assert got["status"] == "READ_OBSERVED", got
+            assert got["read"]["rules"] == "OBSERVED"
+            assert got["counts"]["rules"] == len(rows)
+            assert got["counts"]["enabled_rules"] == len(rows)
+            assert got["counts"]["wrangler_rules"] == wrangler
+            assert "rules_unknown_reason" not in got
+            assert "rules_unknown_shape" not in got
+            assert "rules_unknown_gate" not in got
+            assert got["write_authority"] == got["mail_arrival"] == "NOT_PROVEN"
+            assert mock.calls.count(rules_endpoint) == 1
+            safe(got)
+
+        def rule_red(row: dict, gate: str) -> None:
+            mock = Fake(overrides={rules_endpoint: [row]})
+            got = mail.observe(selected, ENV, mock)
+            assert got["status"] == "INCOMPLETE", got
+            assert got["read"]["rules"] == "UNKNOWN"
+            assert got["rules_unknown_reason"] == "rule_item_shape"
+            assert got["rules_unknown_gate"] == gate, (gate, got)
+            assert gate in mail.RULE_ITEM_GATES
+            assert "rules_unknown_shape" not in got
+            assert all(key not in got["counts"] for key in
+                       ("rules", "enabled_rules", "wrangler_rules"))
+            assert got["read"]["zone"] == got["read"]["addresses"] == "OBSERVED"
+            assert got["counts"]["account_destinations"] == 1
+            assert "addresses_unknown_reason" not in got
+            assert "zone_unknown_reason" not in got
+            assert mock.calls.count(rules_endpoint) == 1
+            assert got["write_authority"] == got["mail_arrival"] == "NOT_PROVEN"
+            safe(got)
+
+        # Native type=all needs no matcher field/value. Proven source api
+        # vs wrangler remains distinct; no absent source defaults to api.
+        rule_ok([with_matcher({"type": "all"})])
+        rule_ok([valid_rule(), with_matcher({"type": "all"})])
+        rule_ok([valid_rule("wrangler"), with_matcher({"type": "all"})], wrangler=1)
+        rule_ok([with_matcher({"type": "all", "field": "to"})])
+        rule_ok([with_matcher({"type": "all", "value": "m0@" + DOMAIN})])
+        # Official all.value is optional string with maxLength=90 and NO minLength.
+        rule_ok([with_matcher({"type": "all", "value": ""})])
+        rule_ok([with_matcher({"type": "all", "value": " "})])
+        rule_ok([with_matcher({"type": "all", "value": "x" * 90})])
+        rule_ok([with_matcher({"type": "all", "field": "to", "value": ""})])
+        rule_ok([{"enabled": True, "source": "api",
+                 "actions": [{"type": "drop"}], "matchers": [{"type": "all"}]}])
+
+        # Invalid combinations prove the FIRST gate in ordered production
+        # path: enabled -> source -> actions -> matchers -> type -> field -> value.
+        for row, gate in (
+            ({**valid_rule(), "enabled": "false", "source": "unknown"}, "enabled_unknown"),
+            ({k: v for k, v in valid_rule().items() if k != "enabled"}, "enabled_unknown"),
+            ({k: v for k, v in valid_rule().items() if k != "source"}, "source_unknown"),
+            ({**valid_rule(), "source": "other", "actions": []}, "source_unknown"),
+            ({**valid_rule(), "source": None}, "source_unknown"),
+            ({k: v for k, v in valid_rule().items() if k != "actions"}, "actions_unknown"),
+            ({**valid_rule(), "actions": []}, "actions_unknown"),
+            ({**valid_rule(), "actions": [{"value": [RECIPIENT]}]}, "actions_unknown"),
+            ({**valid_rule(), "actions": [{"type": "redirect"}]}, "actions_unknown"),
+            ({**valid_rule(), "actions": [{"type": "forward"}]}, "actions_unknown"),
+            ({**valid_rule(), "actions": [{"type": "worker", "value": [None]}]}, "actions_unknown"),
+            ({k: v for k, v in valid_rule().items() if k != "matchers"}, "matchers_unknown"),
+            ({**valid_rule(), "matchers": []}, "matchers_unknown"),
+            ({**valid_rule(), "matchers": [None]}, "matchers_unknown"),
+            (with_matcher({}), "matcher_type_invalid"),
+            (with_matcher({"type": "regex"}), "matcher_type_invalid"),
+            (with_matcher({"type": True}), "matcher_type_invalid"),
+            (with_matcher({"type": "literal"}), "matcher_field_invalid"),
+            (with_matcher({"type": "literal", "field": "from", "value": RECIPIENT}),
+             "matcher_field_invalid"),
+            (with_matcher({"type": "all", "field": "from"}), "matcher_field_invalid"),
+            (with_matcher({"type": "literal", "field": "to"}), "matcher_value_invalid"),
+            (with_matcher({"type": "literal", "field": "to", "value": ""}), "matcher_value_invalid"),
+            (with_matcher({"type": "literal", "field": "to", "value": "  "}), "matcher_value_invalid"),
+            (with_matcher({"type": "literal", "field": "to", "value": False}), "matcher_value_invalid"),
+            (with_matcher({"type": "all", "value": None}), "matcher_value_invalid"),
+            (with_matcher({"type": "all", "value": False}), "matcher_value_invalid"),
+            (with_matcher({"type": "all", "value": []}), "matcher_value_invalid"),
+            (with_matcher({"type": "all", "value": "x" * 91}), "matcher_value_invalid"),
+            (with_matcher({"type": "literal", "field": "to", "value": "x" * 90 + " "}),
+             "matcher_value_invalid"),
+            (with_matcher({"type": "literal", "field": "to", "value": "a" * 91}),
+             "matcher_value_invalid"),
+        ):
+            rule_red(row, gate)
+
+        # Complete 51-item list: a single invalid LAST item yields no
+        # rejected-list counts even when page 1 was valid.
+        def paged_rule_packet(rows: list[dict], page: int) -> bytes:
+            return json.dumps({
+                "success": True, "result": rows,
+                "result_info": {"page": page, "count": len(rows), "per_page": 50,
+                                "total_count": 51, "total_pages": 2},
+            }).encode()
+
+        mock = Fake(list_pages={rules_endpoint: [
+            paged_rule_packet([valid_rule()] * 50, 1),
+            paged_rule_packet([with_matcher({"type": "literal"})], 2),
+        ]})
+        got = mail.observe(selected, ENV, mock)
+        assert got["read"]["rules"] == "UNKNOWN"
+        assert got["rules_unknown_reason"] == "rule_item_shape"
+        assert got["rules_unknown_gate"] == "matcher_field_invalid"
+        assert all(key not in got["counts"] for key in
+                   ("rules", "enabled_rules", "wrangler_rules"))
+        assert mock.calls.count(rules_endpoint) == 2
+        safe(got)
+
+        # An explicit denial or a pagination/envelope failure cannot carry
+        # a rule-item diagnostic gate.
+        for fixture in (Fake(list_http=(rules_endpoint, 403)),
+                        Fake(list_reply={rules_endpoint: b'{"success":true,"result":[{}]}' })):
+            got = mail.observe(selected, ENV, fixture)
+            assert got["read"]["rules"] in ("DENIED", "UNKNOWN")
+            assert "rules_unknown_gate" not in got
+            safe(got)
+
+        # Test the actual main() JSON output with the production validator
+        # and an offline opener. No raw matcher/source/recipient is printed.
+        original = mail.safe_opener
+        saved_env = dict(os.environ)
+        try:
+            mail.safe_opener = lambda: Fake(overrides={
+                rules_endpoint: [with_matcher({"type": "literal"})],
+            })
+            os.environ.clear()
+            os.environ.update({**ENV, "GITHUB_EVENT_PATH": selected})
+            output = io.StringIO()
+            with redirect_stdout(output):
+                assert mail.main() == 2
+            closed = json.loads(output.getvalue())
+            assert closed["rules_unknown_reason"] == "rule_item_shape"
+            assert closed["rules_unknown_gate"] == "matcher_field_invalid"
+            assert "rules" not in closed["counts"]
+            safe(closed)
+        finally:
+            mail.safe_opener = original
+            os.environ.clear()
+            os.environ.update(saved_env)
 
         # Domain is an explicit non-secret native workflow selector; it
         # remains excluded from adapter stdout, provider identities and logs.
@@ -468,7 +623,8 @@ def main() -> None:
             # The full two-page contract is still enforced. A changed total
             # on page two is a failure, but a consistent 50+1 read completes.
             valid_item = (
-                {"source": "api", "enabled": True, "actions": [],
+                {"source": "api", "enabled": True,
+                 "actions": [{"type": "forward", "value": [RECIPIENT]}],
                  "matchers": [{"type": "literal", "field": "to", "value": "m0@" + DOMAIN}]}
                 if step == "rules" else {"email": RECIPIENT, "verified": None}
             )

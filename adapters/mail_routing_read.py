@@ -54,8 +54,20 @@ class ReadFailure(Exception):
         self.shape = shape if self.reason == "invalid_payload_or_pagination" and shape in LIST_UNKNOWN_SHAPES else None
 
 
+# Bounded gate names; no item value/source/identifier is emitted.
+RULE_ITEM_GATES = frozenset((
+    "enabled_unknown", "source_unknown", "actions_unknown",
+    "matchers_unknown", "matcher_type_invalid",
+    "matcher_field_invalid", "matcher_value_invalid",
+))
+
+
 class ItemShapeFailure(ReadFailure):
-    """Only the current local rule/address item validator rejected an item."""
+    """A local rules/addresses item failed the ordered schema checks."""
+
+    def __init__(self, gate: str | None = None) -> None:
+        super().__init__()
+        self.gate = gate if gate in RULE_ITEM_GATES else None
 
 
 class DenyRedirect(urllib.request.HTTPRedirectHandler):
@@ -281,6 +293,9 @@ def observe(event_path: str, environ: Mapping[str, str], opener: Opener | None =
                     if reason not in ("transport", "http_other", "invalid_payload_or_pagination", shape):
                         reason = "unclassified"
                     output[f"{step}_unknown_reason"] = reason
+                    if (step == "rules" and reason == "rule_item_shape"
+                            and isinstance(failure, ItemShapeFailure) and failure.gate is not None):
+                        output["rules_unknown_gate"] = failure.gate
                     if (reason == "invalid_payload_or_pagination"
                             and failure.shape in LIST_UNKNOWN_SHAPES):
                         # Exactly one structural gate; never attach to local
@@ -378,15 +393,49 @@ def observe(event_path: str, environ: Mapping[str, str], opener: Opener | None =
         rows = _list(opener, token, f"/zones/{zone_id}/email/routing/rules",
                      allow_missing_total_pages=True)
         for row in rows:
+            # Fixed order of the FIRST rejecting local gate. Read-side
+            # source/provenance must never use the write-side api default.
+            if type(row.get("enabled")) is not bool:
+                raise ItemShapeFailure("enabled_unknown")
+            if row.get("source") not in ("api", "wrangler"):
+                raise ItemShapeFailure("source_unknown")
+            actions = row.get("actions")
+            if not isinstance(actions, list) or not actions:
+                raise ItemShapeFailure("actions_unknown")
+            for action in actions:
+                if (not isinstance(action, dict)
+                        or action.get("type") not in ("drop", "forward", "worker")):
+                    raise ItemShapeFailure("actions_unknown")
+                values = action.get("value")
+                if (values is not None and (
+                        not isinstance(values, list)
+                        or any(not isinstance(v, str) or not v.strip() for v in values)
+                )):
+                    raise ItemShapeFailure("actions_unknown")
+                if action["type"] in ("forward", "worker") and (
+                        not isinstance(values, list) or not values
+                ):
+                    raise ItemShapeFailure("actions_unknown")
             matchers = row.get("matchers")
-            if (type(row.get("enabled")) is not bool
-                    or not isinstance(row.get("source"), str)
-                    or not isinstance(row.get("actions"), list)
-                    or not isinstance(matchers, list) or not matchers
-                    or any(not isinstance(m, dict) or not all(
-                        isinstance(m.get(key), str) and m[key] for key in ("type", "field", "value")
-                    ) for m in matchers)):
-                raise ItemShapeFailure()
+            if (not isinstance(matchers, list) or not matchers
+                    or any(not isinstance(m, dict) for m in matchers)):
+                raise ItemShapeFailure("matchers_unknown")
+            for matcher in matchers:
+                kind = matcher.get("type")
+                if kind not in ("all", "literal"):
+                    raise ItemShapeFailure("matcher_type_invalid")
+                # Native all matcher accepts omitted field/value. Literal
+                # receiver must prove field=to and a nonempty string value.
+                if kind == "literal" or "field" in matcher:
+                    if matcher.get("field") != "to":
+                        raise ItemShapeFailure("matcher_field_invalid")
+                if kind == "literal" or "value" in matcher:
+                    value = matcher.get("value")
+                    # Native all.value is optional string (max 90, no minimum);
+                    # a literal recipient alone requires a nonblank target.
+                    if (not isinstance(value, str) or len(value) > 90
+                            or (kind == "literal" and not value.strip())):
+                        raise ItemShapeFailure("matcher_value_invalid")
         return rows
 
     rules = check("rules", read_rules)
