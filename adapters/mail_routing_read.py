@@ -135,9 +135,12 @@ def _request(opener: Opener, token: str, path: str, params: Mapping[str, object]
 
 
 def _list(opener: Opener, token: str, path: str,
-          params: Mapping[str, object] | None = None) -> list[dict[str, Any]]:
+          params: Mapping[str, object] | None = None, *,
+          allow_missing_total_pages: bool = False) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     expected_total: int | None = None
+    omitted_pages: bool | None = None
+    omitted_optional_keys: frozenset[str] | None = None
     for page in range(1, MAX_PAGES + 1):
         args = {**(params or {}), "page": page, "per_page": PAGE_SIZE}
         payload = _request(opener, token, path, args)
@@ -155,17 +158,25 @@ def _list(opener: Opener, token: str, path: str,
             raise ReadFailure(shape="pagination_missing")
         if not isinstance(info, dict):
             raise ReadFailure(shape="pagination_invalid")
-        # First failing REQUIRED total wins in this fixed order. An omitted
-        # Cloudflare-optional field still violates this client's strict local
-        # completeness contract; the diagnostic describes OUR rejection only.
-        # No numeric value, request/response fragment or identifier escapes.
-        if "total_pages" not in info:
+        # Existing strict total_pages-present behavior is unchanged for all
+        # callers. Only rules/addresses opt into the Cloudflare-optional
+        # total_pages compatibility path; this does NOT waive full enumeration.
+        missing_pages = "total_pages" not in info
+        if missing_pages and not allow_missing_total_pages:
             raise ReadFailure(shape="total_pages_missing")
-        total_pages = info["total_pages"]
-        if type(total_pages) is not int:  # bool is not an integer total
-            raise ReadFailure(shape="total_pages_type")
-        if total_pages < 0 or total_pages > MAX_PAGES:
-            raise ReadFailure(shape="total_pages_range")
+        if allow_missing_total_pages:
+            if omitted_pages is None:
+                omitted_pages = missing_pages
+            elif omitted_pages != missing_pages:
+                # Do not silently switch modes and discard a previous-page
+                # completeness check if metadata appears/disappears.
+                raise ReadFailure(shape="pagination_invalid" if omitted_pages else "total_pages_missing")
+        if not missing_pages:
+            total_pages = info["total_pages"]
+            if type(total_pages) is not int:  # bool is not an integer total
+                raise ReadFailure(shape="total_pages_type")
+            if total_pages < 0 or total_pages > MAX_PAGES:
+                raise ReadFailure(shape="total_pages_range")
         if "total_count" not in info:
             raise ReadFailure(shape="total_count_missing")
         total_count = info["total_count"]
@@ -173,18 +184,46 @@ def _list(opener: Opener, token: str, path: str,
             raise ReadFailure(shape="total_count_type")
         if total_count < 0 or total_count > MAX_PAGES * PAGE_SIZE:
             raise ReadFailure(shape="total_count_range")
-        if info.get("page", page) != page:
-            raise ReadFailure(shape="page_index_mismatch")
-        if info.get("count", len(batch)) != len(batch):
-            raise ReadFailure(shape="page_count_mismatch")
-        if info.get("per_page", PAGE_SIZE) != PAGE_SIZE:
-            raise ReadFailure(shape="page_size_mismatch")
-        # Cloudflare may express an empty paginated list as total_pages=0
-        # or 1. Both mean zero matches, not a malformed response.
+        if missing_pages:
+            # A full non-final page and exactly sized final page are necessary
+            # even when Cloudflare omits total_pages. No short first-page or
+            # early-empty heuristic is sufficient to prove completeness.
+            total_pages = (total_count + PAGE_SIZE - 1) // PAGE_SIZE
+            if total_pages > MAX_PAGES:
+                raise ReadFailure(shape="total_count_range")
+            keys = frozenset(k for k in ("page", "count", "per_page") if k in info)
+            if omitted_optional_keys is None:
+                omitted_optional_keys = keys
+            elif keys != omitted_optional_keys:
+                raise ReadFailure(shape="pagination_invalid")
+            # Bool/float equal to an integer is not valid metadata.
+            for key, expected, shape in (
+                ("page", page, "page_index_mismatch"),
+                ("count", len(batch), "page_count_mismatch"),
+                ("per_page", PAGE_SIZE, "page_size_mismatch"),
+            ):
+                if key in info and (type(info[key]) is not int or info[key] != expected):
+                    raise ReadFailure(shape=shape)
+        else:
+            # Retain the previous strict total_pages-present acceptance path.
+            if info.get("page", page) != page:
+                raise ReadFailure(shape="page_index_mismatch")
+            if info.get("count", len(batch)) != len(batch):
+                raise ReadFailure(shape="page_count_mismatch")
+            if info.get("per_page", PAGE_SIZE) != PAGE_SIZE:
+                raise ReadFailure(shape="page_size_mismatch")
+        # Cloudflare may express an empty list as total_pages=0 or 1.
+        # For omitted total_pages, a proven total_count=0 and actual [] is
+        # the only legal zero; nothing is inferred from an empty first page.
         if page == 1 and total_count == 0 and total_pages == 0 and not batch:
             return []
         if total_pages == 0:
             raise ReadFailure(shape="pagination_invalid")
+        if missing_pages:
+            remaining = total_count - (page - 1) * PAGE_SIZE
+            required = min(PAGE_SIZE, remaining)
+            if required <= 0 or len(batch) != required:
+                raise ReadFailure(shape="total_count_inconsistent")
         if expected_total is not None and total_count != expected_total:
             raise ReadFailure(shape="total_count_inconsistent")
         expected_total = total_count
@@ -336,7 +375,8 @@ def observe(event_path: str, environ: Mapping[str, str], opener: Opener | None =
         output["counts"]["routing_dns_records"] = len(routing_dns)
 
     def read_rules() -> list[dict[str, Any]]:
-        rows = _list(opener, token, f"/zones/{zone_id}/email/routing/rules")
+        rows = _list(opener, token, f"/zones/{zone_id}/email/routing/rules",
+                     allow_missing_total_pages=True)
         for row in rows:
             matchers = row.get("matchers")
             if (type(row.get("enabled")) is not bool
@@ -366,7 +406,8 @@ def observe(event_path: str, environ: Mapping[str, str], opener: Opener | None =
         output["facts"]["catch_all_enabled"] = catch["enabled"]
 
     def read_addresses() -> list[dict[str, Any]]:
-        rows = _list(opener, token, f"/accounts/{account}/email/routing/addresses")
+        rows = _list(opener, token, f"/accounts/{account}/email/routing/addresses",
+                     allow_missing_total_pages=True)
         for row in rows:
             value = row.get("verified", ...)
             if (not isinstance(row.get("email"), str) or not row["email"]
