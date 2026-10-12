@@ -23,6 +23,7 @@ REQUIRED_FILES = {
     ".github/workflows/probe-dev-rent-state.yml",
     ".github/workflows/probe-dev-linode-read.yml",
     ".github/workflows/probe-dev-mail-routing.yml",
+    ".github/workflows/operate-dev-mail-routing.yml",
     ".github/workflows/deploy-calendar-pages.yml",
     ".gitignore",
     "LICENSE_POLICY.md",
@@ -32,6 +33,7 @@ REQUIRED_FILES = {
     "adapters/jev_api.py",
     "adapters/calendar_pages.py",
     "adapters/mail_routing_read.py",
+    "adapters/mail_routing_root.py",
     "adapters/place.ps1",
     "adapters/rent-receive.sh",
     "checks/repository.py",
@@ -41,6 +43,7 @@ REQUIRED_FILES = {
     "checks/test_rent_state_proof.py",
     "checks/test_linode_read_probe.py",
     "checks/test_mail_routing_read.py",
+    "checks/test_mail_routing_root.py",
     "checks/test_rent_tunnel.py",
     "checks/test_repository.py",
     "contracts/bindings.jsonl",
@@ -511,12 +514,89 @@ def check_author_targets(text: str, targets: dict[str, set[tuple[str, str]]]) ->
             "author target is selected or called outside its step")
 
 
+def check_manual_mail_inactive(root: Path, source: str, canonical: str) -> None:
+    """The Mail candidate must refuse before an Environment or any child."""
+    require(source.startswith("name: operate-dev-mail-routing\n")
+            and "\non:\n" in source
+            and source.count("\non:") == 1,
+            "Mail manual entry must be workflow_dispatch only")
+    require("      expected_source_sha:\n" in source and "        required: true\n" in source,
+            "Mail candidate must name a required source SHA")
+    # Admit this exact S1 manual event+input shape only. Remove harmless
+    # whole-line comments/blank lines so prose does not become a false alarm.
+    # Unlike a blacklist, this rejects schedule, repository_dispatch, etc.
+    significant = [line.rstrip() for line in source.splitlines()
+                   if line.strip() and not line.lstrip().startswith("#")]
+    require(significant.count("on:") == 1 and significant.count("permissions:") == 1
+            and significant.index("on:") < significant.index("permissions:"),
+            "Mail candidate requires single on and permissions blocks")
+    trigger = significant[significant.index("on:") + 1:significant.index("permissions:")]
+    require(trigger == [
+        "  workflow_dispatch:",
+        "    inputs:",
+        "      expected_source_sha:",
+        "        description: Exact canonical source SHA (never a private account, mailbox, plan or key)",
+        "        type: string",
+        "        required: true",
+    ], "Mail candidate must admit only the one manual event and its source input")
+    job = source[source.find("\njobs:\n"):]
+    require(re.findall(r"(?m)^  ([a-z0-9-]+):\s*$", job) == ["operate"],
+            "Mail candidate must have one and only one job")
+    gate = "    if: ${{ false && github.repository == 'roccho-org/envs' && github.ref_name == 'proposals' && github.sha == inputs.expected_source_sha && github.run_attempt == 1 && github.actor == 'roccho-dev' && github.actor_id == '40359643' && github.triggering_actor == 'roccho-dev' }}"
+    require(source.count(gate) == 1 and source.count("\n    if:") == 1,
+            "Mail job must be hard-inactive and source/controller-bound")
+    require(-1 < source.find(gate) < source.find("    environment: dev-rent-tunnel\n")
+            < source.find("    steps:\n"),
+            "Mail job must fail before Environment resolution or child execution")
+    require(source.count("    environment:") == 1 and "environment: ${{" not in source,
+            "Mail Environment must remain the one existing rent slot")
+    require(source.count("    runs-on: ubuntu-24.04\n") == 1
+            and "    timeout-minutes: 10\n" in source,
+            "Mail candidate job must be finite and fixed")
+    # GitHub job-level permissions override workflow-level defaults. Require
+    # the whole noncommented permission map and reject any job override.
+    headers = [line for line in significant if re.match(r"^\s*permissions\s*:", line)]
+    require(headers == ["permissions:"],
+            "Mail candidate must have no job-level permission override")
+    require("concurrency:" in significant
+            and significant.index("permissions:") < significant.index("concurrency:")
+            and significant[significant.index("permissions:"):significant.index("concurrency:")] == [
+                "permissions:", "  actions: read", "  contents: read",
+            ], "Mail candidate may only grant effective actions/contents read")
+    require("  cancel-in-progress: false\n" in source,
+            "Mail candidate must not auto-cancel and replay")
+    require(not INPUT_REFERENCE.findall(source)
+            and "secrets." not in source and "vars." not in source
+            and "R2_PARENT_" not in source and "TF_ENCRYPTION" not in source,
+            "Mail candidate must not read or map any protected input")
+    require(consumer_run(source, "operate-dev-mail-routing.yml") == canonical,
+            "Mail candidate must use the existing exact-SHA artifact consumer")
+    require({action for action, _ in ACTION_USE.findall(source)} == EFFECT_ACTIONS,
+            "Mail candidate must use only pinned checkout")
+    require("          ref: ${{ github.sha }}\n" in source
+            and "          persist-credentials: false\n" in source,
+            "Mail candidate checkout must be source-bound without retained auth")
+    require(run_commands(source.replace(canonical, "")) == [
+        TOOLCHAIN_IDENTITY, '"$ENVS_EFFECT_BIN/mail-routing-root"',
+    ], "Mail candidate can run only artifact identity then inactive entry")
+    require(source.count("      - name: ") == 4,
+            "Mail candidate must not add pre-refusal children")
+    adapter_source = (root / "adapters/mail_routing_root.py").read_text(encoding="utf-8")
+    require("EXIT_INACTIVE = 78\n" in adapter_source
+            and "    return EXIT_INACTIVE\n" in adapter_source
+            and "CLOSED_RESULT =" in adapter_source,
+            "Mail root adapter must independently refuse")
+    require("import os" not in adapter_source
+            and "import subprocess" not in adapter_source
+            and "open(" not in adapter_source and "os.environ" not in adapter_source,
+            "Mail root adapter must not access protected inputs or children")
+
 def check_workflows(root: Path, environments: dict[str, dict[str, Any]],
                     author_targets: dict[str, set[tuple[str, str]]], adapter) -> None:
     workflow_root = root / ".github/workflows"
     names = {path.name for path in workflow_root.iterdir() if path.is_file()}
     require(
-        names == {"check.yml", "jev-issue-comment.yml", "deploy-calendar-pages.yml", *EFFECT_WORKFLOWS},
+        names == {"check.yml", "jev-issue-comment.yml", "deploy-calendar-pages.yml", "operate-dev-mail-routing.yml", *EFFECT_WORKFLOWS},
         f"workflow set differs: {sorted(names)}",
     )
     texts = {path.name: path.read_text(encoding="utf-8") for path in workflow_root.iterdir() if path.is_file()}
@@ -549,12 +629,18 @@ def check_workflows(root: Path, environments: dict[str, dict[str, Any]],
     require("run: python3 checks/test_rent_state_proof.py\n" in check, "check workflow must test the state proof adapter")
     require("run: python3 checks/test_linode_read_probe.py\n" in check, "check workflow must test the Linode read probe")
     require("run: python3 checks/test_mail_routing_read.py\n" in check, "check must run Mail GET-only/redaction selftest")
+    require("run: python3 checks/test_mail_routing_root.py\n" in check,
+            "check must test direct Mail hard-inactive source entry")
     require(TOOLCHAIN_BUILD in check, "check workflow must reconstruct the effect toolchain")
     require(f'{TOOLCHAIN_BIN}envs-effect" toolchain' in check, "check workflow must execute the effect entry")
     require(f'{TOOLCHAIN_BIN}python3" -I checks/test_jev_api.py' in check,
             "check workflow must test the adapter on the toolchain interpreter")
     require(f'{TOOLCHAIN_BIN}python3" -I checks/test_mail_routing_read.py' in check,
             "check must test Mail adapter on the pinned toolchain interpreter")
+    require(f'{TOOLCHAIN_BIN}python3" -I checks/test_mail_routing_root.py' in check,
+            "check must test Mail refusal on provided Python")
+    require(f'{TOOLCHAIN_BIN}mail-routing-root' in check and 'test "$code" -eq 78' in check,
+            "check must execute and reject the actual provided Mail root wrapper")
     require('nix flake lock "$relock"' in check and 'cmp flake.lock "$relock/flake.lock"' in check,
             "check workflow must prove Nix regenerates the committed lock")
     for tool in ("python3", "sops", "git", "gh", "wrangler"):
@@ -603,6 +689,7 @@ def check_workflows(root: Path, environments: dict[str, dict[str, Any]],
     for token in ("actions/checkout", "nix ", "install-nix"):
         require(token not in clean_start, f"clean-start must not use {token.strip()}")
     canonical = consumer_run(clean_start, "check.yml clean-start")
+    check_manual_mail_inactive(root, texts["operate-dev-mail-routing.yml"], canonical)
     require(clean_start.count(canonical) == 2, "clean-start must run the canonical consumer and its missing case")
     for marker in CONSUMER_BINDING:
         require(marker in canonical, f"consumer must bind the named commit: {marker}")
@@ -846,8 +933,10 @@ def check_toolchain(root: Path, adapter) -> None:
     require('exec ${tools.python3} -I ${self}/adapters/jev_api.py "$@"' in flake, "flake entry must run only the adapter")
     require('exec ${tools.python3} -I ${self}/adapters/mail_routing_read.py' in flake,
             "Mail read must use the exact pinned interpreter/source")
-    require('paths = [ entry contract-projection mail-routing-read ] ++ packages;' in flake,
-            "Mail read must be included in the same artifact closure")
+    require('exec ${tools.python3} -I ${self}/adapters/mail_routing_root.py' in flake,
+            "Mail root must use the same source-bound pinned Python")
+    require('paths = [ entry contract-projection mail-routing-read mail-routing-root ] ++ packages;' in flake,
+            "Mail read and inactive root must be in the same provided closure")
     require("closureInfo { rootPaths = [ effect-toolchain ]; }" in flake and "echo ${effect-toolchain}/bin/envs-effect > ENTRY" in flake,
             "flake artifact must carry the whole entry closure and its ENTRY")
     require('rev = self.rev or (throw "' in flake and "echo ${rev} > SOURCE" in flake and "ENTRY SOURCE $(cat" in flake

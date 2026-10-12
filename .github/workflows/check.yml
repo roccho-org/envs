@@ -54,6 +54,9 @@ jobs:
       - name: Test credential-safe Mail Routing read probe
         run: python3 checks/test_mail_routing_read.py
 
+      - name: Test hard-inactive Mail M0 manual source and direct entry
+        run: python3 checks/test_mail_routing_root.py
+
       - name: Test bounded calendar Pages upload gates
         run: python3 checks/test_calendar_pages.py
 
@@ -820,6 +823,22 @@ jobs:
 
       - name: Test Mail read probe with the provided Python
         run: '"$RUNNER_TEMP/envs-effect/bin/python3" -I checks/test_mail_routing_read.py'
+
+      - name: Test hard-inactive Mail root on pinned interpreter
+        run: '"$RUNNER_TEMP/envs-effect/bin/python3" -I checks/test_mail_routing_root.py'
+
+      - name: Prove the actual source-bound Mail root wrapper refuses
+        run: |
+          set -euo pipefail
+          if "$RUNNER_TEMP/envs-effect/bin/mail-routing-root" >"$RUNNER_TEMP/mail-root.out" 2>"$RUNNER_TEMP/mail-root.err"; then
+            echo "Mail root unexpectedly activated" >&2
+            exit 1
+          else
+            code=$?
+          fi
+          test "$code" -eq 78
+          test "$(cat "$RUNNER_TEMP/mail-root.out")" = '{"kind":"envs.mailM0.manual.v1","status":"INACTIVE","effect":"NOT_RUN"}'
+          test ! -s "$RUNNER_TEMP/mail-root.err"
 
       # The locked closure sops encrypts and decrypts for real; check-only age makes throwaway identities in a temp dir.
       # The closure tofu applies an encrypted schema-only fixture root whose real output reaches the production sealer.
