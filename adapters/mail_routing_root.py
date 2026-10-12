@@ -145,12 +145,40 @@ def native_bin(value: str, tool: str, selected: NativeToolset) -> str:
 
 
 def private_path(path: Path) -> str:
-    # Absolute paths under Owner-owned protected storage only. This check
-    # does not assert custody or approval; those require real Owner/R proof.
-    name = str(path)
-    if (not path.is_absolute() or str(path) in ("/", "/tmp", "/nix/store")
-            or "\n" in name or "\r" in name or "\0" in name):
+    """Reject public descriptors, unsafe top-level outputs and symlink escapes.
+
+    A valid path is still NOT a proof of actual private owner custody, mode,
+    encryption, or fixed-R access; those stay future live-admission gates.
+    """
+    if not isinstance(path, Path):
         raise NativeSourceHold("PRIVATE_PATH_NOT_SELECTED")
+    name = str(path)
+    if (not path.is_absolute() or path == Path("/") or ".." in path.parts
+            or any(x in name for x in ("\n", "\r", "\0"))):
+        raise NativeSourceHold("PRIVATE_PATH_NOT_SELECTED")
+    try:
+        resolved = path.resolve(strict=False)
+        forbidden = (Path("/dev"), Path("/proc"), Path("/sys"),
+                     Path("/run"), Path("/nix/store"))
+        if (any(path == prefix or prefix in path.parents
+                or resolved == prefix or prefix in resolved.parents for prefix in forbidden)
+                or path.parent in (Path("/tmp"), Path("/var/tmp"), Path("/dev/shm"))
+                or any(part.is_symlink() for part in (path, *path.parents))):
+            raise NativeSourceHold("PRIVATE_PATH_NOT_SELECTED")
+        if path.exists() and not (path.is_file() or path.is_dir()):
+            raise NativeSourceHold("PRIVATE_PATH_NOT_SELECTED")
+    except (OSError, RuntimeError):
+        raise NativeSourceHold("PRIVATE_PATH_NOT_SELECTED") from None
+    return name
+
+
+def private_output_sink(path: Path) -> str:
+    name = private_path(path)
+    try:
+        if path.exists() and not path.is_file():
+            raise NativeSourceHold("PRIVATE_OUTPUT_NOT_PRIVATE")
+    except OSError:
+        raise NativeSourceHold("PRIVATE_OUTPUT_NOT_PRIVATE") from None
     return name
 
 
@@ -158,6 +186,11 @@ def private_path(path: Path) -> str:
 class NativeCommand:
     argv: tuple[str, ...]
     stdin: bytes | None = field(default=None, repr=False)
+    # SOURCE contract to the future, separately admitted Owner runner:
+    # neither child output stream may be inherited or copied to Actions logs.
+    # This is a necessary typed interface, not proof such a runner exists.
+    private_stdout: str | None = field(default=None, repr=False)
+    private_stderr: str | None = field(default=None, repr=False)
 
 
 def native_init(tofu: str, root: Path, private_backend: Path, tools: NativeToolset) -> NativeCommand:
@@ -174,12 +207,26 @@ def native_plan(tofu: str, root: Path, original: Path, tools: NativeToolset) -> 
                           "plan", "-input=false", "-lock=true", "-out=" + private_path(original)))
 
 
-def native_inspect(tofu: str, root: Path, private_original: Path, tools: NativeToolset) -> NativeCommand:
-    # tofu show -json can reveal sensitive values. The stdout belongs solely
-    # to Owner/R protected private review, NEVER public CI/PR/Actions artifacts.
+def native_inspect(tofu: str, root: Path, private_original: Path,
+                   private_review_json: Path, private_stdout: Path,
+                   private_stderr: Path, tools: NativeToolset) -> NativeCommand:
+    """Never send the JSON (including sensitive values) to child stdout.
+
+    OpenTofu 1.12's native -json-into writes machine-readable output directly
+    to an Owner-chosen private file; human-readable stdout AND stderr still
+    require separate private capture by a future authorized runner. No such
+    runtime is selected, implemented or activated in this SOURCE candidate.
+    """
     verify_native_source(root, OPS_MAIL_COMMIT, OPS_MAIL_TREE)
-    return NativeCommand((native_bin(tofu, "tofu", tools), "-chdir=" + private_path(root),
-                          "show", "-json", "-plan=" + private_path(private_original)))
+    selected = (private_path(private_original), private_output_sink(private_review_json),
+                private_output_sink(private_stdout), private_output_sink(private_stderr))
+    if len(set(selected)) != len(selected):
+        raise NativeSourceHold("PRIVATE_OUTPUT_PATH_OVERLAP")
+    return NativeCommand(
+        (native_bin(tofu, "tofu", tools), "-chdir=" + private_path(root),
+         "show", "-plan=" + selected[0], "-json-into=" + selected[1], "-no-color"),
+        private_stdout=selected[2], private_stderr=selected[3],
+    )
 
 
 def native_apply(tofu: str, root: Path, private_original: Path, tools: NativeToolset) -> NativeCommand:
@@ -217,6 +264,12 @@ def private_r2_object(curl: str, method: str, account: str, bucket: str, key: st
         raise NativeSourceHold("ORIGINAL_ETAG_NOT_OBSERVED")
     if method == "PUT" and etag is not None:
         raise NativeSourceHold("PUT_MUST_BE_WRITE_ONCE")
+    # Validate even an ignored HEAD destination: a purported Owner-private
+    # source/destination/header must never be a public file descriptor.
+    data_path = private_path(source_or_dest)
+    header_path = private_output_sink(headers)
+    if data_path == header_path:
+        raise NativeSourceHold("PRIVATE_OUTPUT_PATH_OVERLAP")
     url = f"https://{account}.r2.cloudflarestorage.com/{bucket}/{key}"
     items = [
         "url = " + _quote(url),
@@ -225,7 +278,7 @@ def private_r2_object(curl: str, method: str, account: str, bucket: str, key: st
         "user = " + _quote(access_id + ":" + access_secret),
         'proto = "=https"', 'noproxy = "*"', 'proxy = ""',
         "silent", 'connect-timeout = "10"', 'max-time = "30"',
-        "dump-header = " + _quote(private_path(headers)),
+        "dump-header = " + _quote(header_path),
     ]
     if session_token is not None:
         items.append("header = " + _quote("x-amz-security-token: " + session_token))
@@ -234,10 +287,10 @@ def private_r2_object(curl: str, method: str, account: str, bucket: str, key: st
         # response body. Native --head mode suppresses body transfer.
         items.append("head")
     if method == "PUT":
-        items.extend(['header = "If-None-Match: *"', "upload-file = " + _quote(private_path(source_or_dest))])
+        items.extend(['header = "If-None-Match: *"', "upload-file = " + _quote(data_path)])
     else:
         items.append("header = " + _quote("If-Match: " + etag))
-        items.append("output = " + _quote(private_path(source_or_dest) if method == "GET" else "/dev/null"))
+        items.append("output = " + _quote(private_output_sink(source_or_dest) if method == "GET" else "/dev/null"))
     return NativeCommand((native_bin(curl, "curl", tools), "-q", "--config", "-"),
                          ("\n".join(items) + "\n").encode("utf-8"))
 
@@ -304,10 +357,17 @@ def inspect_original_once(curl: str, tofu: str, root: Path, account: str,
                           bucket: str, key: str, private_path_to_original: Path,
                           headers: Path, access_id: str, access_secret: str,
                           expected_etag: str, runner: MailPrivateRunner,
-                          tools: NativeToolset) -> None:
+                          tools: NativeToolset, *,
+                          private_review_json: Path, private_stdout: Path,
+                          private_stderr: Path) -> None:
     verify_native_source(root, OPS_MAIL_COMMIT, OPS_MAIL_TREE)
+    # Construct and validate every output sink BEFORE running even the GET.
+    # Owner/R original readback and secure stdout/stderr handling are still
+    # unproved operational requirements, not SOURCE approval booleans.
+    inspect = native_inspect(tofu, root, private_path_to_original,
+                             private_review_json, private_stdout, private_stderr, tools)
     # Owner and fixed R must access the same original via independent
-    # *private* read-only routes. This function does not grant human approval.
+    # private read-only routes; this method does not grant either review.
     command = private_r2_object(curl, "GET", account, bucket, key, private_path_to_original,
                                 headers, access_id, access_secret, expected_etag, tools=tools)
     response = runner(command)
@@ -315,7 +375,9 @@ def inspect_original_once(curl: str, tofu: str, root: Path, account: str,
     if private_etag(response.private_headers) != expected_etag:
         raise NativeSourceHold("ORIGINAL_CHANGED_OR_UNREVIEWED")
     verify_native_source(root, OPS_MAIL_COMMIT, OPS_MAIL_TREE)
-    _require_success(runner(native_inspect(tofu, root, private_path_to_original, tools)))
+    # Any future runner MUST redirect both channels to the selected private
+    # sinks. The real hard-off CLI never calls this SOURCE helper.
+    _require_success(runner(inspect))
 
 
 def apply_same_original_once(curl: str, tofu: str, root: Path, account: str,

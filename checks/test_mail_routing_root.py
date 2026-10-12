@@ -189,19 +189,55 @@ def check_native_source_and_plan() -> None:
                 saved_plan = private / "saved-plan.enc"
                 original = private / "reviewed-original.enc"
                 headers = private / "headers"
+                review_json = private / "review-original.json"
+                captured_stdout = private / "show.stdout"
+                captured_stderr = private / "show.stderr"
 
                 init = mail.native_init(tofu, ops, backend, tools)
                 planned = mail.native_plan(tofu, ops, saved_plan, tools)
-                inspect = mail.native_inspect(tofu, ops, original, tools)
+                inspect = mail.native_inspect(tofu, ops, original, review_json,
+                                              captured_stdout, captured_stderr, tools)
                 apply = mail.native_apply(tofu, ops, original, tools)
                 assert init.argv[2:4] == ("init", "-input=false") and "-lockfile=readonly" in init.argv
                 assert planned.argv[2:4] == ("plan", "-input=false") and "-lock=true" in planned.argv
                 assert planned.argv[-1] == "-out=" + str(saved_plan)
-                assert inspect.argv[-3:] == ("show", "-json", "-plan=" + str(original))
+                assert inspect.argv[-4:] == (
+                    "show", "-plan=" + str(original),
+                    "-json-into=" + str(review_json), "-no-color",
+                )
+                assert "-json" not in inspect.argv
+                assert inspect.private_stdout == str(captured_stdout)
+                assert inspect.private_stderr == str(captured_stderr)
+                assert inspect.private_stdout != inspect.private_stderr
                 assert apply.argv[-4:] == ("apply", "-input=false", "-lock=true", str(original))
                 assert all("--auto-approve" not in x.argv and "-destroy" not in x.argv
                            for x in (init, planned, inspect, apply))
                 assert planned.argv != apply.argv
+                unsafe = (
+                    Path("/dev/stdout"), Path("/dev/stderr"), Path("/dev/stdin"),
+                    Path("/dev/fd/1"), Path("/proc/self/fd/1"),
+                    Path("/proc/self/fd/2"), Path("/dev/null"),
+                    Path("/tmp/owner-plan"), Path("/var/tmp/owner-plan"),
+                )
+                for bad in unsafe:
+                    must_refuse(lambda bad=bad: mail.native_inspect(
+                        tofu, ops, original, bad, captured_stdout, captured_stderr, tools,
+                    ), "unsafe review JSON sink")
+                    must_refuse(lambda bad=bad: mail.native_inspect(
+                        tofu, ops, original, review_json, bad, captured_stderr, tools,
+                    ), "unsafe stdout sink")
+                    must_refuse(lambda bad=bad: mail.native_inspect(
+                        tofu, ops, original, review_json, captured_stdout, bad, tools,
+                    ), "unsafe stderr sink")
+                must_refuse(lambda: mail.native_inspect(
+                    tofu, ops, original, review_json, review_json, captured_stderr, tools,
+                ), "overlapping JSON and stdout")
+                alias = home / "aliased-private-sink"
+                alias.symlink_to("/dev/stdout")
+                must_refuse(lambda: mail.native_inspect(
+                    tofu, ops, original, alias, captured_stdout, captured_stderr, tools,
+                ), "symlink to public stdout")
+                alias.unlink()
                 forged = "/nix/store/" + "0" * 32 + "-unrelated/bin/tofu"
                 for other in (forged, "/usr/bin/tofu", "/tmp/private/bin/tofu",
                               tofu.replace("/bin/tofu", "/bin/curl")):
@@ -232,6 +268,14 @@ def check_native_source_and_plan() -> None:
                 assert b"\nhead\n" in head.stdin  # Native -I, not only -X HEAD.
                 assert b"\nhead\n" not in get.stdin and b"\nhead\n" not in put.stdin
                 assert b'upload-file = ' in put.stdin and b'output = ' in get.stdin
+                for bad in unsafe:
+                    must_refuse(lambda bad=bad: mail.private_r2_object(
+                        method="GET", source_or_dest=bad, etag=etag, **store,
+                    ), "private GET body into public output")
+                    must_refuse(lambda bad=bad: mail.private_r2_object(
+                        method="PUT", source_or_dest=saved_plan, etag=None,
+                        **{**store, "headers": bad},
+                    ), "private R2 headers into public descriptor")
                 for method in ("HEAD", "GET"):
                     must_refuse(lambda method=method: mail.private_r2_object(
                         method=method, source_or_dest=original, etag=None, **store,
@@ -267,9 +311,34 @@ def check_native_source_and_plan() -> None:
                 assert opaque == etag and len(events) == 3
                 mail.inspect_original_once(curl, tofu, ops, store["account"], store["bucket"],
                     store["key"], original, headers, "fixture-access", "fixture-secret",
-                    opaque, synthetic_runner, tools)
+                    opaque, synthetic_runner, tools,
+                    private_review_json=review_json, private_stdout=captured_stdout,
+                    private_stderr=captured_stderr)
                 assert len(events) == 5
                 assert events[-2].argv[0] == curl and events[-1].argv[2] == "show"
+                assert events[-1].private_stdout == str(captured_stdout)
+                assert events[-1].private_stderr == str(captured_stderr)
+                assert "-json-into=" + str(review_json) in events[-1].argv
+                # Unsafe sinks fail BEFORE any private R2 GET or Runner call.
+                for bad in unsafe:
+                    before = len(events)
+                    must_refuse(lambda bad=bad: mail.inspect_original_once(
+                        curl, tofu, ops, store["account"], store["bucket"], store["key"],
+                        original, headers, "fixture-access", "fixture-secret",
+                        opaque, synthetic_runner, tools,
+                        private_review_json=bad, private_stdout=captured_stdout,
+                        private_stderr=captured_stderr,
+                    ), "unsafe inspection source")
+                    assert len(events) == before
+                before = len(events)
+                must_refuse(lambda: mail.inspect_original_once(
+                    curl, tofu, ops, store["account"], store["bucket"], store["key"],
+                    original, Path("/dev/stderr"), "fixture-access", "fixture-secret",
+                    opaque, synthetic_runner, tools,
+                    private_review_json=review_json, private_stdout=captured_stdout,
+                    private_stderr=captured_stderr,
+                ), "unsafe curl header source")
+                assert len(events) == before
                 mail.apply_same_original_once(curl, tofu, ops, store["account"],
                     store["bucket"], store["key"], original, headers, "fixture-access",
                     "fixture-secret", etag, etag, etag, etag, synthetic_runner, tools)
@@ -284,6 +353,8 @@ def check_native_source_and_plan() -> None:
                         curl, tofu, ops, store["account"], store["bucket"], store["key"],
                         original, headers, "fixture-access", "fixture-secret",
                         etag, synthetic_runner, tools,
+                        private_review_json=review_json, private_stdout=captured_stdout,
+                        private_stderr=captured_stderr,
                     ), "read changed source")
                     must_refuse(lambda: mail.apply_same_original_once(
                         curl, tofu, ops, store["account"], store["bucket"], store["key"],
@@ -359,6 +430,11 @@ def check_provided_native_toolchain() -> None:
             completed = subprocess.run([binary, opt], capture_output=True, text=True,
                                        check=False, timeout=15)
             assert completed.returncode == 0 and mark in completed.stdout
+        # Actual supplied OpenTofu 1.12.3 (help-only) confirms the native
+        # private JSON file option without accessing any plan/state/provider.
+        help_show = subprocess.run([selection.tofu, "show", "-help"],
+                                   capture_output=True, text=True, check=False, timeout=15)
+        assert help_show.returncode == 0 and "-json-into" in help_show.stdout
         class HeaderWithoutBody(http.server.BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.1"
 
