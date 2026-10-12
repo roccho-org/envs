@@ -187,8 +187,9 @@ def check_native_source_and_plan() -> None:
                 assert "fixture-secret" not in " ".join(item.argv)
                 assert b"--auto-approve" not in item.stdin
             assert b"If-None-Match: *" in put.stdin and b"If-Match" not in put.stdin
-            assert b'If-Match: ' + etag.encode() in head.stdin
-            assert b'If-Match: ' + etag.encode() in get.stdin
+            exact_header = ("header = " + mail._quote("If-Match: " + etag)).encode("utf-8")
+            assert exact_header in head.stdin
+            assert exact_header in get.stdin
             assert b'upload-file = ' in put.stdin
             assert b'output = ' in get.stdin
             for method, tag in (("PUT", etag), ("GET", None), ("HEAD", None)):
