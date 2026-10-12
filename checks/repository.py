@@ -516,7 +516,9 @@ def check_author_targets(text: str, targets: dict[str, set[tuple[str, str]]]) ->
 
 def check_manual_mail_inactive(root: Path, source: str, canonical: str) -> None:
     """The Mail candidate must refuse before an Environment or any child."""
-    require(source.startswith("name: operate-dev-mail-routing\n\non:\n  workflow_dispatch:\n"),
+    require(source.startswith("name: operate-dev-mail-routing\n")
+            and "\non:\n  workflow_dispatch:\n" in source
+            and source.count("\non:") == 1,
             "Mail manual entry must be workflow_dispatch only")
     require("      expected_source_sha:\n" in source and "        required: true\n" in source,
             "Mail candidate must name a required source SHA")
