@@ -82,6 +82,28 @@ def main() -> None:
     # M0 candidate: any attempt to activate the manual job, read protected
     # inputs, add a child or bypass the direct root refusal is independently RED.
     manual = ".github/workflows/operate-dev-mail-routing.yml"
+    # All source-level triggers are denied except the one manual dispatch.
+    # Neither an added scheduled/repository event nor job-level write scope may
+    # become a future activation path without an independently reviewed GO.
+    expect_red(replace_text(manual, "on:\n  workflow_dispatch:\n",
+                            "on:\n  workflow_dispatch:\n  schedule:\n    - cron: '0 4 * * *'\n"))
+    expect_red(replace_text(manual, "on:\n  workflow_dispatch:\n",
+                            "on:\n  workflow_dispatch:\n  repository_dispatch:\n"))
+    expect_red(replace_text(manual, "    runs-on: ubuntu-24.04\n",
+                            "    permissions:\n      actions: write\n      contents: read\n    runs-on: ubuntu-24.04\n"))
+    expect_red(replace_text(manual, "    runs-on: ubuntu-24.04\n",
+                            "    permissions:\n      actions: read\n      contents: read\n    runs-on: ubuntu-24.04\n"))
+    expect_red(replace_text(manual, "  contents: read\n\nconcurrency:",
+                            "  contents: read\n  id-token: write\n\nconcurrency:"))
+    commented = copy_root()
+    try:
+        replace_text(manual, "on:\n  workflow_dispatch:\n",
+                     "on:\n  # harmless explanatory comment\n  workflow_dispatch:\n")(commented)
+        replace_text(manual, "permissions:\n  actions: read\n",
+                     "permissions:\n  # harmless explanatory comment\n  actions: read\n")(commented)
+        assert repository.inspect(commented)["status"] == "PASS"
+    finally:
+        shutil.rmtree(commented.parent, ignore_errors=True)
     expect_red(replace_text(manual, "if: ${{ false &&", "if: ${{ true &&"))
     expect_red(replace_text(manual, "environment: dev-rent-tunnel", "environment: dev-projection"))
     expect_red(replace_text(manual,

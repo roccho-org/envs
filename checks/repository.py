@@ -517,14 +517,28 @@ def check_author_targets(text: str, targets: dict[str, set[tuple[str, str]]]) ->
 def check_manual_mail_inactive(root: Path, source: str, canonical: str) -> None:
     """The Mail candidate must refuse before an Environment or any child."""
     require(source.startswith("name: operate-dev-mail-routing\n")
-            and "\non:\n  workflow_dispatch:\n" in source
+            and "\non:\n" in source
             and source.count("\non:") == 1,
             "Mail manual entry must be workflow_dispatch only")
     require("      expected_source_sha:\n" in source and "        required: true\n" in source,
             "Mail candidate must name a required source SHA")
-    require("\n  push:" not in source and "\n  pull_request:" not in source
-            and "\n  workflow_call:" not in source,
-            "Mail candidate must not have any automatic or reusable trigger")
+    # Admit this exact S1 manual event+input shape only. Remove harmless
+    # whole-line comments/blank lines so prose does not become a false alarm.
+    # Unlike a blacklist, this rejects schedule, repository_dispatch, etc.
+    significant = [line.rstrip() for line in source.splitlines()
+                   if line.strip() and not line.lstrip().startswith("#")]
+    require(significant.count("on:") == 1 and significant.count("permissions:") == 1
+            and significant.index("on:") < significant.index("permissions:"),
+            "Mail candidate requires single on and permissions blocks")
+    trigger = significant[significant.index("on:") + 1:significant.index("permissions:")]
+    require(trigger == [
+        "  workflow_dispatch:",
+        "    inputs:",
+        "      expected_source_sha:",
+        "        description: Exact canonical source SHA (never a private account, mailbox, plan or key)",
+        "        type: string",
+        "        required: true",
+    ], "Mail candidate must admit only the one manual event and its source input")
     job = source[source.find("\njobs:\n"):]
     require(re.findall(r"(?m)^  ([a-z0-9-]+):\s*$", job) == ["operate"],
             "Mail candidate must have one and only one job")
@@ -539,9 +553,16 @@ def check_manual_mail_inactive(root: Path, source: str, canonical: str) -> None:
     require(source.count("    runs-on: ubuntu-24.04\n") == 1
             and "    timeout-minutes: 10\n" in source,
             "Mail candidate job must be finite and fixed")
-    require("permissions:\n  actions: read\n  contents: read\n" in source
-            and "contents: write" not in source,
-            "Mail candidate must not have source/write permission")
+    # GitHub job-level permissions override workflow-level defaults. Require
+    # the whole noncommented permission map and reject any job override.
+    headers = [line for line in significant if re.match(r"^\s*permissions\s*:", line)]
+    require(headers == ["permissions:"],
+            "Mail candidate must have no job-level permission override")
+    require("concurrency:" in significant
+            and significant.index("permissions:") < significant.index("concurrency:")
+            and significant[significant.index("permissions:"):significant.index("concurrency:")] == [
+                "permissions:", "  actions: read", "  contents: read",
+            ], "Mail candidate may only grant effective actions/contents read")
     require("  cancel-in-progress: false\n" in source,
             "Mail candidate must not auto-cancel and replay")
     require(not INPUT_REFERENCE.findall(source)
