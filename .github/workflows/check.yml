@@ -824,8 +824,8 @@ jobs:
       - name: Test Mail read probe with the provided Python
         run: '"$RUNNER_TEMP/envs-effect/bin/python3" -I checks/test_mail_routing_read.py'
 
-      - name: Test hard-inactive Mail root on pinned interpreter
-        run: '"$RUNNER_TEMP/envs-effect/bin/python3" -I checks/test_mail_routing_root.py'
+      - name: Test hard-inactive Mail root and actual source-bound native tools
+        run: 'MAIL_TEST_TOOLCHAIN_ENTRY="$RUNNER_TEMP/envs-effect/bin/envs-effect" "$RUNNER_TEMP/envs-effect/bin/python3" -I checks/test_mail_routing_root.py'
 
       - name: Prove the actual source-bound Mail root wrapper refuses
         run: |
