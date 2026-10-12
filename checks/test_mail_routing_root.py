@@ -26,7 +26,8 @@ def check_source() -> None:
     modules = {(node.module if isinstance(node, ast.ImportFrom) else node.names[0].name)
                for node in imports}
     assert modules == {"__future__", "sys", "importlib.util", "dataclasses",
-                       "hashlib", "re", "pathlib", "typing"}
+                       "hashlib", "re", "pathlib", "typing", "os", "signal",
+                       "stat", "subprocess"}
     main_functions = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "main"]
     assert len(main_functions) == 1
     assert [ast.unparse(node) for node in main_functions[0].body] == [
@@ -44,8 +45,10 @@ def check_source() -> None:
             assert [ast.unparse(statement) for statement in node.body] == ["sys.exit(main())"]
     code = ADAPTER.read_text(encoding="utf-8")
     assert 'EXIT_INACTIVE = 78' in code and "CLOSED_RESULT = " in code
-    assert "import os" not in code and "import subprocess" not in code
-    assert "os.environ" not in code and "open(" not in code
+    assert code.count("import os\n") == code.count("import subprocess\n") == 1
+    assert "os.environ" not in code
+    # Real SOURCE-only runner definitions may use subprocess; actual main()
+    # stays the two AST statements above and has no reachable activation.
 
 
 def check_native_entry() -> None:
@@ -204,6 +207,129 @@ def check_native_source_and_plan() -> None:
                                 private / (name + ".stderr"))
                          for name in sink_names}
                 captured_stdout, captured_stderr = sinks["show"]
+
+                # Exercise the actual private subprocess Popen/communicate/
+                # private capture implementation with an OFFLINE synthetic
+                # child, never a provider or Owner key. Native command/source
+                # identity is still verified before any child can start.
+                private.mkdir(mode=0o700)
+                backend.write_text(
+                    'bucket = "mail-state-fixture"\n'
+                    'key = "mail-m0/state/fixture.tfstate"\n'
+                    'endpoints = { s3 = "https://' + "a" * 32
+                    + '.r2.cloudflarestorage.com" }\n',
+                    encoding="ascii",
+                )
+                backend.chmod(0o600)
+                encryption = (
+                    'key_provider "pbkdf2" "mail_fixture" { passphrase = "synthetic" }\n'
+                    'method "aes_gcm" "mail_fixture" { keys = key_provider.pbkdf2.mail_fixture }\n'
+                    'state { method = method.aes_gcm.mail_fixture }\n'
+                    'plan { method = method.aes_gcm.mail_fixture }\n'
+                )
+                private_values = {
+                    "CLOUDFLARE_API_TOKEN": "synthetic-only-cf",
+                    "AWS_ACCESS_KEY_ID": "synthetic-only-id",
+                    "AWS_SECRET_ACCESS_KEY": "synthetic-only-secret",
+                    "TF_ENCRYPTION": encryption,
+                    "TF_VAR_account_id": "a" * 32,
+                    "TF_VAR_zone_id": "b" * 32,
+                    "TF_VAR_zone_name": "example.invalid",
+                    "TF_VAR_alias_address": "m0@example.invalid",
+                    "TF_VAR_destination_address": "fixture@example.invalid",
+                    "TF_VAR_rule_priority": "0",
+                }
+                config = mail.MailPrivateInputs(
+                    home=private, ops_root=ops, backend=backend,
+                    account="a" * 32, state_bucket="mail-state-fixture",
+                    state_key="mail-m0/state/fixture.tfstate",
+                    plan_bucket="mail-plan-fixture",
+                    plan_key="mail-m0/plans/source/fixture-001",
+                    values=private_values,
+                )
+                real_runner = mail.MailPrivateRunner(config, tools, timeout=1)
+                config.check()
+                real_popen = mail.subprocess.Popen
+
+                def run_synthetic(command, suffix, *, code=0, pause=False):
+                    # Hook only the *spawn* to a tiny local Python fixture;
+                    # the real MailPrivateRunner still performs command
+                    # validation, private sink creation, environment bounding,
+                    # real subprocess Popen, communicate and response handling.
+                    script = (
+                        "import sys, time\n"
+                        "sys.stdout.buffer.write(b'SYNTHETIC_PRIVATE_STDOUT')\n"
+                        "sys.stderr.buffer.write(b'SYNTHETIC_PRIVATE_STDERR')\n"
+                        "sys.stdout.flush(); sys.stderr.flush()\n"
+                        + ("time.sleep(10)\n" if pause else "")
+                        + f"sys.exit({code})\n"
+                    )
+                    def local_child(argv, **kwargs):
+                        assert tuple(argv) == command.argv
+                        assert kwargs["stdout"] >= 0 and kwargs["stderr"] >= 0
+                        assert kwargs["close_fds"] and kwargs["start_new_session"]
+                        assert kwargs["umask"] == 0o077
+                        child_env = kwargs["env"]
+                        assert "PATH" not in child_env
+                        assert "TF_LOG" not in child_env
+                        assert "AWS_PROFILE" not in child_env
+                        assert "HTTP_PROXY" not in child_env and "HTTPS_PROXY" not in child_env
+                        assert child_env["HOME"] == str(private)
+                        assert child_env["TMPDIR"] == str(private)
+                        if argv[0] == tofu:
+                            assert child_env["TF_ENCRYPTION"] == encryption
+                            assert child_env["CLOUDFLARE_API_TOKEN"] == private_values["CLOUDFLARE_API_TOKEN"]
+                        else:
+                            assert "TF_ENCRYPTION" not in child_env
+                            assert "AWS_SECRET_ACCESS_KEY" not in child_env
+                        return real_popen([sys.executable, "-I", "-c", script], **kwargs)
+                    mail.subprocess.Popen = local_child
+                    try:
+                        result = real_runner(command)
+                    finally:
+                        mail.subprocess.Popen = real_popen
+                    for stream in (command.private_stdout, command.private_stderr):
+                        path = Path(stream)
+                        assert path.parent == private
+                        assert path.stat().st_mode & 0o077 == 0
+                    assert Path(command.private_stdout).read_bytes() == b"SYNTHETIC_PRIVATE_STDOUT"
+                    assert Path(command.private_stderr).read_bytes() == b"SYNTHETIC_PRIVATE_STDERR"
+                    return result
+
+                first_cmd = mail.native_init(
+                    tofu, ops, backend, tools,
+                    private_stdout=private / "real-init.out",
+                    private_stderr=private / "real-init.err",
+                )
+                assert run_synthetic(first_cmd, "init").returncode == 0
+                failed_cmd = mail.native_init(
+                    tofu, ops, backend, tools,
+                    private_stdout=private / "real-fail.out",
+                    private_stderr=private / "real-fail.err",
+                )
+                assert run_synthetic(failed_cmd, "fail", code=7).returncode == 1
+                timeout_cmd = mail.native_init(
+                    tofu, ops, backend, tools,
+                    private_stdout=private / "real-timeout.out",
+                    private_stderr=private / "real-timeout.err",
+                )
+                assert run_synthetic(timeout_cmd, "timeout", pause=True).returncode == 124
+                invalid = dict(private_values)
+                invalid["AWS_PROFILE"] = "unaccepted rent fallback"
+                must_refuse(lambda: mail.MailPrivateInputs(
+                    home=private, ops_root=ops, backend=backend,
+                    account="a" * 32, state_bucket="mail-state-fixture",
+                    state_key="mail-m0/state/fixture.tfstate",
+                    plan_bucket="mail-plan-fixture",
+                    plan_key="mail-m0/plans/source/fixture-001",
+                    values=invalid,
+                ).check(), "ambient foreign AWS profile")
+                must_refuse(lambda: real_runner(mail.NativeCommand(
+                    (tofu, "-chdir=" + str(ops), "destroy"),
+                    private_stdout=str(private / "destroy.out"),
+                    private_stderr=str(private / "destroy.err"),
+                )), "unselected native destroy command")
+                assert not (private / "destroy.out").exists()
 
                 def select_sinks(kwargs, stage):
                     kwargs.setdefault("private_stdout", sinks[stage][0])

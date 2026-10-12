@@ -586,10 +586,16 @@ def check_manual_mail_inactive(root: Path, source: str, canonical: str) -> None:
             and "    return EXIT_INACTIVE\n" in adapter_source
             and "CLOSED_RESULT =" in adapter_source,
             "Mail root adapter must independently refuse")
-    require("import os" not in adapter_source
-            and "import subprocess" not in adapter_source
-            and "open(" not in adapter_source and "os.environ" not in adapter_source,
-            "Mail root adapter must not access protected inputs or children")
+    # A future Owner-only private runner may be implemented in this module.
+    # Admission is ONLY the unchanged whole-job false + exact direct CLI
+    # refusal; a blanket ban on subprocess imports would block SOURCE work.
+    require(adapter_source.count("import os\n") == 1
+            and adapter_source.count("import subprocess\n") == 1
+            and "os.environ" not in adapter_source,
+            "Mail native private runner must not inherit ambient credentials")
+    require('def main() -> int:\n' in adapter_source
+            and '    print(CLOSED_RESULT)\n    return EXIT_INACTIVE\n\n\nif __name__ == "__main__":\n    sys.exit(main())\n' in adapter_source,
+            "Mail public entry must remain unconditional INACTIVE / exit 78")
 
 def check_workflows(root: Path, environments: dict[str, dict[str, Any]],
                     author_targets: dict[str, set[tuple[str, str]]], adapter) -> None:
