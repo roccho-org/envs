@@ -54,6 +54,12 @@
         exec ${tools.python3} -I ${self}/adapters/mail_routing_read.py
       '';
 
+      # The candidate's real entry exists in the same provided closure, but
+      # refuses independently of the whole-job manual workflow gate.
+      mail-routing-root = pkgs.writeShellScriptBin "mail-routing-root" ''
+        exec ${tools.python3} -I ${self}/adapters/mail_routing_root.py
+      '';
+
       # Public facts only. Bound source arguments come last and cannot be overridden by a caller.
       projection-entry = pkgs.writeShellScriptBin "envs-contract-projection" ''
         exec ${pkgs.python3}/bin/python3 -I ${self}/adapters/contract_projection.py "$@" --root ${self} --revision ${rev}
@@ -67,7 +73,7 @@
 
       effect-toolchain = pkgs.buildEnv {
         name = "envs-effect-toolchain";
-        paths = [ entry contract-projection mail-routing-read ] ++ packages;
+        paths = [ entry contract-projection mail-routing-read mail-routing-root ] ++ packages;
       };
 
       # Provided artifact: the complete store closure plus ENTRY and SOURCE, deterministic so CI can hand it off by digest.

@@ -79,6 +79,30 @@ def main() -> None:
     assert baseline["canonical_branch"] == "proposals"
     assert baseline["retained_compatibility_branch"] == "main"
 
+    # M0 candidate: any attempt to activate the manual job, read protected
+    # inputs, add a child or bypass the direct root refusal is independently RED.
+    manual = ".github/workflows/operate-dev-mail-routing.yml"
+    expect_red(replace_text(manual, "if: ${{ false &&", "if: ${{ true &&"))
+    expect_red(replace_text(manual, "environment: dev-rent-tunnel", "environment: dev-projection"))
+    expect_red(replace_text(manual,
+                            '"$ENVS_EFFECT_BIN/mail-routing-root"',
+                            '"$ENVS_EFFECT_BIN/envs-effect"'))
+    expect_red(replace_text(manual, "    steps:\n",
+                            "    steps:\n      - name: Early mutation\n        run: echo active\n"))
+    expect_red(replace_text(manual, "    steps:\n",
+                            "    steps:\n      - name: Bad Secret\n        env:\n"
+                            "          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}\n"))
+    expect_red(replace_text("adapters/mail_routing_root.py", "return EXIT_INACTIVE", "return 0"))
+    expect_red(replace_text("adapters/mail_routing_root.py", "import sys",
+                            "import sys\nimport subprocess"))
+    expect_red(replace_text("flake.nix",
+                            "paths = [ entry contract-projection mail-routing-read mail-routing-root ] ++ packages;",
+                            "paths = [ entry contract-projection mail-routing-read ] ++ packages;"))
+    expect_red(replace_text(".github/workflows/check.yml",
+                            "run: python3 checks/test_mail_routing_root.py", "run: true"))
+    expect_red(replace_text(".github/workflows/check.yml",
+                            "test \"$code\" -eq 78", "test \"$code\" -eq 0"))
+
     expect_red(lambda root: (root / "migration").mkdir())
     expect_red(lambda root: (root / "unexpected").mkdir())
     expect_red(lambda root: (root / "adapters/legacy.sh").write_text("exit 0\n"))
