@@ -27,7 +27,7 @@ def check_source() -> None:
         ("Import", None, ("sys",)),
     }
     calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
-    assert sorted(ast.unparse(node.func) for node in calls) == ["print", "sys.exit"]
+    assert sorted(ast.unparse(node.func) for node in calls) == ["main", "print", "sys.exit"]
     attrs = [ast.unparse(node) for node in ast.walk(tree) if isinstance(node, ast.Attribute)]
     assert attrs == ["sys.exit"]
     mains = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "main"]
@@ -84,7 +84,7 @@ def check_job_disabled() -> None:
     assert content.count(gate) == 1
     assert content.index(gate) < content.index("    environment: dev-rent-tunnel") < content.index("    steps:")
     assert content.count("    if:") == 1
-    assert "on:\\n  workflow_dispatch:" in content
+    assert "on:\n  workflow_dispatch:" in content
     assert "      expected_source_sha:" in content
     assert "${{ secrets." not in content and "${{ vars." not in content
     assert "    needs:" not in content
