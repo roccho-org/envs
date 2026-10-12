@@ -182,60 +182,85 @@ def private_output_sink(path: Path) -> str:
     return name
 
 
+def _private_streams(stdout: Path, stderr: Path, *other_private: Path) -> tuple[str, str]:
+    """Every native child requires two distinct non-public stream destinations.
+
+    This is only a SOURCE refusal; a separately admitted Owner runner must
+    actually capture both streams without inheriting public Actions logs.
+    """
+    paths = [private_output_sink(stdout), private_output_sink(stderr)]
+    paths += [private_path(path) for path in other_private]
+    if len(set(paths)) != len(paths):
+        raise NativeSourceHold("PRIVATE_OUTPUT_PATH_OVERLAP")
+    return paths[0], paths[1]
+
+
 @dataclass(frozen=True, repr=False)
 class NativeCommand:
     argv: tuple[str, ...]
+    # Neither native stream may inherit public stdout/stderr; required for ALL
+    # protected init, plan, show, apply and R2 commands, not only show.
+    private_stdout: str = field(repr=False)
+    private_stderr: str = field(repr=False)
     stdin: bytes | None = field(default=None, repr=False)
-    # SOURCE contract to the future, separately admitted Owner runner:
-    # neither child output stream may be inherited or copied to Actions logs.
-    # This is a necessary typed interface, not proof such a runner exists.
-    private_stdout: str | None = field(default=None, repr=False)
-    private_stderr: str | None = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.private_stdout, str) or not isinstance(self.private_stderr, str):
+            raise NativeSourceHold("PRIVATE_OUTPUT_NOT_SELECTED")
+        _private_streams(Path(self.private_stdout), Path(self.private_stderr))
 
 
-def native_init(tofu: str, root: Path, private_backend: Path, tools: NativeToolset) -> NativeCommand:
+def native_init(tofu: str, root: Path, private_backend: Path, tools: NativeToolset,
+                *, private_stdout: Path, private_stderr: Path) -> NativeCommand:
     verify_native_source(root, OPS_MAIL_COMMIT, OPS_MAIL_TREE)
-    return NativeCommand((native_bin(tofu, "tofu", tools), "-chdir=" + private_path(root),
-                          "init", "-input=false", "-lockfile=readonly",
-                          "-backend-config=" + private_path(private_backend)))
+    stdout, stderr = _private_streams(private_stdout, private_stderr, private_backend)
+    return NativeCommand(
+        (native_bin(tofu, "tofu", tools), "-chdir=" + private_path(root),
+         "init", "-input=false", "-lockfile=readonly",
+         "-backend-config=" + private_path(private_backend)),
+        private_stdout=stdout, private_stderr=stderr,
+    )
 
 
-def native_plan(tofu: str, root: Path, original: Path, tools: NativeToolset) -> NativeCommand:
-    # Produces a separate encrypted saved plan. NO automatic apply.
+def native_plan(tofu: str, root: Path, original: Path, tools: NativeToolset,
+                *, private_stdout: Path, private_stderr: Path) -> NativeCommand:
+    # A saved encrypted plan is NOT a stdout sink: the human diff/target can
+    # still be written to stdout or stderr by OpenTofu.
     verify_native_source(root, OPS_MAIL_COMMIT, OPS_MAIL_TREE)
-    return NativeCommand((native_bin(tofu, "tofu", tools), "-chdir=" + private_path(root),
-                          "plan", "-input=false", "-lock=true", "-out=" + private_path(original)))
+    stdout, stderr = _private_streams(private_stdout, private_stderr, original)
+    return NativeCommand(
+        (native_bin(tofu, "tofu", tools), "-chdir=" + private_path(root),
+         "plan", "-input=false", "-lock=true", "-out=" + private_path(original)),
+        private_stdout=stdout, private_stderr=stderr,
+    )
 
 
 def native_inspect(tofu: str, root: Path, private_original: Path,
                    private_review_json: Path, private_stdout: Path,
                    private_stderr: Path, tools: NativeToolset) -> NativeCommand:
-    """Never send the JSON (including sensitive values) to child stdout.
-
-    OpenTofu 1.12's native -json-into writes machine-readable output directly
-    to an Owner-chosen private file; human-readable stdout AND stderr still
-    require separate private capture by a future authorized runner. No such
-    runtime is selected, implemented or activated in this SOURCE candidate.
-    """
+    """Native -json-into must write to a separate private original review file."""
     verify_native_source(root, OPS_MAIL_COMMIT, OPS_MAIL_TREE)
-    selected = (private_path(private_original), private_output_sink(private_review_json),
-                private_output_sink(private_stdout), private_output_sink(private_stderr))
-    if len(set(selected)) != len(selected):
-        raise NativeSourceHold("PRIVATE_OUTPUT_PATH_OVERLAP")
+    stdout, stderr = _private_streams(
+        private_stdout, private_stderr, private_original, private_review_json,
+    )
     return NativeCommand(
         (native_bin(tofu, "tofu", tools), "-chdir=" + private_path(root),
-         "show", "-plan=" + selected[0], "-json-into=" + selected[1], "-no-color"),
-        private_stdout=selected[2], private_stderr=selected[3],
+         "show", "-plan=" + private_path(private_original),
+         "-json-into=" + private_output_sink(private_review_json), "-no-color"),
+        private_stdout=stdout, private_stderr=stderr,
     )
 
 
-def native_apply(tofu: str, root: Path, private_original: Path, tools: NativeToolset) -> NativeCommand:
-    # Exact saved plan, no -auto-approve, no re-plan, import, unlock or retry.
-    # This is NOT the program entry. A later separately approved Owner effect
-    # would have to invoke it after independently reviewing the same original.
+def native_apply(tofu: str, root: Path, private_original: Path, tools: NativeToolset,
+                 *, private_stdout: Path, private_stderr: Path) -> NativeCommand:
+    # Exact saved original; no -auto-approve, re-plan, import, unlock or retry.
     verify_native_source(root, OPS_MAIL_COMMIT, OPS_MAIL_TREE)
-    return NativeCommand((native_bin(tofu, "tofu", tools), "-chdir=" + private_path(root),
-                          "apply", "-input=false", "-lock=true", private_path(private_original)))
+    stdout, stderr = _private_streams(private_stdout, private_stderr, private_original)
+    return NativeCommand(
+        (native_bin(tofu, "tofu", tools), "-chdir=" + private_path(root),
+         "apply", "-input=false", "-lock=true", private_path(private_original)),
+        private_stdout=stdout, private_stderr=stderr,
+    )
 
 
 def _quote(value: str) -> str:
@@ -248,7 +273,8 @@ def _quote(value: str) -> str:
 def private_r2_object(curl: str, method: str, account: str, bucket: str, key: str,
                       source_or_dest: Path, headers: Path,
                       access_id: str, access_secret: str, etag: str | None = None,
-                      session_token: str | None = None, tools: NativeToolset | None = None) -> NativeCommand:
+                      session_token: str | None = None, tools: NativeToolset | None = None,
+                      *, private_stdout: Path, private_stderr: Path) -> NativeCommand:
     """Native curl SigV4 + conditional R2 object; no secret in argv/files/log.
 
     PUT uses If-None-Match * (write once). HEAD/GET demand the actual
@@ -268,8 +294,7 @@ def private_r2_object(curl: str, method: str, account: str, bucket: str, key: st
     # source/destination/header must never be a public file descriptor.
     data_path = private_path(source_or_dest)
     header_path = private_output_sink(headers)
-    if data_path == header_path:
-        raise NativeSourceHold("PRIVATE_OUTPUT_PATH_OVERLAP")
+    stdout, stderr = _private_streams(private_stdout, private_stderr, source_or_dest, headers)
     url = f"https://{account}.r2.cloudflarestorage.com/{bucket}/{key}"
     items = [
         "url = " + _quote(url),
@@ -291,8 +316,11 @@ def private_r2_object(curl: str, method: str, account: str, bucket: str, key: st
     else:
         items.append("header = " + _quote("If-Match: " + etag))
         items.append("output = " + _quote(private_output_sink(source_or_dest) if method == "GET" else "/dev/null"))
-    return NativeCommand((native_bin(curl, "curl", tools), "-q", "--config", "-"),
-                         ("\n".join(items) + "\n").encode("utf-8"))
+    return NativeCommand(
+        (native_bin(curl, "curl", tools), "-q", "--config", "-"),
+        private_stdout=stdout, private_stderr=stderr,
+        stdin=("\n".join(items) + "\n").encode("utf-8"),
+    )
 
 
 def private_etag(header_bytes: bytes) -> str:
@@ -329,25 +357,43 @@ def _require_success(receipt: PrivateNativeResult) -> None:
         raise NativeSourceHold("NATIVE_STAGE_UNPROVEN")
 
 
+def _preflight_output_group(sinks: tuple[Path, ...], *protected: Path) -> None:
+    """Check every output sink of a multi-command stage BEFORE its first runner."""
+    names = [private_output_sink(item) for item in sinks]
+    names += [private_path(item) for item in protected]
+    if len(names) != len(set(names)):
+        raise NativeSourceHold("PRIVATE_OUTPUT_PATH_OVERLAP")
+
+
 def plan_private_once(ops_root: Path, commit: str, tree: str, tofu: str,
                       private_backend: Path, plan_path: Path,
-                      tools: NativeToolset, runner: MailPrivateRunner) -> None:
-    # One separately Owner-admitted private state/init+plan stage, never apply.
-    # The native backend/provider state and encryption inputs are external
-    # admission prerequisites; no secret acquisition or driver is supplied.
+                      tools: NativeToolset, runner: MailPrivateRunner, *,
+                      init_stdout: Path, init_stderr: Path,
+                      plan_stdout: Path, plan_stderr: Path) -> None:
+    # No auto-apply: future Owner chooses four separate private sinks and one
+    # private backend + saved original. Reject unsafe PLAN sinks before INIT.
     verify_native_source(ops_root, commit, tree)
-    _require_success(runner(native_init(tofu, ops_root, private_backend, tools)))
+    _preflight_output_group((init_stdout, init_stderr, plan_stdout, plan_stderr),
+                            private_backend, plan_path)
+    init = native_init(tofu, ops_root, private_backend, tools,
+                       private_stdout=init_stdout, private_stderr=init_stderr)
+    _require_success(runner(init))
     verify_native_source(ops_root, commit, tree)
-    _require_success(runner(native_plan(tofu, ops_root, plan_path, tools)))
+    plan = native_plan(tofu, ops_root, plan_path, tools,
+                       private_stdout=plan_stdout, private_stderr=plan_stderr)
+    _require_success(runner(plan))
 
 
 def retain_original_once(curl: str, account: str, bucket: str, key: str, plan_path: Path,
                          headers: Path, access_id: str, access_secret: str,
-                         runner: MailPrivateRunner, tools: NativeToolset) -> str:
-    # Standard native R2 write-once conditional. Its opaque ETag stays
-    # exclusively in the private Owner/R review route, never a public receipt.
-    command = private_r2_object(curl, "PUT", account, bucket, key, plan_path, headers,
-                                access_id, access_secret, tools=tools)
+                         runner: MailPrivateRunner, tools: NativeToolset, *,
+                         private_stdout: Path, private_stderr: Path) -> str:
+    # R2 native write-once conditional; stdout and stderr also remain private.
+    command = private_r2_object(
+        curl, "PUT", account, bucket, key, plan_path, headers,
+        access_id, access_secret, tools=tools,
+        private_stdout=private_stdout, private_stderr=private_stderr,
+    )
     response = runner(command)
     _require_success(response)
     return private_etag(response.private_headers)
@@ -359,24 +405,26 @@ def inspect_original_once(curl: str, tofu: str, root: Path, account: str,
                           expected_etag: str, runner: MailPrivateRunner,
                           tools: NativeToolset, *,
                           private_review_json: Path, private_stdout: Path,
-                          private_stderr: Path) -> None:
+                          private_stderr: Path, private_get_stdout: Path,
+                          private_get_stderr: Path) -> None:
     verify_native_source(root, OPS_MAIL_COMMIT, OPS_MAIL_TREE)
-    # Construct and validate every output sink BEFORE running even the GET.
-    # Owner/R original readback and secure stdout/stderr handling are still
-    # unproved operational requirements, not SOURCE approval booleans.
+    # Refuse all unsafe GET/SHOW sinks BEFORE any GET or runner callback.
+    _preflight_output_group(
+        (private_get_stdout, private_get_stderr, private_stdout, private_stderr),
+        private_review_json, private_path_to_original, headers,
+    )
     inspect = native_inspect(tofu, root, private_path_to_original,
                              private_review_json, private_stdout, private_stderr, tools)
-    # Owner and fixed R must access the same original via independent
-    # private read-only routes; this method does not grant either review.
-    command = private_r2_object(curl, "GET", account, bucket, key, private_path_to_original,
-                                headers, access_id, access_secret, expected_etag, tools=tools)
-    response = runner(command)
-    _require_success(response)
-    if private_etag(response.private_headers) != expected_etag:
+    get = private_r2_object(
+        curl, "GET", account, bucket, key, private_path_to_original,
+        headers, access_id, access_secret, expected_etag, tools=tools,
+        private_stdout=private_get_stdout, private_stderr=private_get_stderr,
+    )
+    result = runner(get)
+    _require_success(result)
+    if private_etag(result.private_headers) != expected_etag:
         raise NativeSourceHold("ORIGINAL_CHANGED_OR_UNREVIEWED")
     verify_native_source(root, OPS_MAIL_COMMIT, OPS_MAIL_TREE)
-    # Any future runner MUST redirect both channels to the selected private
-    # sinks. The real hard-off CLI never calls this SOURCE helper.
     _require_success(runner(inspect))
 
 
@@ -385,23 +433,43 @@ def apply_same_original_once(curl: str, tofu: str, root: Path, account: str,
                              headers: Path, access_id: str, access_secret: str,
                              stored_etag: str, owner_readback: str,
                              fixed_r_readback: str, before_apply: str,
-                             runner: MailPrivateRunner, tools: NativeToolset) -> None:
-    # Called by a FUTURE distinct Owner-admitted source entry only; today
-    # the job is false and the real CLI exits 78 before arguments and secrets.
-    # No apply can follow a failed conditional HEAD/GET, missing R review,
-    # source change or ambiguous provider result. No implicit retry.
+                             runner: MailPrivateRunner, tools: NativeToolset, *,
+                             head_stdout: Path, head_stderr: Path,
+                             get_stdout: Path, get_stderr: Path,
+                             apply_stdout: Path, apply_stderr: Path) -> None:
+    # Separately admitted future Owner exact-original effect only; the live
+    # job remains false and the real CLI refuses before child/private input.
     verify_native_source(root, OPS_MAIL_COMMIT, OPS_MAIL_TREE)
     require_same_original(stored_etag=stored_etag, owner_readback=owner_readback,
                           fixed_r_readback=fixed_r_readback, before_apply=before_apply)
-    for method in ("HEAD", "GET"):
-        command = private_r2_object(curl, method, account, bucket, key, private_path_to_original,
-                                    headers, access_id, access_secret, stored_etag, tools=tools)
+    # Refuse missing/public/alias/colliding sink of ANY later native step
+    # BEFORE the first conditional HEAD could read private object metadata.
+    _preflight_output_group(
+        (head_stdout, head_stderr, get_stdout, get_stderr, apply_stdout, apply_stderr),
+        private_path_to_original, headers,
+    )
+    commands = [
+        private_r2_object(
+            curl, method, account, bucket, key, private_path_to_original,
+            headers, access_id, access_secret, stored_etag, tools=tools,
+            private_stdout=stdout, private_stderr=stderr,
+        )
+        for method, stdout, stderr in (
+            ("HEAD", head_stdout, head_stderr),
+            ("GET", get_stdout, get_stderr),
+        )
+    ]
+    apply = native_apply(
+        tofu, root, private_path_to_original, tools,
+        private_stdout=apply_stdout, private_stderr=apply_stderr,
+    )
+    for command in commands:
         receipt = runner(command)
         _require_success(receipt)
         if private_etag(receipt.private_headers) != stored_etag:
             raise NativeSourceHold("ORIGINAL_CHANGED_OR_UNREVIEWED")
     verify_native_source(root, OPS_MAIL_COMMIT, OPS_MAIL_TREE)
-    _require_success(runner(native_apply(tofu, root, private_path_to_original, tools)))
+    _require_success(runner(apply))
 
 
 def require_same_original(*, stored_etag: str, owner_readback: str,

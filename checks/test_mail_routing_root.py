@@ -193,11 +193,63 @@ def check_native_source_and_plan() -> None:
                 captured_stdout = private / "show.stdout"
                 captured_stderr = private / "show.stderr"
 
-                init = mail.native_init(tofu, ops, backend, tools)
-                planned = mail.native_plan(tofu, ops, saved_plan, tools)
+                # Every future protected native command requires two explicit
+                # distinct private output destinations, including preflight
+                # stages that can print human-readable target/plan metadata.
+                sink_names = (
+                    "init", "plan", "put", "get", "show", "head",
+                    "apply_get", "apply",
+                )
+                sinks = {name: (private / (name + ".stdout"),
+                                private / (name + ".stderr"))
+                         for name in sink_names}
+                captured_stdout, captured_stderr = sinks["show"]
+
+                def select_sinks(kwargs, stage):
+                    kwargs.setdefault("private_stdout", sinks[stage][0])
+                    kwargs.setdefault("private_stderr", sinks[stage][1])
+                    return kwargs
+
+                def native_init_cmd(*args, **kwargs):
+                    return mail.native_init(*args, **select_sinks(kwargs, "init"))
+
+                def native_plan_cmd(*args, **kwargs):
+                    return mail.native_plan(*args, **select_sinks(kwargs, "plan"))
+
+                def native_apply_cmd(*args, **kwargs):
+                    return mail.native_apply(*args, **select_sinks(kwargs, "apply"))
+
+                def r2_cmd(*args, **kwargs):
+                    return mail.private_r2_object(*args, **select_sinks(kwargs, "put"))
+
+                def plan_once(*args, **kwargs):
+                    kwargs.setdefault("init_stdout", sinks["init"][0])
+                    kwargs.setdefault("init_stderr", sinks["init"][1])
+                    kwargs.setdefault("plan_stdout", sinks["plan"][0])
+                    kwargs.setdefault("plan_stderr", sinks["plan"][1])
+                    return mail.plan_private_once(*args, **kwargs)
+
+                def retain_once(*args, **kwargs):
+                    return mail.retain_original_once(*args, **select_sinks(kwargs, "put"))
+
+                def inspect_once(*args, **kwargs):
+                    kwargs.setdefault("private_get_stdout", sinks["get"][0])
+                    kwargs.setdefault("private_get_stderr", sinks["get"][1])
+                    return mail.inspect_original_once(*args, **kwargs)
+
+                def apply_once(*args, **kwargs):
+                    for stage in ("head", "apply_get", "apply"):
+                        kwargs.setdefault(stage + "_stdout" if stage != "apply_get" else "get_stdout",
+                                          sinks[stage][0])
+                        kwargs.setdefault(stage + "_stderr" if stage != "apply_get" else "get_stderr",
+                                          sinks[stage][1])
+                    return mail.apply_same_original_once(*args, **kwargs)
+
+                init = native_init_cmd(tofu, ops, backend, tools)
+                planned = native_plan_cmd(tofu, ops, saved_plan, tools)
                 inspect = mail.native_inspect(tofu, ops, original, review_json,
                                               captured_stdout, captured_stderr, tools)
-                apply = mail.native_apply(tofu, ops, original, tools)
+                apply = native_apply_cmd(tofu, ops, original, tools)
                 assert init.argv[2:4] == ("init", "-input=false") and "-lockfile=readonly" in init.argv
                 assert planned.argv[2:4] == ("plan", "-input=false") and "-lock=true" in planned.argv
                 assert planned.argv[-1] == "-out=" + str(saved_plan)
@@ -209,6 +261,25 @@ def check_native_source_and_plan() -> None:
                 assert inspect.private_stdout == str(captured_stdout)
                 assert inspect.private_stderr == str(captured_stderr)
                 assert inspect.private_stdout != inspect.private_stderr
+                for command in (init, planned, inspect, apply):
+                    assert command.private_stdout and command.private_stderr
+                    assert command.private_stdout != command.private_stderr
+                    assert command.private_stdout.startswith(str(private))
+                    assert command.private_stderr.startswith(str(private))
+                # None or public descriptor can never form a NativeCommand;
+                # there is no optional/implicit runner inheritance path.
+                must_refuse(lambda: mail.NativeCommand(
+                    ("synthetic",), private_stdout=None,
+                    private_stderr=str(sinks["init"][1]),
+                ), "missing native stdout capture")
+                must_refuse(lambda: mail.NativeCommand(
+                    ("synthetic",), private_stdout="/dev/stdout",
+                    private_stderr=str(sinks["init"][1]),
+                ), "public native stdout descriptor")
+                must_refuse(lambda: mail.NativeCommand(
+                    ("synthetic",), private_stdout=str(sinks["init"][0]),
+                    private_stderr=str(sinks["init"][0]),
+                ), "overlapping native streams")
                 assert apply.argv[-4:] == ("apply", "-input=false", "-lock=true", str(original))
                 assert all("--auto-approve" not in x.argv and "-destroy" not in x.argv
                            for x in (init, planned, inspect, apply))
@@ -220,6 +291,21 @@ def check_native_source_and_plan() -> None:
                     Path("/tmp/owner-plan"), Path("/var/tmp/owner-plan"),
                 )
                 for bad in unsafe:
+                    must_refuse(lambda bad=bad: native_init_cmd(
+                        tofu, ops, backend, tools, private_stdout=bad,
+                    ), "unsafe init stdout")
+                    must_refuse(lambda bad=bad: native_plan_cmd(
+                        tofu, ops, saved_plan, tools, private_stderr=bad,
+                    ), "unsafe plan stderr")
+                    must_refuse(lambda bad=bad: native_apply_cmd(
+                        tofu, ops, original, tools, private_stdout=bad,
+                    ), "unsafe apply stdout")
+                    must_refuse(lambda bad=bad: r2_cmd(
+                        curl, "PUT", "a" * 32, "mail-fixture-private",
+                        "mail-m0/plans/source/fixture-001", saved_plan, headers,
+                        "fixture-access", "fixture-secret", tools=tools,
+                        private_stderr=bad,
+                    ), "unsafe R2 stderr")
                     must_refuse(lambda bad=bad: mail.native_inspect(
                         tofu, ops, original, bad, captured_stdout, captured_stderr, tools,
                     ), "unsafe review JSON sink")
@@ -241,9 +327,9 @@ def check_native_source_and_plan() -> None:
                 forged = "/nix/store/" + "0" * 32 + "-unrelated/bin/tofu"
                 for other in (forged, "/usr/bin/tofu", "/tmp/private/bin/tofu",
                               tofu.replace("/bin/tofu", "/bin/curl")):
-                    must_refuse(lambda other=other: mail.native_plan(other, ops, saved_plan, tools),
+                    must_refuse(lambda other=other: native_plan_cmd(other, ops, saved_plan, tools),
                                 "unselected binary")
-                must_refuse(lambda: mail.native_plan(tofu, ops, saved_plan,
+                must_refuse(lambda: native_plan_cmd(tofu, ops, saved_plan,
                                                     mail.NativeToolset(tofu=curl, curl=tofu, _proof=mail._NATIVE_TOOL_PROOF)),
                             "tool mapping mismatched")
 
@@ -252,11 +338,13 @@ def check_native_source_and_plan() -> None:
                              key="mail-m0/plans/source/fixture-001", headers=headers,
                              access_id="fixture-access", access_secret="fixture-secret",
                              tools=tools)
-                put = mail.private_r2_object(method="PUT", source_or_dest=saved_plan, **store)
-                head = mail.private_r2_object(method="HEAD", source_or_dest=private / "ignored",
+                put = r2_cmd(method="PUT", source_or_dest=saved_plan, **store)
+                head = r2_cmd(method="HEAD", source_or_dest=private / "ignored",
                                              etag=etag, **store)
-                get = mail.private_r2_object(method="GET", source_or_dest=original, etag=etag, **store)
+                get = r2_cmd(method="GET", source_or_dest=original, etag=etag, **store)
                 for cmd in (put, head, get):
+                    assert cmd.private_stdout and cmd.private_stderr
+                    assert cmd.private_stdout != cmd.private_stderr
                     assert cmd.argv == (curl, "-q", "--config", "-")
                     assert b'aws-sigv4 = "aws:amz:auto:s3"' in cmd.stdin
                     assert b'proto = "=https"' in cmd.stdin
@@ -269,15 +357,15 @@ def check_native_source_and_plan() -> None:
                 assert b"\nhead\n" not in get.stdin and b"\nhead\n" not in put.stdin
                 assert b'upload-file = ' in put.stdin and b'output = ' in get.stdin
                 for bad in unsafe:
-                    must_refuse(lambda bad=bad: mail.private_r2_object(
+                    must_refuse(lambda bad=bad: r2_cmd(
                         method="GET", source_or_dest=bad, etag=etag, **store,
                     ), "private GET body into public output")
-                    must_refuse(lambda bad=bad: mail.private_r2_object(
+                    must_refuse(lambda bad=bad: r2_cmd(
                         method="PUT", source_or_dest=saved_plan, etag=None,
                         **{**store, "headers": bad},
                     ), "private R2 headers into public descriptor")
                 for method in ("HEAD", "GET"):
-                    must_refuse(lambda method=method: mail.private_r2_object(
+                    must_refuse(lambda method=method: r2_cmd(
                         method=method, source_or_dest=original, etag=None, **store,
                     ), "missing ETag")
                 assert mail.private_etag(b'HTTP/1.1 200 OK\r\nETag: ' + etag.encode() + b'\r\n\r\n') == etag
@@ -297,19 +385,24 @@ def check_native_source_and_plan() -> None:
                 response_headers = ('HTTP/1.1 200 OK\r\nETag: ' + etag + '\r\n\r\n').encode()
 
                 def synthetic_runner(command: mail.NativeCommand) -> mail.PrivateNativeResult:
+                    assert isinstance(command, mail.NativeCommand)
+                    assert command.private_stdout and command.private_stderr
+                    assert command.private_stdout != command.private_stderr
+                    assert command.private_stdout.startswith(str(private))
+                    assert command.private_stderr.startswith(str(private))
                     events.append(command)
                     if command.argv[0] == curl:
                         return mail.PrivateNativeResult(0, response_headers)
                     return mail.PrivateNativeResult(0)
 
-                mail.plan_private_once(ops, mail.OPS_MAIL_COMMIT, mail.OPS_MAIL_TREE,
+                plan_once(ops, mail.OPS_MAIL_COMMIT, mail.OPS_MAIL_TREE,
                                        tofu, backend, saved_plan, tools, synthetic_runner)
                 assert [cmd.argv[2] for cmd in events] == ["init", "plan"]
-                opaque = mail.retain_original_once(curl, store["account"], store["bucket"],
+                opaque = retain_once(curl, store["account"], store["bucket"],
                     store["key"], saved_plan, headers, "fixture-access", "fixture-secret",
                     synthetic_runner, tools)
                 assert opaque == etag and len(events) == 3
-                mail.inspect_original_once(curl, tofu, ops, store["account"], store["bucket"],
+                inspect_once(curl, tofu, ops, store["account"], store["bucket"],
                     store["key"], original, headers, "fixture-access", "fixture-secret",
                     opaque, synthetic_runner, tools,
                     private_review_json=review_json, private_stdout=captured_stdout,
@@ -322,7 +415,7 @@ def check_native_source_and_plan() -> None:
                 # Unsafe sinks fail BEFORE any private R2 GET or Runner call.
                 for bad in unsafe:
                     before = len(events)
-                    must_refuse(lambda bad=bad: mail.inspect_original_once(
+                    must_refuse(lambda bad=bad: inspect_once(
                         curl, tofu, ops, store["account"], store["bucket"], store["key"],
                         original, headers, "fixture-access", "fixture-secret",
                         opaque, synthetic_runner, tools,
@@ -331,7 +424,7 @@ def check_native_source_and_plan() -> None:
                     ), "unsafe inspection source")
                     assert len(events) == before
                 before = len(events)
-                must_refuse(lambda: mail.inspect_original_once(
+                must_refuse(lambda: inspect_once(
                     curl, tofu, ops, store["account"], store["bucket"], store["key"],
                     original, Path("/dev/stderr"), "fixture-access", "fixture-secret",
                     opaque, synthetic_runner, tools,
@@ -339,24 +432,70 @@ def check_native_source_and_plan() -> None:
                     private_stderr=captured_stderr,
                 ), "unsafe curl header source")
                 assert len(events) == before
-                mail.apply_same_original_once(curl, tofu, ops, store["account"],
+                apply_once(curl, tofu, ops, store["account"],
                     store["bucket"], store["key"], original, headers, "fixture-access",
                     "fixture-secret", etag, etag, etag, etag, synthetic_runner, tools)
                 assert len(events) == 8
+                assert all(c.private_stdout and c.private_stderr for c in events)
+                assert len({c.private_stdout for c in events}) == 8
+                assert len({c.private_stderr for c in events}) == 8
+                # Fail closed BEFORE ANY runner call when a later stage's
+                # private stdout/stderr is absent, public or overlapping.
+                for bad in unsafe:
+                    before = len(events)
+                    must_refuse(lambda bad=bad: plan_once(
+                        ops, mail.OPS_MAIL_COMMIT, mail.OPS_MAIL_TREE,
+                        tofu, backend, saved_plan, tools, synthetic_runner,
+                        plan_stdout=bad,
+                    ), "future plan stream unsafe before init")
+                    must_refuse(lambda bad=bad: retain_once(
+                        curl, store["account"], store["bucket"], store["key"],
+                        saved_plan, headers, "fixture-access", "fixture-secret",
+                        synthetic_runner, tools, private_stderr=bad,
+                    ), "future PUT stream unsafe before R2")
+                    must_refuse(lambda bad=bad: inspect_once(
+                        curl, tofu, ops, store["account"], store["bucket"],
+                        store["key"], original, headers, "fixture-access",
+                        "fixture-secret", etag, synthetic_runner, tools,
+                        private_review_json=review_json,
+                        private_stdout=captured_stdout,
+                        private_stderr=captured_stderr,
+                        private_get_stdout=bad,
+                    ), "future GET stream unsafe before R2")
+                    must_refuse(lambda bad=bad: apply_once(
+                        curl, tofu, ops, store["account"], store["bucket"],
+                        store["key"], original, headers, "fixture-access",
+                        "fixture-secret", etag, etag, etag, etag,
+                        synthetic_runner, tools, apply_stderr=bad,
+                    ), "future APPLY stream unsafe before HEAD")
+                    assert len(events) == before
+                before = len(events)
+                must_refuse(lambda: plan_once(
+                    ops, mail.OPS_MAIL_COMMIT, mail.OPS_MAIL_TREE,
+                    tofu, backend, saved_plan, tools, synthetic_runner,
+                    plan_stdout=sinks["init"][0],
+                ), "overlapping init and plan streams")
+                must_refuse(lambda: apply_once(
+                    curl, tofu, ops, store["account"], store["bucket"],
+                    store["key"], original, headers, "fixture-access",
+                    "fixture-secret", etag, etag, etag, etag,
+                    synthetic_runner, tools, get_stdout=sinks["head"][0],
+                ), "overlapping conditional original streams")
+                assert len(events) == before
                 assert [cmd.argv[2] if cmd.argv[0] == tofu else "s3" for cmd in events[-3:]] == [
                     "s3", "s3", "apply",
                 ]
                 for source_change in ("extra.tf", "override.tf"):
                     (ops / source_change).write_text("unaccepted\n", encoding="utf-8")
                     before = len(events)
-                    must_refuse(lambda: mail.inspect_original_once(
+                    must_refuse(lambda: inspect_once(
                         curl, tofu, ops, store["account"], store["bucket"], store["key"],
                         original, headers, "fixture-access", "fixture-secret",
                         etag, synthetic_runner, tools,
                         private_review_json=review_json, private_stdout=captured_stdout,
                         private_stderr=captured_stderr,
                     ), "read changed source")
-                    must_refuse(lambda: mail.apply_same_original_once(
+                    must_refuse(lambda: apply_once(
                         curl, tofu, ops, store["account"], store["bucket"], store["key"],
                         original, headers, "fixture-access", "fixture-secret",
                         etag, etag, etag, etag, synthetic_runner, tools,
@@ -364,7 +503,7 @@ def check_native_source_and_plan() -> None:
                     assert len(events) == before, "source drift started an effect"
                     (ops / source_change).unlink()
                 before = len(events)
-                must_refuse(lambda: mail.apply_same_original_once(
+                must_refuse(lambda: apply_once(
                     curl, tofu, ops, store["account"], store["bucket"], store["key"],
                     original, headers, "fixture-access", "fixture-secret",
                     etag, etag, '"not-reviewed"', etag, synthetic_runner, tools,
@@ -375,7 +514,7 @@ def check_native_source_and_plan() -> None:
                     return mail.PrivateNativeResult(
                         0, b'HTTP/1.1 200 OK\r\nETag: "changed-object"\r\n\r\n',
                     )
-                must_refuse(lambda: mail.apply_same_original_once(
+                must_refuse(lambda: apply_once(
                     curl, tofu, ops, store["account"], store["bucket"], store["key"],
                     original, headers, "fixture-access", "fixture-secret",
                     etag, etag, etag, etag, mismatched_runner, tools,
