@@ -29,20 +29,7 @@ OPS_LOCK_BLOB = "4994a1a2967771935c94bcca83752ffebe78e2ff"
 NATIVE_PROVIDER_H1 = "h1:HiX8Q7db7YrAYCuOBOMsvcmyX1RmvFqALtgJDvtYRhc="
 SHA40 = re.compile(r"^[0-9a-f]{40}$")
 NIX_BIN = re.compile(r"^/nix/store/[a-z0-9]{32}-[^/]+/bin/(tofu|curl)$")
-ETAG = re.compile(r'^"[A-Za-z0-9._-]{1,128}" = 78
-CLOSED_RESULT = '{"kind":"envs.mailM0.manual.v1","status":"INACTIVE","effect":"NOT_RUN"}'
-
-
-def main() -> int:
-    # This unconditional refusal is intentionally before any argument or
-    # environment evaluation. There is NO activation flag/escape path.
-    print(CLOSED_RESULT)
-    return EXIT_INACTIVE
-
-
-if __name__ == "__main__":
-    sys.exit(main())
-)
+ETAG = re.compile(r'^"[A-Za-z0-9._-]{1,128}"$')
 BUCKET = re.compile(r"^[a-z0-9][a-z0-9.-]{2,62}$")
 KEY = re.compile(r"^mail-m0/plans/[a-zA-Z0-9._/-]{1,160}$")
 
