@@ -181,7 +181,9 @@ def check_native_source_and_plan() -> None:
 
                 tofu = "/nix/store/" + "a" * 32 + "-opentofu-with-plugins/bin/tofu"
                 curl = "/nix/store/" + "b" * 32 + "-curl/bin/curl"
-                tools = mail.NativeToolset(tofu=tofu, curl=curl)
+                tools = mail.NativeToolset(tofu=tofu, curl=curl, _proof=mail._NATIVE_TOOL_PROOF)
+                must_refuse(lambda: mail.native_bin(tofu, "tofu", mail.NativeToolset(tofu=tofu, curl=curl)),
+                            "unverified toolset constructor")
                 private = home / "private"
                 backend = private / "backend.hcl"
                 saved_plan = private / "saved-plan.enc"
@@ -206,7 +208,7 @@ def check_native_source_and_plan() -> None:
                     must_refuse(lambda other=other: mail.native_plan(other, ops, saved_plan, tools),
                                 "unselected binary")
                 must_refuse(lambda: mail.native_plan(tofu, ops, saved_plan,
-                                                    mail.NativeToolset(tofu=curl, curl=tofu)),
+                                                    mail.NativeToolset(tofu=curl, curl=tofu, _proof=mail._NATIVE_TOOL_PROOF)),
                             "tool mapping mismatched")
 
                 etag = '"original-r2-etag1234"'

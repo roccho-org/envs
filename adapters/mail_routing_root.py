@@ -89,12 +89,16 @@ def verify_native_source(root: Path, commit: str, tree: str) -> None:
         raise NativeSourceHold("OPS_SOURCE_UNREADABLE") from None
 
 
+_NATIVE_TOOL_PROOF = object()
+
+
 @dataclass(frozen=True, repr=False)
 class NativeToolset:
-    """Exact tofu/curl from the existing source-bound envs toolchain."""
+    """Identity minted only by the existing validated envs toolchain loader."""
 
     tofu: str
     curl: str
+    _proof: object = field(default=None, repr=False, compare=False)
 
 
 def provided_native_tools(root: Path, manifest: str, interpreter: str) -> NativeToolset:
@@ -121,7 +125,7 @@ def provided_native_tools(root: Path, manifest: str, interpreter: str) -> Native
             )
         finally:
             sys.modules.pop(spec.name, None)
-        return NativeToolset(tofu=verified["tofu"], curl=verified["curl"])
+        return NativeToolset(tofu=verified["tofu"], curl=verified["curl"], _proof=_NATIVE_TOOL_PROOF)
     except (OSError, LookupError, ValueError, TypeError, RuntimeError):
         raise NativeSourceHold("TOOLCHAIN_NOT_PROVEN") from None
     except Exception:
@@ -131,7 +135,8 @@ def provided_native_tools(root: Path, manifest: str, interpreter: str) -> Native
 def native_bin(value: str, tool: str, selected: NativeToolset) -> str:
     # This is the *result of the existing verified toolchain loader*, not
     # acceptance of arbitrary paths by Nix store-looking string format.
-    if (not isinstance(selected, NativeToolset) or tool not in ("tofu", "curl")
+    if (not isinstance(selected, NativeToolset)
+            or selected._proof is not _NATIVE_TOOL_PROOF or tool not in ("tofu", "curl")
             or not isinstance(value, str) or not NIX_BIN.fullmatch(value)
             or not value.endswith("/bin/" + tool)
             or value != getattr(selected, tool)):
