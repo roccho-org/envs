@@ -179,8 +179,10 @@ def private_path(path: Path) -> str:
 def private_output_sink(path: Path) -> str:
     name = private_path(path)
     try:
-        if path.exists() and not path.is_file():
-            raise NativeSourceHold("PRIVATE_OUTPUT_NOT_PRIVATE")
+        # Native plan/show/curl outputs may truncate existing files. A prior
+        # backend, original or capture is never a new output destination.
+        if path.exists():
+            raise NativeSourceHold("PRIVATE_OUTPUT_ALREADY_EXISTS")
     except OSError:
         raise NativeSourceHold("PRIVATE_OUTPUT_NOT_PRIVATE") from None
     return name
@@ -234,7 +236,7 @@ def native_plan(tofu: str, root: Path, original: Path, tools: NativeToolset,
     stdout, stderr = _private_streams(private_stdout, private_stderr, original)
     return NativeCommand(
         (native_bin(tofu, "tofu", tools), "-chdir=" + private_path(root),
-         "plan", "-input=false", "-lock=true", "-out=" + private_path(original)),
+         "plan", "-input=false", "-lock=true", "-out=" + private_output_sink(original)),
         private_stdout=stdout, private_stderr=stderr,
     )
 
@@ -361,8 +363,14 @@ def _require_success(receipt: PrivateNativeResult) -> None:
         raise NativeSourceHold("NATIVE_STAGE_UNPROVEN")
 
 
-def _preflight_output_group(sinks: tuple[Path, ...], *protected: Path) -> None:
+def _preflight_output_group(sinks: tuple[Path, ...], *protected: Path,
+                            runner: MailPrivateRunner | None = None) -> None:
     """Check every output sink of a multi-command stage BEFORE its first runner."""
+    if isinstance(runner, MailPrivateRunner):
+        # Check the selected Owner boundary for later outputs before an
+        # earlier init/HEAD/GET could start, not only at each child call.
+        for item in sinks:
+            runner._path(str(item))
     names = [private_output_sink(item) for item in sinks]
     names += [private_path(item) for item in protected]
     if len(names) != len(set(names)):
@@ -377,8 +385,8 @@ def plan_private_once(ops_root: Path, commit: str, tree: str, tofu: str,
     # No auto-apply: future Owner chooses four separate private sinks and one
     # private backend + saved original. Reject unsafe PLAN sinks before INIT.
     verify_native_source(ops_root, commit, tree)
-    _preflight_output_group((init_stdout, init_stderr, plan_stdout, plan_stderr),
-                            private_backend, plan_path)
+    _preflight_output_group((init_stdout, init_stderr, plan_stdout, plan_stderr,
+                             plan_path), private_backend, runner=runner)
     init = native_init(tofu, ops_root, private_backend, tools,
                        private_stdout=init_stdout, private_stderr=init_stderr)
     _require_success(runner(init))
@@ -414,8 +422,9 @@ def inspect_original_once(curl: str, tofu: str, root: Path, account: str,
     verify_native_source(root, OPS_MAIL_COMMIT, OPS_MAIL_TREE)
     # Refuse all unsafe GET/SHOW sinks BEFORE any GET or runner callback.
     _preflight_output_group(
-        (private_get_stdout, private_get_stderr, private_stdout, private_stderr),
-        private_review_json, private_path_to_original, headers,
+        (private_get_stdout, private_get_stderr, private_stdout, private_stderr,
+         private_review_json, private_path_to_original, headers),
+        runner=runner,
     )
     inspect = native_inspect(tofu, root, private_path_to_original,
                              private_review_json, private_stdout, private_stderr, tools)
@@ -438,6 +447,7 @@ def apply_same_original_once(curl: str, tofu: str, root: Path, account: str,
                              stored_etag: str, owner_readback: str,
                              fixed_r_readback: str, before_apply: str,
                              runner: MailPrivateRunner, tools: NativeToolset, *,
+                             get_headers: Path,
                              head_stdout: Path, head_stderr: Path,
                              get_stdout: Path, get_stderr: Path,
                              apply_stdout: Path, apply_stderr: Path) -> None:
@@ -449,18 +459,19 @@ def apply_same_original_once(curl: str, tofu: str, root: Path, account: str,
     # Refuse missing/public/alias/colliding sink of ANY later native step
     # BEFORE the first conditional HEAD could read private object metadata.
     _preflight_output_group(
-        (head_stdout, head_stderr, get_stdout, get_stderr, apply_stdout, apply_stderr),
-        private_path_to_original, headers,
+        (head_stdout, head_stderr, get_stdout, get_stderr, apply_stdout, apply_stderr,
+         private_path_to_original, headers, get_headers),
+        runner=runner,
     )
     commands = [
         private_r2_object(
             curl, method, account, bucket, key, private_path_to_original,
-            headers, access_id, access_secret, stored_etag, tools=tools,
+            response_headers, access_id, access_secret, stored_etag, tools=tools,
             private_stdout=stdout, private_stderr=stderr,
         )
-        for method, stdout, stderr in (
-            ("HEAD", head_stdout, head_stderr),
-            ("GET", get_stdout, get_stderr),
+        for method, response_headers, stdout, stderr in (
+            ("HEAD", headers, head_stdout, head_stderr),
+            ("GET", get_headers, get_stdout, get_stderr),
         )
     ]
     apply = native_apply(
@@ -647,8 +658,8 @@ class MailPrivateRunner:
     def _command(self, cmd: NativeCommand) -> Path | None:
         inp = self._inputs
         inp.check()
-        self._path(cmd.private_stdout)
-        self._path(cmd.private_stderr)
+        private_output_sink(self._path(cmd.private_stdout))
+        private_output_sink(self._path(cmd.private_stderr))
         args = cmd.argv
         if len(args) >= 4 and args[0] == self._tools.tofu:
             if args[1] != "-chdir=" + str(inp.ops_root) or cmd.stdin is not None:
@@ -661,13 +672,18 @@ class MailPrivateRunner:
                 valid = (len(args) == 6 and args[3:5] == ("-input=false", "-lock=true")
                          and args[5].startswith("-out="))
                 if valid:
-                    self._path(args[5][5:])
+                    output = self._path(args[5][5:])
+                    _private_streams(Path(cmd.private_stdout), Path(cmd.private_stderr), output)
+                    private_output_sink(output)
             elif args[2] == "show":
                 valid = (len(args) == 6 and args[3].startswith("-plan=")
                          and args[4].startswith("-json-into=") and args[5] == "-no-color")
                 if valid:
-                    self._path(args[3][6:])
-                    self._path(args[4][11:])
+                    original = self._path(args[3][6:])
+                    output = self._path(args[4][11:])
+                    _private_streams(Path(cmd.private_stdout), Path(cmd.private_stderr),
+                                     original, output)
+                    private_output_sink(output)
             elif args[2] == "apply":
                 valid = len(args) == 6 and args[3:5] == ("-input=false", "-lock=true")
                 if valid:

@@ -331,6 +331,198 @@ def check_native_source_and_plan() -> None:
                 )), "unselected native destroy command")
                 assert not (private / "destroy.out").exists()
 
+                # Native -out/-json-into/curl destinations can truncate files.
+                # Exercise intended stage helpers, including their earlier
+                # commands, through the actual runner and offline children.
+                retained = private / "preserved-original.enc"
+                retained.write_bytes(b"OFFLINE_ENCRYPTED_PLAN")
+                old_capture = private / "preserved-capture"
+                old_capture.write_bytes(b"PRESERVED_PRIVATE_CAPTURE")
+                for path in (retained, old_capture):
+                    path.chmod(0o600)
+                protected = {path: path.read_bytes()
+                             for path in (backend, retained, old_capture)}
+                physical_events = []
+                original_etag = '"offline-retained-original"'
+                original_headers = ('HTTP/1.1 200 OK\r\nETag: '
+                                    + original_etag + '\r\n\r\n').encode()
+
+                def stage_streams(name):
+                    return (private / (name + ".out"), private / (name + ".err"))
+
+                def private_plan(name, destination, *, later_stderr=None):
+                    init_out, init_err = stage_streams(name + "-init")
+                    plan_out, plan_err = stage_streams(name + "-plan")
+                    mail.plan_private_once(
+                        ops, mail.OPS_MAIL_COMMIT, mail.OPS_MAIL_TREE,
+                        tofu, backend, destination, tools, real_runner,
+                        init_stdout=init_out, init_stderr=init_err,
+                        plan_stdout=plan_out,
+                        plan_stderr=plan_err if later_stderr is None else later_stderr,
+                    )
+
+                def private_inspect(name, destination, review):
+                    get_out, get_err = stage_streams(name + "-get")
+                    show_out, show_err = stage_streams(name + "-show")
+                    mail.inspect_original_once(
+                        curl, tofu, ops, config.account, config.plan_bucket,
+                        config.plan_key, destination, private / (name + ".headers"),
+                        private_values["AWS_ACCESS_KEY_ID"],
+                        private_values["AWS_SECRET_ACCESS_KEY"],
+                        original_etag, real_runner, tools,
+                        private_review_json=review, private_stdout=show_out,
+                        private_stderr=show_err, private_get_stdout=get_out,
+                        private_get_stderr=get_err,
+                    )
+
+                def private_apply(name, destination, *, get_header=None,
+                                  later_stderr=None):
+                    head_out, head_err = stage_streams(name + "-head")
+                    get_out, get_err = stage_streams(name + "-get")
+                    apply_out, apply_err = stage_streams(name + "-apply")
+                    mail.apply_same_original_once(
+                        curl, tofu, ops, config.account, config.plan_bucket,
+                        config.plan_key, destination, private / (name + "-head.headers"),
+                        private_values["AWS_ACCESS_KEY_ID"],
+                        private_values["AWS_SECRET_ACCESS_KEY"],
+                        original_etag, original_etag, original_etag, original_etag,
+                        real_runner, tools,
+                        get_headers=private / (name + "-get.headers")
+                                    if get_header is None else get_header,
+                        head_stdout=head_out, head_stderr=head_err,
+                        get_stdout=get_out, get_stderr=get_err,
+                        apply_stdout=apply_out,
+                        apply_stderr=apply_err if later_stderr is None else later_stderr,
+                    )
+
+                def offline_native_child(argv, **kwargs):
+                    physical_events.append(tuple(argv))
+                    assert kwargs["umask"] == 0o077 and kwargs["close_fds"]
+                    writes = []
+                    if argv[0] == tofu:
+                        assert kwargs["env"]["TF_ENCRYPTION"] == encryption
+                        if argv[2] == "plan":
+                            writes.append((argv[-1][5:], b"OFFLINE_ENCRYPTED_PLAN"))
+                        elif argv[2] == "show":
+                            writes.append((argv[4][11:], b'{"synthetic_original":true}'))
+                        elif argv[2] == "apply":
+                            assert Path(argv[-1]).read_bytes() == b"OFFLINE_ENCRYPTED_PLAN"
+                    else:
+                        assert argv == (curl, "-q", "--config", "-")
+                        assert "AWS_SECRET_ACCESS_KEY" not in kwargs["env"]
+                        # communicate supplies native config later; the fixed
+                        # offline child reads stdin just as curl does.
+                    script = (
+                        "import json, pathlib, sys\n"
+                        "writes = " + repr(writes) + "\n"
+                        + ("fields = {line.split(' = ', 1)[0]: json.loads(line.split(' = ', 1)[1]) "
+                           "for line in sys.stdin.read().splitlines() if ' = ' in line}\n"
+                           "writes.append((fields['dump-header'], " + repr(original_headers) + "))\n"
+                           "if fields['request'] == 'GET': writes.append((fields['output'], b'OFFLINE_ENCRYPTED_PLAN'))\n"
+                           if argv[0] == curl else "")
+                        + "for name, data in writes: pathlib.Path(name).write_bytes(data)\n"
+                        "sys.stdout.buffer.write(b'OFFLINE_PRIVATE_STDOUT')\n"
+                        "sys.stderr.buffer.write(b'OFFLINE_PRIVATE_STDERR')\n"
+                    )
+                    return real_popen([sys.executable, "-I", "-c", script], **kwargs)
+
+                mail.subprocess.Popen = offline_native_child
+                try:
+                    # A command created with a fresh path must still refuse
+                    # if that native output exists when the runner is called.
+                    for kind in ("plan", "show"):
+                        output = private / ("late-existing-" + kind)
+                        stdout, stderr = stage_streams("late-existing-" + kind)
+                        command = (
+                            mail.native_plan(tofu, ops, output, tools,
+                                             private_stdout=stdout, private_stderr=stderr)
+                            if kind == "plan" else
+                            mail.native_inspect(tofu, ops, retained, output,
+                                                stdout, stderr, tools)
+                        )
+                        output.write_bytes(b"CREATED_AFTER_COMMAND_CONSTRUCTION")
+                        output.chmod(0o600)
+                        before_files = set(private.iterdir())
+                        must_refuse(lambda command=command: real_runner(command),
+                                    "late-created native " + kind + " output")
+                        assert output.read_bytes() == b"CREATED_AFTER_COMMAND_CONSTRUCTION"
+                        assert physical_events == [] and set(private.iterdir()) == before_files
+
+                    # Runner command-shape validation is also a boundary:
+                    # a fresh native output cannot alias its own capture.
+                    for kind in ("plan", "show"):
+                        stdout, stderr = stage_streams("native-alias-" + kind)
+                        argv = (
+                            (tofu, "-chdir=" + str(ops), "plan", "-input=false",
+                             "-lock=true", "-out=" + str(stdout))
+                            if kind == "plan" else
+                            (tofu, "-chdir=" + str(ops), "show", "-plan=" + str(retained),
+                             "-json-into=" + str(stdout), "-no-color")
+                        )
+                        command = mail.NativeCommand(argv, private_stdout=str(stdout),
+                                                     private_stderr=str(stderr))
+                        before_files = set(private.iterdir())
+                        must_refuse(lambda command=command: real_runner(command),
+                                    "native " + kind + " output aliases stdout")
+                        assert physical_events == [] and set(private.iterdir()) == before_files
+
+                    bad_stages = (
+                        lambda: private_plan("backend-plan", backend),
+                        lambda: private_plan("retained-plan", retained),
+                        lambda: private_plan("late-capture", private / "late-plan.enc",
+                                             later_stderr=old_capture),
+                        lambda: private_plan("outside-owner", home / "outside-plan.enc"),
+                        lambda: private_inspect("backend-json", private / "get-original.enc", backend),
+                        lambda: private_inspect("backend-get", backend, private / "fresh-review.json"),
+                        lambda: private_inspect("retained-get", retained, private / "fresh-review.json"),
+                        lambda: private_inspect("old-review", private / "get-original.enc", old_capture),
+                        lambda: private_inspect("outside-review", private / "get-original.enc",
+                                                home / "outside-review.json"),
+                        lambda: private_apply("retained-apply", retained),
+                        lambda: private_apply("late-header", private / "apply-original.enc",
+                                              get_header=old_capture),
+                        lambda: private_apply("outside-header", private / "apply-original.enc",
+                                              get_header=home / "outside-header"),
+                        lambda: private_apply("late-stream", private / "apply-original.enc",
+                                              later_stderr=old_capture),
+                        lambda: private_apply("same-header", private / "apply-original.enc",
+                                              get_header=private / "same-header-head.headers"),
+                    )
+                    for action in bad_stages:
+                        before_files = set(private.iterdir())
+                        must_refuse(action, "destructive intended-stage output")
+                        assert physical_events == [], "later collision started an earlier child"
+                        assert set(private.iterdir()) == before_files
+                        assert all(path.read_bytes() == data for path, data in protected.items())
+
+                    fresh_plan = private / "positive-plan.enc"
+                    inspection_original = private / "positive-inspection.enc"
+                    inspection_json = private / "positive-inspection.json"
+                    apply_original = private / "positive-apply.enc"
+                    private_plan("positive", fresh_plan)
+                    put_out, put_err = stage_streams("positive-put")
+                    assert mail.retain_original_once(
+                        curl, config.account, config.plan_bucket, config.plan_key,
+                        fresh_plan, private / "positive-put.headers",
+                        private_values["AWS_ACCESS_KEY_ID"],
+                        private_values["AWS_SECRET_ACCESS_KEY"], real_runner, tools,
+                        private_stdout=put_out, private_stderr=put_err,
+                    ) == original_etag
+                    private_inspect("positive-inspect", inspection_original, inspection_json)
+                    private_apply("positive-apply", apply_original)
+                    assert len(physical_events) == 8
+                    assert inspection_original.read_bytes() == apply_original.read_bytes() == fresh_plan.read_bytes()
+                    assert inspection_json.read_bytes() == b'{"synthetic_original":true}'
+                    assert all(path.read_bytes() == data for path, data in protected.items())
+                    for path in private.glob("positive*"):
+                        assert path.stat().st_mode & 0o077 == 0
+                        if path.suffix == ".out":
+                            assert path.read_bytes() == b"OFFLINE_PRIVATE_STDOUT"
+                        elif path.suffix == ".err":
+                            assert path.read_bytes() == b"OFFLINE_PRIVATE_STDERR"
+                finally:
+                    mail.subprocess.Popen = real_popen
+
                 def select_sinks(kwargs, stage):
                     kwargs.setdefault("private_stdout", sinks[stage][0])
                     kwargs.setdefault("private_stderr", sinks[stage][1])
@@ -364,6 +556,7 @@ def check_native_source_and_plan() -> None:
                     return mail.inspect_original_once(*args, **kwargs)
 
                 def apply_once(*args, **kwargs):
+                    kwargs.setdefault("get_headers", private / "apply-get.headers")
                     for stage in ("head", "apply_get", "apply"):
                         kwargs.setdefault(stage + "_stdout" if stage != "apply_get" else "get_stdout",
                                           sinks[stage][0])
