@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""M0 manual candidate: synthetic, source-only refusal proof. No real effects."""
+"""Mail manual consumer: synthetic sequencing and refusal. No real effects."""
 from __future__ import annotations
 
 import ast
@@ -18,7 +18,7 @@ CLOSED = {"kind": "envs.mailM0.manual.v1", "status": "INACTIVE", "effect": "NOT_
 
 
 def check_source() -> None:
-    """The real CLI stays a literal direct refusal despite source helpers."""
+    """Only the closed operation selector can reach protected input handling."""
     tree = ast.parse(ADAPTER.read_text(encoding="utf-8"))
     imports = [node for node in ast.walk(tree) if isinstance(node, (ast.Import, ast.ImportFrom))]
     modules = {(node.module if isinstance(node, ast.ImportFrom) else node.names[0].name)
@@ -28,9 +28,10 @@ def check_source() -> None:
                        "stat", "subprocess", "json", "types"}
     main_functions = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "main"]
     assert len(main_functions) == 1
-    assert [ast.unparse(node) for node in main_functions[0].body] == [
-        "print(CLOSED_RESULT)", "return EXIT_INACTIVE",
-    ]
+    gate = main_functions[0].body[0]
+    assert isinstance(gate, ast.If)
+    assert [ast.unparse(node) for node in gate.body] == ["print(CLOSED_RESULT)", "return EXIT_INACTIVE"]
+    assert "sys.argv[2] not in ('preview', 'apply')" in ast.unparse(gate.test)
     # There must be no import-time function calls other than the normal
     # guarded __main__ exit. Named native helpers are inert definitions.
     for node in tree.body:
@@ -44,13 +45,11 @@ def check_source() -> None:
     code = ADAPTER.read_text(encoding="utf-8")
     assert 'EXIT_INACTIVE = 78' in code and "CLOSED_RESULT = " in code
     assert code.count("import os\n") == code.count("import subprocess\n") == 1
-    assert "os.environ" not in code
+    assert code.count("os.environ") == 1
     functions = {node.name for node in tree.body if isinstance(node, ast.FunctionDef)}
     assert not functions & {"native_plan", "native_inspect", "private_r2_object",
                             "retain_original_once", "inspect_original_once",
                             "apply_same_original_once", "require_same_original"}
-    # Real SOURCE-only runner definitions may use subprocess; actual main()
-    # stays the two AST statements above and has no reachable activation.
 
 
 def check_native_entry() -> None:
@@ -88,20 +87,38 @@ def check_native_entry() -> None:
             assert done.stdout == json.dumps(CLOSED, separators=(",", ":")) + "\n"
             assert marker not in done.stdout
             assert not child.exists(), "a child ran before the independent source refusal"
+        for operation in ("preview", "apply"):
+            done = subprocess.run(
+                [sys.executable, "-I", str(ADAPTER), "--operation", operation],
+                cwd=home, env=env, capture_output=True, text=True, timeout=6, check=False,
+            )
+            assert done.returncode == 78 and done.stderr == ""
+            assert json.loads(done.stdout)["status"] == "INPUT_UNPROVEN"
+            assert marker not in done.stdout and not child.exists()
         assert sorted(p.name for p in home.iterdir()) == ["bin"], "unexpected state/output file"
 
 
-def check_job_disabled() -> None:
+def check_manual_job() -> None:
     content = WORKFLOW.read_text(encoding="utf-8")
-    gate = "    if: ${{ false && github.repository == 'roccho-org/envs'"
+    gate = "    if: ${{ github.repository == 'roccho-org/envs'"
     assert content.count(gate) == 1
     assert content.index(gate) < content.index("    environment: dev-rent-tunnel") < content.index("    steps:")
     assert content.count("    if:") == 1
     assert "on:\n  workflow_dispatch:" in content
     assert "      expected_source_sha:" in content
-    assert "${{ secrets." not in content and "${{ vars." not in content
+    for name in ("MAIL_CONFIG", "CLOUDFLARE_API_TOKEN", "AWS_ACCESS_KEY_ID",
+                 "AWS_SECRET_ACCESS_KEY", "RENT_STATE_PASSPHRASE"):
+        assert content.count("${{ secrets." + name + " }}") == 1
+    for clause in ("github.sha == inputs.expected_source_sha", "github.run_attempt == 1",
+                   "github.actor == 'roccho-dev'", "github.actor_id == '40359643'",
+                   "github.triggering_actor == 'roccho-dev'"):
+        assert clause in content
+    assert "${{ vars." not in content
+    assert "options: [preview, apply]" in content and "default: preview" in content
+    assert "ref: e0c208356d0e2908224cbbd356c69256cb0e4528" in content
+    assert "upload-artifact" not in content and "cancel-in-progress: false" in content
     assert "    needs:" not in content
-    assert content.count("run: '\"$ENVS_EFFECT_BIN/mail-routing-root\"'") == 1
+    assert content.count('"$ENVS_EFFECT_BIN/mail-routing-root" --operation "$MAIL_OPERATION"') == 1
 
 
 def check_native_source_and_plan() -> None:
@@ -385,6 +402,52 @@ def check_native_source_and_plan() -> None:
                     assert set(home.rglob("*")) == before_files and backend.read_bytes() == before_backend
                 finally:
                     mail.subprocess.Popen, mail.os.open = before_children, before_open
+
+                # The consumer initializes each fresh runner, then selects
+                # exactly one command. Init/error/timeout never retries or
+                # starts the other operation; successful apply is unverified.
+                for operation, init_code, operation_code, expected in (
+                    ("preview", 0, 0, ("NO_OP", 0)),
+                    ("preview", 0, 2, ("DELTA", 2)),
+                    ("apply", 0, 0, ("APPLIED_UNVERIFIED", 0)),
+                    ("apply", 0, 1, ("OPERATION_UNPROVEN", 1)),
+                    ("apply", 0, 124, ("OPERATION_UNPROVEN", 124)),
+                    ("apply", 0, 125, ("OPERATION_UNPROVEN", 125)),
+                    ("apply", 1, 0, ("INIT_UNPROVEN", 1)),
+                    ("preview", 124, 0, ("INIT_UNPROVEN", 124)),
+                    ("apply", 125, 0, ("INIT_UNPROVEN", 125)),
+                ):
+                    commands = []
+                    def consumer_factory(selected, selected_tools):
+                        assert selected is composed and selected_tools is tools
+                        def consume(command):
+                            commands.append(command)
+                            code = init_code if len(commands) == 1 else operation_code
+                            return mail.PrivateNativeResult(code)
+                        return consume
+                    result = mail.run_after(operation, composed, tools, runner_factory=consumer_factory)
+                    assert result == expected
+                    assert len(commands) == (1 if init_code else 2)
+                    assert commands[0].argv[2] == "init"
+                    if init_code == 0:
+                        assert commands[1].argv[2:] == (
+                            mail.NOOP_PLAN_ARGS if operation == "preview" else mail.APPLY_ARGS)
+                    captures = [name for cmd in commands for name in (cmd.private_stdout, cmd.private_stderr)]
+                    assert len(captures) == len(set(captures))
+                    assert all(Path(name).parent == private for name in captures)
+                    assert marker not in repr(result)
+                for fail_at, expected in ((1, "INIT_UNPROVEN"), (2, "OPERATION_UNPROVEN")):
+                    calls = []
+                    def exception_factory(*_args):
+                        def consume(command):
+                            calls.append(command)
+                            if len(calls) == fail_at:
+                                raise OSError(marker)
+                            return mail.PrivateNativeResult(0)
+                        return consume
+                    assert mail.run_after("apply", composed, tools, runner_factory=exception_factory) == (expected, 1)
+                    assert len(calls) == fail_at
+                must_refuse(lambda: mail.run_after("destroy", composed, tools), "unsupported consumer operation")
                 real_popen = mail.subprocess.Popen
 
                 def run_synthetic(command, suffix, *, code=0, pause=False, start_failure=False):
@@ -765,10 +828,10 @@ def check_provided_native_toolchain() -> None:
 def main() -> None:
     check_source()
     check_native_entry()
-    check_job_disabled()
+    check_manual_job()
     check_native_source_and_plan()
     check_provided_native_toolchain()
-    print("mail M0 native source/closed-root/pinned-tool/speculative-plan/automatic-apply and hard-inactive CLI test: PASS; no real effects")
+    print("mail M0 pinned source/tools, private input/capture, init-first single operation and CLI refusal: PASS; no real effects")
 
 
 if __name__ == "__main__":

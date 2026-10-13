@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
-"""M0 candidate: hard-inactive independently of the GitHub job gate.
+"""One explicit Mail operation with fixed Ops source and private captures.
 
-The actual CLI entry refuses before protected inputs or child processes.
-Inert SOURCE-only native helper functions below describe verified Ops blobs,
-OpenTofu speculative plan and automatic-plan apply with private captures.
-Only a separately admitted future Owner process could call them; main never
-does, and this committed entry has no activation path.
+No arguments still refuse before protected inputs. The manual entry consumes
+one private input snapshot, initializes the selected backend, then performs
+exactly one preview or apply. It never saves a plan or retries an operation.
 """
 from __future__ import annotations
 
@@ -17,11 +15,8 @@ import stat
 import signal
 import subprocess
 
-# SOURCE-only operations. The CLI main() below never references these
-# functions: nobody can activate them by argv, environment or GitHub dispatch.
-# A separately admitted future owner entry must supply private inputs,
-# fixed-source/target review and its own effect-specific permission.
-# These are native OpenTofu commands using the existing Mail root.
+# Native OpenTofu commands using the existing Mail root. The Owner selects
+# the private target/stage; source acceptance alone does not execute them.
 from dataclasses import dataclass, field
 import hashlib
 import re
@@ -273,8 +268,7 @@ def _require_success(receipt: PrivateNativeResult) -> None:
         raise NativeSourceHold("NATIVE_STAGE_UNPROVEN")
 
 
-# A real private process implementation, but deliberately NO executable entry:
-# the existing whole-job if:false and CLI exit78 are unchanged.
+# Protected inputs are separate from public workflow dispatch metadata.
 MAIL_REQUIRED = frozenset({
     "CLOUDFLARE_API_TOKEN", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
     "TF_ENCRYPTION", "TF_VAR_account_id", "TF_VAR_zone_id",
@@ -343,7 +337,7 @@ def _mail_encryption_source(value: str) -> None:
 
 @dataclass(frozen=True, repr=False)
 class MailPrivateInputs:
-    """Future Owner-provided values only, with no credential discovery/default."""
+    """Owner-provided values only, with no credential discovery/default."""
     home: Path
     ops_root: Path
     backend: Path
@@ -415,21 +409,10 @@ MAIL_ZONE_NAME = re.compile(
 MAIL_LITERAL_ADDRESS = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+%-]*@[A-Za-z0-9.-]+$")
 
 
-def compose_after_inputs(config_json: bytes, slots: Mapping[str, str], *,
-                         environment_name: str, home: Path, ops_root: Path,
-                         backend: Path) -> MailPrivateInputs:
-    """Compose one explicit private After context; no acquisition or effect.
-
-    Existing envs age/SOPS setup is upstream, not a Mail payload or per-mail
-    decryptor. The environment label, flags and IDs cannot supply principal,
-    verified status, approved passphrase reuse or Owner/runtime permission.
-    All such operating prerequisites remain independently established.
-    """
+def _selected_config(config_json: bytes) -> dict[str, object]:
     try:
-        if (type(config_json) is not bytes or not 0 < len(config_json) <= 32768
-                or environment_name != "dev-rent-tunnel"
-                or any(not isinstance(path, Path) for path in (home, ops_root, backend))):
-            raise NativeSourceHold("MAIL_AFTER_CONTEXT_UNSELECTED")
+        if type(config_json) is not bytes or not 0 < len(config_json) <= 32768:
+            raise NativeSourceHold("MAIL_AFTER_CONFIG_UNSELECTED")
 
         def unique(pairs: list[tuple[str, object]]) -> dict[str, object]:
             selected: dict[str, object] = {}
@@ -465,6 +448,30 @@ def compose_after_inputs(config_json: bytes, slots: Mapping[str, str], *,
         verified = config["verified_destination_id"]
         if verified is not None and (not isinstance(verified, str) or not ACCOUNT_32.fullmatch(verified)):
             raise NativeSourceHold("MAIL_AFTER_CONFIG_UNSELECTED")
+        if (not BUCKET.fullmatch(config["state_bucket"])
+                or not MAIL_STATE_KEY.fullmatch(config["state_key"])
+                or ".." in config["state_key"].split("/") or "//" in config["state_key"]):
+            raise NativeSourceHold("MAIL_AFTER_CONFIG_UNSELECTED")
+        return config
+    except NativeSourceHold:
+        raise
+    except Exception:
+        raise NativeSourceHold("MAIL_AFTER_CONFIG_UNSELECTED") from None
+
+
+def compose_after_inputs(config_json: bytes, slots: Mapping[str, str], *,
+                         environment_name: str, home: Path, ops_root: Path,
+                         backend: Path) -> MailPrivateInputs:
+    """Compose one immutable private context; no discovery or effect.
+
+    Existing age/SOPS setup stays upstream. Labels, flags and IDs cannot
+    supply provider authority, verified status or key recovery.
+    """
+    try:
+        if (environment_name != "dev-rent-tunnel"
+                or any(not isinstance(path, Path) for path in (home, ops_root, backend))):
+            raise NativeSourceHold("MAIL_AFTER_CONTEXT_UNSELECTED")
+        config = _selected_config(config_json)
         if not isinstance(slots, Mapping):
             raise NativeSourceHold("MAIL_AFTER_SLOTS_UNSELECTED")
         # Capture the supplied mapping once BEFORE validation. No later read
@@ -519,8 +526,8 @@ def compose_after_inputs(config_json: bytes, slots: Mapping[str, str], *,
 class MailPrivateRunner:
     """A real private subprocess/capture adapter for existing Mail stages.
 
-    Not an arbitrary command executor. No source-defined CLI/dispatch or
-    approval state machine; fixed-source/target admission and stage GO stay external.
+    Not an arbitrary command executor. Target/stage approval stays with the
+    Owner; each process uses the same validated immutable input snapshot.
     """
     def __init__(self, inputs: MailPrivateInputs, tools: NativeToolset,
                  *, timeout: int = 90) -> None:
@@ -626,11 +633,89 @@ EXIT_INACTIVE = 78
 CLOSED_RESULT = '{"kind":"envs.mailM0.manual.v1","status":"INACTIVE","effect":"NOT_RUN"}'
 
 
+def run_after(operation: str, inputs: MailPrivateInputs, tools: NativeToolset,
+              *, runner_factory=MailPrivateRunner) -> tuple[str, int]:
+    """Fresh-runner init, then exactly one operation; never retry or chain apply.
+
+    Init failure prevents the selected operation. An apply success is not a
+    convergence or mail receipt; a separate preview must establish no-op.
+    """
+    if operation not in ("preview", "apply"):
+        raise NativeSourceHold("MAIL_OPERATION_UNSELECTED")
+    run = runner_factory(inputs, tools)
+    try:
+        receipt = run(native_init(
+            tools.tofu, inputs.ops_root, inputs.backend, tools,
+            private_stdout=inputs.home / "init.out", private_stderr=inputs.home / "init.err",
+        ))
+    except Exception:
+        return "INIT_UNPROVEN", 1
+    if receipt.returncode != 0:
+        return "INIT_UNPROVEN", receipt.returncode
+    command = native_noop if operation == "preview" else native_apply
+    try:
+        receipt = run(command(
+            tools.tofu, inputs.ops_root, tools,
+            private_stdout=inputs.home / (operation + ".out"),
+            private_stderr=inputs.home / (operation + ".err"),
+        ))
+    except Exception:
+        return "OPERATION_UNPROVEN", 1
+    if receipt.returncode != 0:
+        return ("DELTA" if operation == "preview" and receipt.returncode == 2
+                else "OPERATION_UNPROVEN"), receipt.returncode
+    return ("NO_OP" if operation == "preview" else "APPLIED_UNVERIFIED"), 0
+
+
+def manual_entry(operation: str, environ: Mapping[str, str]) -> tuple[str, int]:
+    """Consume the selected Environment slots without credential discovery.
+
+    The workflow prepares an absent owner-only home and the four pinned Ops
+    files. No key is generated, decrypted, copied or persisted here.
+    """
+    selected = {name: environ.get(name, "") for name in
+                (*MAIL_AFTER_SLOTS, "MAIL_CONFIG", "MAIL_HOME", "ENVS_EFFECT_TOOLCHAIN")}
+    source = Path(__file__).resolve().parents[1]
+    tools = provided_native_tools(source, selected.get("ENVS_EFFECT_TOOLCHAIN", ""), sys.executable)
+    home = Path(selected.get("MAIL_HOME", ""))
+    _owner_home(home)
+    ops_root = home / "root"
+    verify_native_source(ops_root, OPS_MAIL_COMMIT, OPS_MAIL_TREE)
+    config_json = selected.get("MAIL_CONFIG", "").encode("utf-8")
+    config = _selected_config(config_json)
+    # The preflight flag describes completed Owner review of these exact
+    # resources; false never authorizes even an init with protected inputs.
+    if config["preflight_approved"] is not True:
+        raise NativeSourceHold("MAIL_PREFLIGHT_UNAPPROVED")
+    backend = home / "backend.hcl"
+    private_output_sink(backend)
+    content = ('bucket = "' + config["state_bucket"] + '"\n'
+               'key = "' + config["state_key"] + '"\n'
+               'endpoints = { s3 = "https://' + config["account_id"]
+               + '.r2.cloudflarestorage.com" }\n').encode("ascii")
+    fd = os.open(str(backend), os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                 os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    with os.fdopen(fd, "wb") as stream:
+        stream.write(content)
+    inputs = compose_after_inputs(
+        config_json, {name: selected.get(name, "") for name in MAIL_AFTER_SLOTS},
+        environment_name="dev-rent-tunnel", home=home, ops_root=ops_root, backend=backend,
+    )
+    return run_after(operation, inputs, tools)
+
+
 def main() -> int:
-    # This unconditional refusal is intentionally before any argument or
-    # environment evaluation. There is NO activation flag/escape path.
-    print(CLOSED_RESULT)
-    return EXIT_INACTIVE
+    # Invalid/no arguments still refuse before reading any protected input.
+    if len(sys.argv) != 3 or sys.argv[1] != "--operation" or sys.argv[2] not in ("preview", "apply"):
+        print(CLOSED_RESULT)
+        return EXIT_INACTIVE
+    try:
+        status, code = manual_entry(sys.argv[2], os.environ)
+    except Exception:
+        # No exception text, traceback, path, target or child output escapes.
+        status, code = "INPUT_UNPROVEN", 78
+    print(json.dumps({"kind": "envs.mailM0.manual.v1", "status": status}, separators=(",", ":")))
+    return code
 
 
 if __name__ == "__main__":

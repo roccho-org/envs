@@ -79,8 +79,7 @@ def main() -> None:
     assert baseline["canonical_branch"] == "proposals"
     assert baseline["retained_compatibility_branch"] == "main"
 
-    # M0 candidate: any attempt to activate the manual job, read protected
-    # inputs, add a child or bypass the direct root refusal is independently RED.
+    # Manual Mail operations retain actor/source and private-input boundaries.
     manual = ".github/workflows/operate-dev-mail-routing.yml"
     # All source-level triggers are denied except the one manual dispatch.
     # Neither an added scheduled/repository event nor job-level write scope may
@@ -104,7 +103,8 @@ def main() -> None:
         assert repository.inspect(commented)["status"] == "PASS"
     finally:
         shutil.rmtree(commented.parent, ignore_errors=True)
-    expect_red(replace_text(manual, "if: ${{ false &&", "if: ${{ true &&"))
+    expect_red(replace_text(manual, "github.run_attempt == 1", "github.run_attempt >= 1"))
+    expect_red(replace_text(manual, "options: [preview, apply]", "options: [preview, apply, destroy]"))
     expect_red(replace_text(manual, "environment: dev-rent-tunnel", "environment: dev-projection"))
     expect_red(replace_text(manual,
                             '"$ENVS_EFFECT_BIN/mail-routing-root"',
