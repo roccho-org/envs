@@ -27,7 +27,7 @@ def check_source() -> None:
                for node in imports}
     assert modules == {"__future__", "sys", "importlib.util", "dataclasses",
                        "hashlib", "re", "pathlib", "typing", "os", "signal",
-                       "stat", "subprocess"}
+                       "stat", "subprocess", "json", "types"}
     main_functions = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "main"]
     assert len(main_functions) == 1
     assert [ast.unparse(node) for node in main_functions[0].body] == [
@@ -249,6 +249,162 @@ def check_native_source_and_plan() -> None:
                 )
                 real_runner = mail.MailPrivateRunner(config, tools, timeout=1)
                 config.check()
+                # Pure private After composition: explicit config/slots only,
+                # existing envs formatter, no child/write/default discovery.
+                after_config = {
+                    "account_id": config.account, "zone_id": "b" * 32,
+                    "zone_name": "example.invalid", "alias_address": "m0@example.invalid",
+                    "destination_address": "synthetic.fixture@gmail.com", "rule_priority": 0,
+                    "state_bucket": config.state_bucket, "state_key": config.state_key,
+                    "plan_bucket": config.plan_bucket, "plan_key": config.plan_key,
+                    "verified_destination_id": "d" * 32, "manage_dns": False,
+                    "manage_destination": False, "manage_rule": False, "preflight_approved": False,
+                }
+                marker = "PRIVATE_AFTER_INPUT_CANARY"
+                after_slots = {
+                    "CLOUDFLARE_API_TOKEN": marker + "-cf", "AWS_ACCESS_KEY_ID": marker + "-id",
+                    "AWS_SECRET_ACCESS_KEY": marker + "-secret", "RENT_STATE_PASSPHRASE": "c" * 64,
+                }
+                context = dict(environment_name="dev-rent-tunnel", home=private,
+                               ops_root=ops, backend=backend)
+                def compose(data=after_config, selected=after_slots, **changed):
+                    encoded = json.dumps(data).encode("utf-8") if isinstance(data, dict) else data
+                    return mail.compose_after_inputs(encoded, selected, **{**context, **changed})
+
+                def refused_composition(action):
+                    try:
+                        action()
+                        raise AssertionError("invalid private After input was accepted")
+                    except mail.NativeSourceHold as error:
+                        assert marker not in str(error) and marker not in repr(error)
+                        assert len(str(error)) < 80 and "\n" not in str(error)
+
+                before_files = set(home.rglob("*"))
+                before_backend = backend.read_bytes()
+                before_children = mail.subprocess.Popen
+                before_open = mail.os.open
+                child_attempts, write_attempts = [], []
+                def no_child(*args, **kwargs):
+                    child_attempts.append(True)
+                    raise AssertionError("input composition launched a child")
+                def no_write(path, flags, *args, **kwargs):
+                    if flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC):
+                        write_attempts.append(True)
+                        raise AssertionError("input composition opened a write")
+                    return before_open(path, flags, *args, **kwargs)
+                mail.subprocess.Popen, mail.os.open = no_child, no_write
+                try:
+                    composed = compose()
+                    assert marker not in repr(composed)
+                    assert composed.values["CLOUDFLARE_API_TOKEN"] == after_slots["CLOUDFLARE_API_TOKEN"]
+                    assert composed.values["AWS_ACCESS_KEY_ID"] == after_slots["AWS_ACCESS_KEY_ID"]
+                    assert composed.values["AWS_SECRET_ACCESS_KEY"] == after_slots["AWS_SECRET_ACCESS_KEY"]
+                    assert "RENT_STATE_PASSPHRASE" not in composed.values
+                    assert 'key_provider "pbkdf2" "mail_m0"' in composed.values["TF_ENCRYPTION"]
+                    assert 'method "aes_gcm" "mail_m0"' in composed.values["TF_ENCRYPTION"]
+                    existing_spec = importlib.util.spec_from_file_location("mail_formatter_fixture", ROOT / "adapters/jev_api.py")
+                    existing = importlib.util.module_from_spec(existing_spec)
+                    sys.modules[existing_spec.name] = existing
+                    try:
+                        exec(compile((ROOT / "adapters/jev_api.py").read_bytes(), str(ROOT / "adapters/jev_api.py"), "exec"), existing.__dict__)
+                        assert existing.ROOT_PASSPHRASE.fullmatch("c" * 64)
+                        assert composed.values["TF_ENCRYPTION"] == existing.encryption_config("mail_m0", "c" * 64)
+                    finally:
+                        sys.modules.pop(existing_spec.name, None)
+                    assert "fallback" not in composed.values["TF_ENCRYPTION"]
+                    assert composed.values["TF_VAR_rule_priority"] == "0"
+                    assert composed.values["TF_VAR_verified_destination_id"] == "d" * 32
+                    assert all(composed.values["TF_VAR_" + name] == "false" for name in mail.MAIL_FLAGS)
+                    null_id = compose({**after_config, "verified_destination_id": None})
+                    assert "TF_VAR_verified_destination_id" not in null_id.values
+                    caller_slots = dict(after_slots)
+                    caller_config = dict(after_config)
+                    snapshot = compose(caller_config, caller_slots)
+                    caller_slots["CLOUDFLARE_API_TOKEN"] = "later-caller-value"
+                    caller_slots["RENT_STATE_PASSPHRASE"] = "f" * 64
+                    caller_config["zone_id"] = "e" * 32
+                    assert snapshot.values["CLOUDFLARE_API_TOKEN"] == marker + "-cf"
+                    assert snapshot.values["TF_VAR_zone_id"] == "b" * 32
+                    assert snapshot.values["TF_ENCRYPTION"] == composed.values["TF_ENCRYPTION"]
+                    try:
+                        snapshot.values["TF_VAR_zone_id"] = "e" * 32
+                        raise AssertionError("After snapshot remained mutable")
+                    except TypeError:
+                        pass
+                    class ChangingSlots(mail.Mapping):
+                        def __init__(self):
+                            self.reads = {name: 0 for name in after_slots}
+                        def __iter__(self):
+                            return iter(after_slots)
+                        def __len__(self):
+                            return len(after_slots)
+                        def __getitem__(self, name):
+                            self.reads[name] += 1
+                            # Original pre-copy validation read each value
+                            # three times; its later copy could get this ESC.
+                            if name == "AWS_SECRET_ACCESS_KEY" and self.reads[name] > 3:
+                                return marker + "\x1b"
+                            return after_slots[name]
+                    changing = ChangingSlots()
+                    stable = compose(selected=changing)
+                    assert all(count == 1 for count in changing.reads.values())
+                    assert stable.values["AWS_SECRET_ACCESS_KEY"] == after_slots["AWS_SECRET_ACCESS_KEY"]
+                    class UnsafeDuringCopy(ChangingSlots):
+                        def __getitem__(self, name):
+                            selected = super().__getitem__(name)
+                            return marker + "\t" if name == "AWS_SECRET_ACCESS_KEY" else selected
+                    refused_composition(lambda: compose(selected=UnsafeDuringCopy()))
+                    for key in mail.MAIL_CONFIG_KEYS:
+                        missing = dict(after_config)
+                        del missing[key]
+                        refused_composition(lambda missing=missing: compose(missing))
+                    for key in ("CLOUDFLARE_API_TOKEN", "age_identity", "passphrase", "TF_ENCRYPTION", "unknown"):
+                        refused_composition(lambda key=key: compose({**after_config, key: marker}))
+                    for key, bad in (
+                        ("rule_priority", True), ("rule_priority", 1.5), ("rule_priority", -1),
+                        ("zone_id", True), ("zone_id", "X" * 32), ("zone_name", "bad..zone"),
+                        ("alias_address", "*@example.invalid"), ("alias_address", "m0@other.invalid"),
+                        ("destination_address", "synthetic@example.invalid"),
+                        ("destination_address", "*bad@gmail.com"),
+                        ("verified_destination_id", marker), ("verified_destination_id", "D" * 32),
+                        ("verified_destination_id", False), ("manage_dns", "false"),
+                        ("preflight_approved", 1), ("state_key", "rent/state.tfstate"),
+                        ("plan_key", "mail-m0/plans/../bad"), ("state_bucket", "bad bucket"),
+                        ("zone_name", marker + "\n"),
+                    ):
+                        refused_composition(lambda key=key, bad=bad: compose({**after_config, key: bad}))
+                    for raw in (b"", b"\xff", b"{}", b"[]", b"null", b"{" + marker.encode(),
+                                b'{"account_id":"' + marker.encode() + b'","account_id":"duplicate"}',
+                                b'{"rule_priority":NaN}', b"[" * 1500 + b"]" * 1500,
+                                b'{"rule_priority":' + b"9" * 5000 + b"}", b" " * 32769):
+                        refused_composition(lambda raw=raw: compose(raw))
+                    refused_composition(lambda: mail.compose_after_inputs(marker, after_slots, **context))
+                    for key in mail.MAIL_AFTER_SLOTS:
+                        missing = dict(after_slots)
+                        del missing[key]
+                        refused_composition(lambda missing=missing: compose(selected=missing))
+                    for selected in ({**after_slots, "AWS_SESSION_TOKEN": marker},
+                                     {**after_slots, "RENT_STATE_PASSPHRASE": "AGE-SECRET-KEY-1" + marker},
+                                     {**after_slots, "RENT_STATE_PASSPHRASE": "C" * 64},
+                                     {**after_slots, "AWS_SECRET_ACCESS_KEY": marker + "\n"},
+                                     {**after_slots, "AWS_SECRET_ACCESS_KEY": marker + "\t"},
+                                     {**after_slots, "CLOUDFLARE_API_TOKEN": marker + "\x1b"},
+                                     {**after_slots, "AWS_ACCESS_KEY_ID": marker + "\x7f"},
+                                     {**after_slots, "AWS_ACCESS_KEY_ID": None}):
+                        refused_composition(lambda selected=selected: compose(selected=selected))
+                    for changed in (dict(environment_name="dev-projection"), dict(home=None),
+                                    dict(ops_root=home), dict(backend=home / "absent"),
+                                    dict(backend=Path("/dev/stdout"))):
+                        refused_composition(lambda changed=changed: compose(**changed))
+                    (ops / "extra.tf").write_text("unapproved fixture", encoding="utf-8")
+                    try:
+                        refused_composition(compose)
+                    finally:
+                        (ops / "extra.tf").unlink()
+                    assert child_attempts == [] and write_attempts == []
+                    assert set(home.rglob("*")) == before_files and backend.read_bytes() == before_backend
+                finally:
+                    mail.subprocess.Popen, mail.os.open = before_children, before_open
                 real_popen = mail.subprocess.Popen
 
                 def run_synthetic(command, suffix, *, code=0, pause=False, start_failure=False):
@@ -996,6 +1152,18 @@ def check_provided_native_toolchain() -> None:
         help_plan = subprocess.run([selection.tofu, "plan", "-help"],
                                    capture_output=True, text=True, check=False, timeout=15)
         assert help_plan.returncode == 0 and "-detailed-exitcode" in help_plan.stdout
+        # The exact current envs formatter, not a hand-written encryption
+        # substitute, supplies native compatibility's synthetic-only value.
+        formatter_spec = importlib.util.spec_from_file_location("mail_provided_formatter", ROOT / "adapters/jev_api.py")
+        formatter = importlib.util.module_from_spec(formatter_spec)
+        sys.modules[formatter_spec.name] = formatter
+        try:
+            exec(compile((ROOT / "adapters/jev_api.py").read_bytes(), str(ROOT / "adapters/jev_api.py"), "exec"), formatter.__dict__)
+            assert formatter.ROOT_PASSPHRASE.fullmatch("c" * 64)
+            native_encryption = formatter.encryption_config("mail_m0", "c" * 64)
+            mail._mail_encryption_source(native_encryption)
+        finally:
+            sys.modules.pop(formatter_spec.name, None)
         # Actual supplied native0/2/1 behavior, independently of the synthetic
         # runner mapping. These ephemeral roots are NOT the Mail Ops root:
         # empty or built-in terraform_data only; no remote backend/provider,
@@ -1011,6 +1179,7 @@ def check_provided_native_toolchain() -> None:
                 ("empty", "", 0),
                 ("builtin-delta", 'resource "terraform_data" "fixture" { input = "synthetic-only" }\n', 2),
                 ("invalid", 'resource "terraform_data" "broken" {\n', 1),
+                ("encrypted-empty", "terraform {\n  encryption {\n    state { enforced = true }\n    plan { enforced = true }\n  }\n}\n", 0),
             ):
                 fixture = fixture_home / name
                 fixture.mkdir(mode=0o700)
@@ -1021,6 +1190,9 @@ def check_provided_native_toolchain() -> None:
                     ("init", "-backend=false", "-input=false"),
                     ("plan", "-input=false", "-lock=true", "-detailed-exitcode"),
                 )
+                native_env = dict(fixture_env)
+                if name == "encrypted-empty":
+                    native_env["TF_ENCRYPTION"] = native_encryption
                 for stage, args in enumerate(commands):
                     if stage == 1 and expected == 1:
                         main_tf.write_text(source, encoding="utf-8")
@@ -1030,7 +1202,7 @@ def check_provided_native_toolchain() -> None:
                         stderr.chmod(0o600)
                         native = subprocess.run(
                             [selection.tofu, "-chdir=" + str(fixture), *args],
-                            env=fixture_env, stdin=subprocess.DEVNULL,
+                            env=native_env, stdin=subprocess.DEVNULL,
                             stdout=out, stderr=err, umask=0o077,
                             check=False, timeout=15,
                         )

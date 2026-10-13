@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import sys
 import importlib.util
+import json
 import os
 import stat
 import signal
@@ -26,6 +27,7 @@ import hashlib
 import re
 from pathlib import Path
 from typing import Callable, Mapping
+from types import MappingProxyType
 
 OPS_MAIL_COMMIT = "618440c68400bd21f253d0a77027ce4021fe1e33"
 OPS_MAIL_TREE = "9cd1757a42bd8a5ae7e43add7dfffe46694f9c2d"
@@ -649,6 +651,124 @@ class MailPrivateInputs:
 
 
 ACCOUNT_32 = re.compile(r"^[0-9a-f]{32}$")
+MAIL_AFTER_SLOTS = frozenset({
+    "CLOUDFLARE_API_TOKEN", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
+    "RENT_STATE_PASSPHRASE",
+})
+MAIL_CONFIG_KEYS = frozenset({
+    "account_id", "zone_id", "zone_name", "alias_address", "destination_address",
+    "rule_priority", "state_bucket", "state_key", "plan_bucket", "plan_key",
+    "verified_destination_id", "manage_dns", "manage_destination", "manage_rule",
+    "preflight_approved",
+})
+MAIL_FLAGS = ("manage_dns", "manage_destination", "manage_rule", "preflight_approved")
+MAIL_METHOD_NAME = "mail_m0"
+MAIL_ZONE_NAME = re.compile(
+    r"(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+"
+    r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
+MAIL_LITERAL_ADDRESS = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+%-]*@[A-Za-z0-9.-]+$")
+
+
+def compose_after_inputs(config_json: bytes, slots: Mapping[str, str], *,
+                         environment_name: str, home: Path, ops_root: Path,
+                         backend: Path) -> MailPrivateInputs:
+    """Compose one explicit private After context; no acquisition or effect.
+
+    Existing envs age/SOPS setup is upstream, not a Mail payload or per-mail
+    decryptor. The environment label, flags and IDs cannot supply principal,
+    verified status, approved passphrase reuse or Owner/runtime permission.
+    All such operating prerequisites remain independently established.
+    """
+    try:
+        if (type(config_json) is not bytes or not 0 < len(config_json) <= 32768
+                or environment_name != "dev-rent-tunnel"
+                or any(not isinstance(path, Path) for path in (home, ops_root, backend))):
+            raise NativeSourceHold("MAIL_AFTER_CONTEXT_UNSELECTED")
+
+        def unique(pairs: list[tuple[str, object]]) -> dict[str, object]:
+            selected: dict[str, object] = {}
+            for name, value in pairs:
+                if name in selected:
+                    raise NativeSourceHold("MAIL_AFTER_CONFIG_UNSELECTED")
+                selected[name] = value
+            return selected
+
+        def nonfinite(_value: str) -> None:
+            raise NativeSourceHold("MAIL_AFTER_CONFIG_UNSELECTED")
+
+        config = json.loads(config_json.decode("utf-8"), object_pairs_hook=unique,
+                            parse_constant=nonfinite)
+        if not isinstance(config, dict) or set(config) != MAIL_CONFIG_KEYS:
+            raise NativeSourceHold("MAIL_AFTER_CONFIG_UNSELECTED")
+        string_keys = MAIL_CONFIG_KEYS - {*MAIL_FLAGS, "rule_priority", "verified_destination_id"}
+        for name in string_keys:
+            value = config[name]
+            if (not isinstance(value, str) or not value
+                    or any(char.isspace() or char == "\0" for char in value)):
+                raise NativeSourceHold("MAIL_AFTER_CONFIG_UNSELECTED")
+        if (not ACCOUNT_32.fullmatch(config["account_id"])
+                or not ACCOUNT_32.fullmatch(config["zone_id"])
+                or not MAIL_ZONE_NAME.fullmatch(config["zone_name"])
+                or not MAIL_LITERAL_ADDRESS.fullmatch(config["alias_address"])
+                or not config["alias_address"].lower().endswith("@" + config["zone_name"].lower())
+                or not MAIL_LITERAL_ADDRESS.fullmatch(config["destination_address"])
+                or config["destination_address"].split("@")[1].lower() not in ("gmail.com", "googlemail.com")
+                or type(config["rule_priority"]) is not int or config["rule_priority"] < 0
+                or any(type(config[name]) is not bool for name in MAIL_FLAGS)):
+            raise NativeSourceHold("MAIL_AFTER_CONFIG_UNSELECTED")
+        verified = config["verified_destination_id"]
+        if verified is not None and (not isinstance(verified, str) or not ACCOUNT_32.fullmatch(verified)):
+            raise NativeSourceHold("MAIL_AFTER_CONFIG_UNSELECTED")
+        if not isinstance(slots, Mapping):
+            raise NativeSourceHold("MAIL_AFTER_SLOTS_UNSELECTED")
+        # Capture the supplied mapping once BEFORE validation. No later read
+        # may substitute a different credential after the copy was checked.
+        selected_slots = dict(slots)
+        if (set(selected_slots) != MAIL_AFTER_SLOTS
+                or any(not isinstance(selected_slots[name], str) or not selected_slots[name]
+                       or any(not 33 <= ord(char) <= 126 for char in selected_slots[name])
+                       for name in MAIL_AFTER_SLOTS)):
+            raise NativeSourceHold("MAIL_AFTER_SLOTS_UNSELECTED")
+        # Reuse this exact source's existing formatter and passphrase format.
+        # No host environment, key generation, SOPS call or fallback input.
+        existing_source = Path(__file__).with_name("jev_api.py")
+        spec = importlib.util.spec_from_file_location("_mail_existing_encryption", existing_source)
+        if spec is None or spec.loader is None or existing_source.is_symlink():
+            raise NativeSourceHold("MAIL_AFTER_CONTEXT_UNSELECTED")
+        existing = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = existing
+        try:
+            # Execute only the fixed provided source in memory: the ordinary
+            # import loader would create a checkout bytecode cache file.
+            exec(compile(existing_source.read_bytes(), str(existing_source), "exec"), existing.__dict__)
+            passphrase = selected_slots["RENT_STATE_PASSPHRASE"]
+            if existing.ROOT_PASSPHRASE.fullmatch(passphrase) is None:
+                raise NativeSourceHold("MAIL_AFTER_SLOTS_UNSELECTED")
+            encryption = existing.encryption_config(MAIL_METHOD_NAME, passphrase)
+        finally:
+            sys.modules.pop(spec.name, None)
+        values = {name: selected_slots[name] for name in MAIL_AFTER_SLOTS
+                  if name != "RENT_STATE_PASSPHRASE"}
+        values["TF_ENCRYPTION"] = encryption
+        for name in ("account_id", "zone_id", "zone_name", "alias_address", "destination_address"):
+            values["TF_VAR_" + name] = config[name]
+        values["TF_VAR_rule_priority"] = str(config["rule_priority"])
+        values.update({"TF_VAR_" + name: "true" if config[name] else "false" for name in MAIL_FLAGS})
+        if verified is not None:
+            values["TF_VAR_verified_destination_id"] = verified
+        result = MailPrivateInputs(
+            home=home, ops_root=ops_root, backend=backend, account=config["account_id"],
+            state_bucket=config["state_bucket"], state_key=config["state_key"],
+            plan_bucket=config["plan_bucket"], plan_key=config["plan_key"],
+            values=MappingProxyType(values),
+        )
+        result.check()
+        return result
+    except NativeSourceHold:
+        raise
+    except Exception:
+        # Never expose raw JSON/parser/path/slot/formatter exception details.
+        raise NativeSourceHold("MAIL_AFTER_INPUT_UNSELECTED") from None
 
 
 class MailPrivateRunner:
