@@ -472,6 +472,7 @@ def compose_after_inputs(config_json: bytes, slots: Mapping[str, str], *,
                 or any(not isinstance(path, Path) for path in (home, ops_root, backend))):
             raise NativeSourceHold("MAIL_AFTER_CONTEXT_UNSELECTED")
         config = _selected_config(config_json)
+        verified = config["verified_destination_id"]
         if not isinstance(slots, Mapping):
             raise NativeSourceHold("MAIL_AFTER_SLOTS_UNSELECTED")
         # Capture the supplied mapping once BEFORE validation. No later read
