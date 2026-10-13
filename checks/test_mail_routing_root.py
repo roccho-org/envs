@@ -251,7 +251,7 @@ def check_native_source_and_plan() -> None:
                 config.check()
                 real_popen = mail.subprocess.Popen
 
-                def run_synthetic(command, suffix, *, code=0, pause=False):
+                def run_synthetic(command, suffix, *, code=0, pause=False, start_failure=False):
                     # Hook only the *spawn* to a tiny local Python fixture;
                     # the real MailPrivateRunner still performs command
                     # validation, private sink creation, environment bounding,
@@ -264,7 +264,9 @@ def check_native_source_and_plan() -> None:
                         + ("time.sleep(10)\n" if pause else "")
                         + f"sys.exit({code})\n"
                     )
+                    starts = []
                     def local_child(argv, **kwargs):
+                        starts.append(tuple(argv))
                         assert tuple(argv) == command.argv
                         assert kwargs["stdout"] >= 0 and kwargs["stderr"] >= 0
                         assert kwargs["close_fds"] and kwargs["start_new_session"]
@@ -282,18 +284,24 @@ def check_native_source_and_plan() -> None:
                         else:
                             assert "TF_ENCRYPTION" not in child_env
                             assert "AWS_SECRET_ACCESS_KEY" not in child_env
+                        if start_failure:
+                            raise OSError("synthetic private startup detail")
                         return real_popen([sys.executable, "-I", "-c", script], **kwargs)
                     mail.subprocess.Popen = local_child
                     try:
                         result = real_runner(command)
                     finally:
                         mail.subprocess.Popen = real_popen
+                    assert starts == [command.argv], "native failure retried a child"
                     for stream in (command.private_stdout, command.private_stderr):
                         path = Path(stream)
                         assert path.parent == private
                         assert path.stat().st_mode & 0o077 == 0
-                    assert Path(command.private_stdout).read_bytes() == b"SYNTHETIC_PRIVATE_STDOUT"
-                    assert Path(command.private_stderr).read_bytes() == b"SYNTHETIC_PRIVATE_STDERR"
+                    assert Path(command.private_stdout).read_bytes() == (
+                        b"" if start_failure else b"SYNTHETIC_PRIVATE_STDOUT")
+                    assert Path(command.private_stderr).read_bytes() == (
+                        b"" if start_failure else b"SYNTHETIC_PRIVATE_STDERR")
+                    assert result.private_headers == b""
                     return result
 
                 first_cmd = mail.native_init(
@@ -314,6 +322,98 @@ def check_native_source_and_plan() -> None:
                     private_stderr=private / "real-timeout.err",
                 )
                 assert run_synthetic(timeout_cmd, "timeout", pause=True).returncode == 124
+                ordinary_two = mail.native_init(
+                    tofu, ops, backend, tools,
+                    private_stdout=private / "ordinary-two.out",
+                    private_stderr=private / "ordinary-two.err",
+                )
+                assert run_synthetic(ordinary_two, "ordinary-two", code=2).returncode == 1
+                ordinary_plan_two = mail.native_plan(
+                    tofu, ops, private / "ordinary-two-plan.enc", tools,
+                    private_stdout=private / "ordinary-two-plan.out",
+                    private_stderr=private / "ordinary-two-plan.err",
+                )
+                assert run_synthetic(ordinary_plan_two, "ordinary-plan-two", code=2).returncode == 1
+                # Exact native convergence variant preserves delta2, but does
+                # not retry, initialize, save a plan or turn delta into success.
+                for name, code, pause, start_failure, expected in (
+                    ("zero", 0, False, False, 0),
+                    ("delta", 2, False, False, 2),
+                    ("error", 1, False, False, 1),
+                    ("other-error", 7, False, False, 1),
+                    ("timeout", 0, True, False, 124),
+                    ("start-failure", 0, False, True, 125),
+                ):
+                    command = mail.native_noop(
+                        tofu, ops, tools,
+                        private_stdout=private / ("noop-" + name + ".out"),
+                        private_stderr=private / ("noop-" + name + ".err"),
+                    )
+                    assert command.argv == (
+                        tofu, "-chdir=" + str(ops), "plan", "-input=false",
+                        "-lock=true", "-detailed-exitcode",
+                    )
+                    result = run_synthetic(command, name, code=code, pause=pause,
+                                           start_failure=start_failure)
+                    assert result.returncode == expected
+                    if expected == 2:
+                        must_refuse(lambda: mail._require_success(result), "delta as success")
+
+                refused_starts = []
+                def refused_child(argv, **_kwargs):
+                    refused_starts.append(tuple(argv))
+                    raise AssertionError("invalid no-op started a child")
+                mail.subprocess.Popen = refused_child
+                try:
+                    baseline = (tofu, "-chdir=" + str(ops), "plan", "-input=false",
+                                "-lock=true", "-detailed-exitcode")
+                    bad_args = (
+                        baseline[:-1], baseline + ("-out=" + str(saved_plan),),
+                        baseline[:4] + ("-lock=false", baseline[-1]),
+                        baseline[:3] + ("-input=true",) + baseline[4:],
+                        baseline[:-1] + ("-detailed-exitcode=false",),
+                        baseline[:-1] + ("-refresh-only",),
+                        (tofu, "-chdir=" + str(home), *baseline[2:]),
+                        ("/usr/bin/tofu", *baseline[1:]),
+                    )
+                    for index, argv in enumerate(bad_args):
+                        out, err = private / f"bad-noop-{index}.out", private / f"bad-noop-{index}.err"
+                        command = mail.NativeCommand(argv, private_stdout=str(out), private_stderr=str(err))
+                        must_refuse(lambda command=command: real_runner(command), "altered no-op variant")
+                        assert not out.exists() and not err.exists()
+                    for out, err in (
+                        (Path("/dev/stdout"), private / "unsafe-noop.err"),
+                        (private / "alias-noop", private / "alias-noop"),
+                        (backend, private / "existing-noop.err"),
+                        (home / "outside-noop.out", private / "outside-noop.err"),
+                    ):
+                        before_files = set(private.iterdir())
+                        must_refuse(lambda out=out, err=err: real_runner(mail.native_noop(
+                            tofu, ops, tools, private_stdout=out, private_stderr=err,
+                        )), "unsafe/existing/aliased no-op capture")
+                        assert set(private.iterdir()) == before_files
+                    late = mail.native_noop(
+                        tofu, ops, tools, private_stdout=private / "late-noop.out",
+                        private_stderr=private / "late-noop.err",
+                    )
+                    Path(late.private_stderr).write_bytes(b"LATE_PRIVATE_CAPTURE")
+                    before_files = set(private.iterdir())
+                    must_refuse(lambda: real_runner(late), "late-created no-op capture")
+                    assert Path(late.private_stderr).read_bytes() == b"LATE_PRIVATE_CAPTURE"
+                    assert set(private.iterdir()) == before_files
+                    drift = mail.native_noop(
+                        tofu, ops, tools, private_stdout=private / "drift-noop.out",
+                        private_stderr=private / "drift-noop.err",
+                    )
+                    (ops / "extra.tf").write_text("unapproved", encoding="utf-8")
+                    try:
+                        must_refuse(lambda: real_runner(drift), "source drift before no-op")
+                    finally:
+                        (ops / "extra.tf").unlink()
+                    assert not Path(drift.private_stdout).exists() and not Path(drift.private_stderr).exists()
+                    assert refused_starts == []
+                finally:
+                    mail.subprocess.Popen = real_popen
                 invalid = dict(private_values)
                 invalid["AWS_PROFILE"] = "unaccepted rent fallback"
                 must_refuse(lambda: mail.MailPrivateInputs(
@@ -893,6 +993,50 @@ def check_provided_native_toolchain() -> None:
         help_show = subprocess.run([selection.tofu, "show", "-help"],
                                    capture_output=True, text=True, check=False, timeout=15)
         assert help_show.returncode == 0 and "-json-into" in help_show.stdout
+        help_plan = subprocess.run([selection.tofu, "plan", "-help"],
+                                   capture_output=True, text=True, check=False, timeout=15)
+        assert help_plan.returncode == 0 and "-detailed-exitcode" in help_plan.stdout
+        # Actual supplied native0/2/1 behavior, independently of the synthetic
+        # runner mapping. These ephemeral roots are NOT the Mail Ops root:
+        # empty or built-in terraform_data only; no remote backend/provider,
+        # credentials, network, saved plan, apply or persistent real state.
+        with tempfile.TemporaryDirectory(prefix="mail-native-noop-provided-") as directory:
+            fixture_home = Path(directory)
+            fixture_env = {
+                "HOME": str(fixture_home), "TMPDIR": str(fixture_home),
+                "LANG": "C", "TF_INPUT": "0", "TF_IN_AUTOMATION": "1",
+                "CHECKPOINT_DISABLE": "1", "AWS_EC2_METADATA_DISABLED": "true",
+            }
+            for name, source, expected in (
+                ("empty", "", 0),
+                ("builtin-delta", 'resource "terraform_data" "fixture" { input = "synthetic-only" }\n', 2),
+                ("invalid", 'resource "terraform_data" "broken" {\n', 1),
+            ):
+                fixture = fixture_home / name
+                fixture.mkdir(mode=0o700)
+                main_tf = fixture / "main.tf"
+                main_tf.write_text("" if expected == 1 else source, encoding="utf-8")
+                # Explicit TEST-only init; never part of native_noop().
+                commands = (
+                    ("init", "-backend=false", "-input=false"),
+                    ("plan", "-input=false", "-lock=true", "-detailed-exitcode"),
+                )
+                for stage, args in enumerate(commands):
+                    if stage == 1 and expected == 1:
+                        main_tf.write_text(source, encoding="utf-8")
+                    stdout, stderr = fixture_home / f"{name}-{stage}.out", fixture_home / f"{name}-{stage}.err"
+                    with stdout.open("xb") as out, stderr.open("xb") as err:
+                        stdout.chmod(0o600)
+                        stderr.chmod(0o600)
+                        native = subprocess.run(
+                            [selection.tofu, "-chdir=" + str(fixture), *args],
+                            env=fixture_env, stdin=subprocess.DEVNULL,
+                            stdout=out, stderr=err, umask=0o077,
+                            check=False, timeout=15,
+                        )
+                    assert native.returncode == (0 if stage == 0 else expected), (
+                        "provided native no-op fixture returned unexpected finite code")
+                assert not list(fixture.glob("*.tfstate*")), "test plan persisted state"
         class HeaderWithoutBody(http.server.BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.1"
 

@@ -39,6 +39,7 @@ NIX_BIN = re.compile(r"^/nix/store/[a-z0-9]{32}-[^/]+/bin/(tofu|curl)$")
 ETAG = re.compile(r'^"[A-Za-z0-9._-]{1,128}"$')
 BUCKET = re.compile(r"^[a-z0-9][a-z0-9.-]{2,62}$")
 KEY = re.compile(r"^mail-m0/plans/[a-zA-Z0-9._/-]{1,160}$")
+NOOP_PLAN_ARGS = ("plan", "-input=false", "-lock=true", "-detailed-exitcode")
 
 
 class NativeSourceHold(Exception):
@@ -241,6 +242,23 @@ def native_plan(tofu: str, root: Path, original: Path, tools: NativeToolset,
     )
 
 
+def native_noop(tofu: str, root: Path, tools: NativeToolset, *,
+                private_stdout: Path, private_stderr: Path) -> NativeCommand:
+    """One native convergence check, without a saved plan or automatic init.
+
+    A separately initialized, approved backend/state/target and permission
+    are operating prerequisites established outside this SOURCE helper.
+    Native exit0 means no changes only in that effective initialized context;
+    exit2 is a delta, never completion or permission to plan/apply again.
+    """
+    verify_native_source(root, OPS_MAIL_COMMIT, OPS_MAIL_TREE)
+    stdout, stderr = _private_streams(private_stdout, private_stderr)
+    return NativeCommand(
+        (native_bin(tofu, "tofu", tools), "-chdir=" + private_path(root), *NOOP_PLAN_ARGS),
+        private_stdout=stdout, private_stderr=stderr,
+    )
+
+
 def native_inspect(tofu: str, root: Path, private_original: Path,
                    private_review_json: Path, private_stdout: Path,
                    private_stderr: Path, tools: NativeToolset) -> NativeCommand:
@@ -351,6 +369,9 @@ def private_etag(header_bytes: bytes) -> str:
 # subprocess, provider, R2 client, stdout or secret acquisition path.
 @dataclass(frozen=True, repr=False)
 class PrivateNativeResult:
+    # Exact native no-op: 0=NO_OP in its effective context, 2=DELTA (unfinished).
+    # Other commands: 0=success. Common finite failures: 1=ERROR,
+    # 124=TIMEOUT, 125=START_FAILURE. No private stream content is returned.
     returncode: int
     private_headers: bytes = field(default=b"", repr=False)
 
@@ -669,12 +690,14 @@ class MailPrivateRunner:
                     "init", "-input=false", "-lockfile=readonly",
                     "-backend-config=" + str(inp.backend))
             elif args[2] == "plan":
-                valid = (len(args) == 6 and args[3:5] == ("-input=false", "-lock=true")
-                         and args[5].startswith("-out="))
-                if valid:
-                    output = self._path(args[5][5:])
-                    _private_streams(Path(cmd.private_stdout), Path(cmd.private_stderr), output)
-                    private_output_sink(output)
+                valid = args[2:] == NOOP_PLAN_ARGS
+                if not valid:
+                    valid = (len(args) == 6 and args[3:5] == ("-input=false", "-lock=true")
+                             and args[5].startswith("-out="))
+                    if valid:
+                        output = self._path(args[5][5:])
+                        _private_streams(Path(cmd.private_stdout), Path(cmd.private_stderr), output)
+                        private_output_sink(output)
             elif args[2] == "show":
                 valid = (len(args) == 6 and args[3].startswith("-plan=")
                          and args[4].startswith("-json-into=") and args[5] == "-no-color")
@@ -788,6 +811,9 @@ class MailPrivateRunner:
         finally:
             os.close(out)
             os.close(err)
+        if (result == 2 and command.argv[0] == self._tools.tofu
+                and command.argv[2:] == NOOP_PLAN_ARGS):
+            return PrivateNativeResult(2)
         if result != 0:
             return PrivateNativeResult(1)
         if header is not None:
