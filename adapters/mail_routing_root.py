@@ -3,7 +3,7 @@
 
 The actual CLI entry refuses before protected inputs or child processes.
 Inert SOURCE-only native helper functions below describe verified Ops blobs,
-separate OpenTofu plan/show/apply stages and private conditional R2 originals.
+OpenTofu speculative plan and automatic-plan apply with private captures.
 Only a separately admitted future Owner process could call them; main never
 does, and this committed entry has no activation path.
 """
@@ -20,28 +20,26 @@ import subprocess
 # SOURCE-only operations. The CLI main() below never references these
 # functions: nobody can activate them by argv, environment or GitHub dispatch.
 # A separately admitted future owner entry must supply private inputs,
-# independent original-review evidence and its own effect-specific permission.
-# These are native OpenTofu and pinned curl commands, not a second Mail root.
+# fixed-source/target review and its own effect-specific permission.
+# These are native OpenTofu commands using the existing Mail root.
 from dataclasses import dataclass, field
 import hashlib
 import re
 from pathlib import Path
-from typing import Callable, Mapping
+from typing import Mapping
 from types import MappingProxyType
 
-OPS_MAIL_COMMIT = "618440c68400bd21f253d0a77027ce4021fe1e33"
-OPS_MAIL_TREE = "9cd1757a42bd8a5ae7e43add7dfffe46694f9c2d"
+OPS_MAIL_COMMIT = "e0c208356d0e2908224cbbd356c69256cb0e4528"
+OPS_MAIL_TREE = "a62b0ccbebda639783341c1e59372977ed0a7299"
 OPS_MAIN_BLOB = "bf7d90ddd1c2a2b63e47ece40b5409e24ca9b125"
 OPS_LOCK_BLOB = "4994a1a2967771935c94bcca83752ffebe78e2ff"
-OPS_README_BLOB = "ac6fc265a2380bd1b30cfe5708b8d642e9bc4427"
+OPS_README_BLOB = "cf5fa3931eed554eaf8bf75f87888118a16cf238"
 OPS_TEST_BLOB = "04db81a38059da98bb07a397727cf0fb291e5b29"
 NATIVE_PROVIDER_H1 = "h1:HiX8Q7db7YrAYCuOBOMsvcmyX1RmvFqALtgJDvtYRhc="
-SHA40 = re.compile(r"^[0-9a-f]{40}$")
-NIX_BIN = re.compile(r"^/nix/store/[a-z0-9]{32}-[^/]+/bin/(tofu|curl)$")
-ETAG = re.compile(r'^"[A-Za-z0-9._-]{1,128}"$')
+NIX_BIN = re.compile(r"^/nix/store/[a-z0-9]{32}-[^/]+/bin/tofu$")
 BUCKET = re.compile(r"^[a-z0-9][a-z0-9.-]{2,62}$")
-KEY = re.compile(r"^mail-m0/plans/[a-zA-Z0-9._/-]{1,160}$")
 NOOP_PLAN_ARGS = ("plan", "-input=false", "-lock=true", "-detailed-exitcode")
+APPLY_ARGS = ("apply", "-input=false", "-lock=true", "-auto-approve")
 
 
 class NativeSourceHold(Exception):
@@ -104,7 +102,6 @@ class NativeToolset:
     """Identity minted only by the existing validated envs toolchain loader."""
 
     tofu: str
-    curl: str
     _proof: object = field(default=None, repr=False, compare=False)
 
 
@@ -132,7 +129,7 @@ def provided_native_tools(root: Path, manifest: str, interpreter: str) -> Native
             )
         finally:
             sys.modules.pop(spec.name, None)
-        return NativeToolset(tofu=verified["tofu"], curl=verified["curl"], _proof=_NATIVE_TOOL_PROOF)
+        return NativeToolset(tofu=verified["tofu"], _proof=_NATIVE_TOOL_PROOF)
     except (OSError, LookupError, ValueError, TypeError, RuntimeError):
         raise NativeSourceHold("TOOLCHAIN_NOT_PROVEN") from None
     except Exception:
@@ -143,7 +140,7 @@ def native_bin(value: str, tool: str, selected: NativeToolset) -> str:
     # This is the *result of the existing verified toolchain loader*, not
     # acceptance of arbitrary paths by Nix store-looking string format.
     if (not isinstance(selected, NativeToolset)
-            or selected._proof is not _NATIVE_TOOL_PROOF or tool not in ("tofu", "curl")
+            or selected._proof is not _NATIVE_TOOL_PROOF or tool != "tofu"
             or not isinstance(value, str) or not NIX_BIN.fullmatch(value)
             or not value.endswith("/bin/" + tool)
             or value != getattr(selected, tool)):
@@ -182,8 +179,7 @@ def private_path(path: Path) -> str:
 def private_output_sink(path: Path) -> str:
     name = private_path(path)
     try:
-        # Native plan/show/curl outputs may truncate existing files. A prior
-        # backend, original or capture is never a new output destination.
+        # A prior backend or capture is never a new output destination.
         if path.exists():
             raise NativeSourceHold("PRIVATE_OUTPUT_ALREADY_EXISTS")
     except OSError:
@@ -208,7 +204,7 @@ def _private_streams(stdout: Path, stderr: Path, *other_private: Path) -> tuple[
 class NativeCommand:
     argv: tuple[str, ...]
     # Neither native stream may inherit public stdout/stderr; required for ALL
-    # protected init, plan, show, apply and R2 commands, not only show.
+    # protected init, speculative plan and automatic-plan apply commands.
     private_stdout: str = field(repr=False)
     private_stderr: str = field(repr=False)
     stdin: bytes | None = field(default=None, repr=False)
@@ -231,19 +227,6 @@ def native_init(tofu: str, root: Path, private_backend: Path, tools: NativeTools
     )
 
 
-def native_plan(tofu: str, root: Path, original: Path, tools: NativeToolset,
-                *, private_stdout: Path, private_stderr: Path) -> NativeCommand:
-    # A saved encrypted plan is NOT a stdout sink: the human diff/target can
-    # still be written to stdout or stderr by OpenTofu.
-    verify_native_source(root, OPS_MAIL_COMMIT, OPS_MAIL_TREE)
-    stdout, stderr = _private_streams(private_stdout, private_stderr, original)
-    return NativeCommand(
-        (native_bin(tofu, "tofu", tools), "-chdir=" + private_path(root),
-         "plan", "-input=false", "-lock=true", "-out=" + private_output_sink(original)),
-        private_stdout=stdout, private_stderr=stderr,
-    )
-
-
 def native_noop(tofu: str, root: Path, tools: NativeToolset, *,
                 private_stdout: Path, private_stderr: Path) -> NativeCommand:
     """One native convergence check, without a saved plan or automatic init.
@@ -261,266 +244,33 @@ def native_noop(tofu: str, root: Path, tools: NativeToolset, *,
     )
 
 
-def native_inspect(tofu: str, root: Path, private_original: Path,
-                   private_review_json: Path, private_stdout: Path,
-                   private_stderr: Path, tools: NativeToolset) -> NativeCommand:
-    """Native -json-into must write to a separate private original review file."""
-    verify_native_source(root, OPS_MAIL_COMMIT, OPS_MAIL_TREE)
-    stdout, stderr = _private_streams(
-        private_stdout, private_stderr, private_original, private_review_json,
-    )
-    return NativeCommand(
-        (native_bin(tofu, "tofu", tools), "-chdir=" + private_path(root),
-         "show", "-plan=" + private_path(private_original),
-         "-json-into=" + private_output_sink(private_review_json), "-no-color"),
-        private_stdout=stdout, private_stderr=stderr,
-    )
+def native_apply(tofu: str, root: Path, tools: NativeToolset, *,
+                 private_stdout: Path, private_stderr: Path) -> NativeCommand:
+    """Re-plan and apply the fixed declaration in one native invocation.
 
-
-def native_apply(tofu: str, root: Path, private_original: Path, tools: NativeToolset,
-                 *, private_stdout: Path, private_stderr: Path) -> NativeCommand:
-    # Exact saved original; no -auto-approve, re-plan, import, unlock or retry.
-    verify_native_source(root, OPS_MAIL_COMMIT, OPS_MAIL_TREE)
-    stdout, stderr = _private_streams(private_stdout, private_stderr, private_original)
-    return NativeCommand(
-        (native_bin(tofu, "tofu", tools), "-chdir=" + private_path(root),
-         "apply", "-input=false", "-lock=true", private_path(private_original)),
-        private_stdout=stdout, private_stderr=stderr,
-    )
-
-
-def _quote(value: str) -> str:
-    # libcurl native --config grammar, not custom signing/encryption.
-    if not value or any(x in value for x in ("\r", "\n", "\0")):
-        raise NativeSourceHold("INVALID_PRIVATE_CONFIG")
-    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
-
-
-def private_r2_object(curl: str, method: str, account: str, bucket: str, key: str,
-                      source_or_dest: Path, headers: Path,
-                      access_id: str, access_secret: str, etag: str | None = None,
-                      session_token: str | None = None, tools: NativeToolset | None = None,
-                      *, private_stdout: Path, private_stderr: Path) -> NativeCommand:
-    """Native curl SigV4 + conditional R2 object; no secret in argv/files/log.
-
-    PUT uses If-None-Match * (write once). HEAD/GET demand the actual
-    object ETag selected from the Owner/R private original, not a manual
-    plan hash. Header capture and GET output paths must be protected by Owner.
-    Credentials travel only via curl stdin config, never argv.
+    Approval concerns this source/target/stage, not a prior speculative diff.
+    Actual actor/state/permission and Owner stage GO remain external. No saved
+    plan, original transfer, automatic init, chained stage or retry is added.
     """
-    if (not re.fullmatch(r"[0-9a-f]{32}", account) or not BUCKET.fullmatch(bucket)
-            or not KEY.fullmatch(key) or ".." in key.split("/") or "//" in key
-            or method not in ("PUT", "HEAD", "GET")):
-        raise NativeSourceHold("R2_IDENTITY_NOT_SELECTED")
-    if method != "PUT" and (etag is None or not ETAG.fullmatch(etag)):
-        raise NativeSourceHold("ORIGINAL_ETAG_NOT_OBSERVED")
-    if method == "PUT" and etag is not None:
-        raise NativeSourceHold("PUT_MUST_BE_WRITE_ONCE")
-    # Validate even an ignored HEAD destination: a purported Owner-private
-    # source/destination/header must never be a public file descriptor.
-    data_path = private_path(source_or_dest)
-    header_path = private_output_sink(headers)
-    stdout, stderr = _private_streams(private_stdout, private_stderr, source_or_dest, headers)
-    url = f"https://{account}.r2.cloudflarestorage.com/{bucket}/{key}"
-    items = [
-        "url = " + _quote(url),
-        "request = " + _quote(method),
-        'aws-sigv4 = "aws:amz:auto:s3"',
-        "user = " + _quote(access_id + ":" + access_secret),
-        'proto = "=https"', 'noproxy = "*"', 'proxy = ""',
-        "silent", 'connect-timeout = "10"', 'max-time = "30"',
-        "dump-header = " + _quote(header_path),
-    ]
-    if session_token is not None:
-        items.append("header = " + _quote("x-amz-security-token: " + session_token))
-    if method == "HEAD":
-        # curl -X HEAD merely rewrites the HTTP method and still expects a
-        # response body. Native --head mode suppresses body transfer.
-        items.append("head")
-    if method == "PUT":
-        items.extend(['header = "If-None-Match: *"', "upload-file = " + _quote(data_path)])
-    else:
-        items.append("header = " + _quote("If-Match: " + etag))
-        items.append("output = " + _quote(private_output_sink(source_or_dest) if method == "GET" else "/dev/null"))
+    verify_native_source(root, OPS_MAIL_COMMIT, OPS_MAIL_TREE)
+    stdout, stderr = _private_streams(private_stdout, private_stderr)
     return NativeCommand(
-        (native_bin(curl, "curl", tools), "-q", "--config", "-"),
+        (native_bin(tofu, "tofu", tools), "-chdir=" + private_path(root), *APPLY_ARGS),
         private_stdout=stdout, private_stderr=stderr,
-        stdin=("\n".join(items) + "\n").encode("utf-8"),
     )
 
 
-def private_etag(header_bytes: bytes) -> str:
-    """Only one completed 2xx response and one opaque native ETag permitted."""
-    try:
-        text = header_bytes.decode("ascii")
-        lines = text.replace("\r\n", "\n").split("\n")
-        statuses = [x for x in lines if x.startswith("HTTP/")]
-        tags = [x.split(":", 1)[1].strip() for x in lines if x.lower().startswith("etag:")]
-        if (len(statuses) != 1 or not re.fullmatch(r"HTTP/[0-9.]+ 20[0-9](?: .*|)", statuses[0])
-                or len(tags) != 1 or not ETAG.fullmatch(tags[0])):
-            raise NativeSourceHold("ORIGINAL_RESPONSE_UNPROVEN")
-        return tags[0]
-    except UnicodeError:
-        raise NativeSourceHold("ORIGINAL_RESPONSE_UNPROVEN") from None
-
-
-
-# The following functions are real SOURCE logic callable only by a future,
-# separately admitted Owner entry. The committed CLI stays unconditionally
-# INACTIVE. Runner callbacks are synthetic in CI; the source has NO default
-# subprocess, provider, R2 client, stdout or secret acquisition path.
 @dataclass(frozen=True, repr=False)
 class PrivateNativeResult:
     # Exact native no-op: 0=NO_OP in its effective context, 2=DELTA (unfinished).
     # Other commands: 0=success. Common finite failures: 1=ERROR,
     # 124=TIMEOUT, 125=START_FAILURE. No private stream content is returned.
     returncode: int
-    private_headers: bytes = field(default=b"", repr=False)
-
-
-MailPrivateRunner = Callable[[NativeCommand], PrivateNativeResult]
 
 
 def _require_success(receipt: PrivateNativeResult) -> None:
     if not isinstance(receipt, PrivateNativeResult) or receipt.returncode != 0:
         raise NativeSourceHold("NATIVE_STAGE_UNPROVEN")
-
-
-def _preflight_output_group(sinks: tuple[Path, ...], *protected: Path,
-                            runner: MailPrivateRunner | None = None) -> None:
-    """Check every output sink of a multi-command stage BEFORE its first runner."""
-    if isinstance(runner, MailPrivateRunner):
-        # Check the selected Owner boundary for later outputs before an
-        # earlier init/HEAD/GET could start, not only at each child call.
-        for item in sinks:
-            runner._path(str(item))
-    names = [private_output_sink(item) for item in sinks]
-    names += [private_path(item) for item in protected]
-    if len(names) != len(set(names)):
-        raise NativeSourceHold("PRIVATE_OUTPUT_PATH_OVERLAP")
-
-
-def plan_private_once(ops_root: Path, commit: str, tree: str, tofu: str,
-                      private_backend: Path, plan_path: Path,
-                      tools: NativeToolset, runner: MailPrivateRunner, *,
-                      init_stdout: Path, init_stderr: Path,
-                      plan_stdout: Path, plan_stderr: Path) -> None:
-    # No auto-apply: future Owner chooses four separate private sinks and one
-    # private backend + saved original. Reject unsafe PLAN sinks before INIT.
-    verify_native_source(ops_root, commit, tree)
-    _preflight_output_group((init_stdout, init_stderr, plan_stdout, plan_stderr,
-                             plan_path), private_backend, runner=runner)
-    init = native_init(tofu, ops_root, private_backend, tools,
-                       private_stdout=init_stdout, private_stderr=init_stderr)
-    _require_success(runner(init))
-    verify_native_source(ops_root, commit, tree)
-    plan = native_plan(tofu, ops_root, plan_path, tools,
-                       private_stdout=plan_stdout, private_stderr=plan_stderr)
-    _require_success(runner(plan))
-
-
-def retain_original_once(curl: str, account: str, bucket: str, key: str, plan_path: Path,
-                         headers: Path, access_id: str, access_secret: str,
-                         runner: MailPrivateRunner, tools: NativeToolset, *,
-                         private_stdout: Path, private_stderr: Path) -> str:
-    # R2 native write-once conditional; stdout and stderr also remain private.
-    command = private_r2_object(
-        curl, "PUT", account, bucket, key, plan_path, headers,
-        access_id, access_secret, tools=tools,
-        private_stdout=private_stdout, private_stderr=private_stderr,
-    )
-    response = runner(command)
-    _require_success(response)
-    return private_etag(response.private_headers)
-
-
-def inspect_original_once(curl: str, tofu: str, root: Path, account: str,
-                          bucket: str, key: str, private_path_to_original: Path,
-                          headers: Path, access_id: str, access_secret: str,
-                          expected_etag: str, runner: MailPrivateRunner,
-                          tools: NativeToolset, *,
-                          private_review_json: Path, private_stdout: Path,
-                          private_stderr: Path, private_get_stdout: Path,
-                          private_get_stderr: Path) -> None:
-    verify_native_source(root, OPS_MAIL_COMMIT, OPS_MAIL_TREE)
-    # Refuse all unsafe GET/SHOW sinks BEFORE any GET or runner callback.
-    _preflight_output_group(
-        (private_get_stdout, private_get_stderr, private_stdout, private_stderr,
-         private_review_json, private_path_to_original, headers),
-        runner=runner,
-    )
-    inspect = native_inspect(tofu, root, private_path_to_original,
-                             private_review_json, private_stdout, private_stderr, tools)
-    get = private_r2_object(
-        curl, "GET", account, bucket, key, private_path_to_original,
-        headers, access_id, access_secret, expected_etag, tools=tools,
-        private_stdout=private_get_stdout, private_stderr=private_get_stderr,
-    )
-    result = runner(get)
-    _require_success(result)
-    if private_etag(result.private_headers) != expected_etag:
-        raise NativeSourceHold("ORIGINAL_CHANGED_OR_UNREVIEWED")
-    verify_native_source(root, OPS_MAIL_COMMIT, OPS_MAIL_TREE)
-    _require_success(runner(inspect))
-
-
-def apply_same_original_once(curl: str, tofu: str, root: Path, account: str,
-                             bucket: str, key: str, private_path_to_original: Path,
-                             headers: Path, access_id: str, access_secret: str,
-                             stored_etag: str, owner_readback: str,
-                             fixed_r_readback: str, before_apply: str,
-                             runner: MailPrivateRunner, tools: NativeToolset, *,
-                             get_headers: Path,
-                             head_stdout: Path, head_stderr: Path,
-                             get_stdout: Path, get_stderr: Path,
-                             apply_stdout: Path, apply_stderr: Path) -> None:
-    # Separately admitted future Owner exact-original effect only; the live
-    # job remains false and the real CLI refuses before child/private input.
-    verify_native_source(root, OPS_MAIL_COMMIT, OPS_MAIL_TREE)
-    require_same_original(stored_etag=stored_etag, owner_readback=owner_readback,
-                          fixed_r_readback=fixed_r_readback, before_apply=before_apply)
-    # Refuse missing/public/alias/colliding sink of ANY later native step
-    # BEFORE the first conditional HEAD could read private object metadata.
-    _preflight_output_group(
-        (head_stdout, head_stderr, get_stdout, get_stderr, apply_stdout, apply_stderr,
-         private_path_to_original, headers, get_headers),
-        runner=runner,
-    )
-    commands = [
-        private_r2_object(
-            curl, method, account, bucket, key, private_path_to_original,
-            response_headers, access_id, access_secret, stored_etag, tools=tools,
-            private_stdout=stdout, private_stderr=stderr,
-        )
-        for method, response_headers, stdout, stderr in (
-            ("HEAD", headers, head_stdout, head_stderr),
-            ("GET", get_headers, get_stdout, get_stderr),
-        )
-    ]
-    apply = native_apply(
-        tofu, root, private_path_to_original, tools,
-        private_stdout=apply_stdout, private_stderr=apply_stderr,
-    )
-    for command in commands:
-        receipt = runner(command)
-        _require_success(receipt)
-        if private_etag(receipt.private_headers) != stored_etag:
-            raise NativeSourceHold("ORIGINAL_CHANGED_OR_UNREVIEWED")
-    verify_native_source(root, OPS_MAIL_COMMIT, OPS_MAIL_TREE)
-    _require_success(runner(apply))
-
-
-def require_same_original(*, stored_etag: str, owner_readback: str,
-                          fixed_r_readback: str, before_apply: str) -> None:
-    """Opaque native R2 object identity, not a copied plan digest or GO flag.
-
-    The independent private route / actual human GO are external admission
-    requirements. This function cannot supply or impersonate either review.
-    """
-    if (not ETAG.fullmatch(stored_etag) or stored_etag != owner_readback
-            or stored_etag != fixed_r_readback or stored_etag != before_apply):
-        raise NativeSourceHold("ORIGINAL_CHANGED_OR_UNREVIEWED")
-
 
 
 # A real private process implementation, but deliberately NO executable entry:
@@ -600,8 +350,6 @@ class MailPrivateInputs:
     account: str
     state_bucket: str
     state_key: str
-    plan_bucket: str
-    plan_key: str
     values: Mapping[str, str] = field(repr=False)
 
     def check(self) -> None:
@@ -610,11 +358,9 @@ class MailPrivateInputs:
         if (not isinstance(self.account, str) or
                 re.fullmatch(r"[0-9a-f]{32}", self.account) is None
                 or not BUCKET.fullmatch(self.state_bucket)
-                or not BUCKET.fullmatch(self.plan_bucket)
                 or not MAIL_STATE_KEY.fullmatch(self.state_key)
                 or ".." in self.state_key.split("/") or "//" in self.state_key
-                or not KEY.fullmatch(self.plan_key) or ".." in self.plan_key.split("/")
-                or "//" in self.plan_key):
+):
             raise NativeSourceHold("MAIL_PRIVATE_TARGET_UNSELECTED")
         try:
             config = _owner_file(self.backend, self.home).decode("ascii")
@@ -657,7 +403,7 @@ MAIL_AFTER_SLOTS = frozenset({
 })
 MAIL_CONFIG_KEYS = frozenset({
     "account_id", "zone_id", "zone_name", "alias_address", "destination_address",
-    "rule_priority", "state_bucket", "state_key", "plan_bucket", "plan_key",
+    "rule_priority", "state_bucket", "state_key",
     "verified_destination_id", "manage_dns", "manage_destination", "manage_rule",
     "preflight_approved",
 })
@@ -759,7 +505,6 @@ def compose_after_inputs(config_json: bytes, slots: Mapping[str, str], *,
         result = MailPrivateInputs(
             home=home, ops_root=ops_root, backend=backend, account=config["account_id"],
             state_bucket=config["state_bucket"], state_key=config["state_key"],
-            plan_bucket=config["plan_bucket"], plan_key=config["plan_key"],
             values=MappingProxyType(values),
         )
         result.check()
@@ -775,7 +520,7 @@ class MailPrivateRunner:
     """A real private subprocess/capture adapter for existing Mail stages.
 
     Not an arbitrary command executor. No source-defined CLI/dispatch or
-    approval state machine; owner admission, original read and GO stay external.
+    approval state machine; fixed-source/target admission and stage GO stay external.
     """
     def __init__(self, inputs: MailPrivateInputs, tools: NativeToolset,
                  *, timeout: int = 90) -> None:
@@ -785,7 +530,6 @@ class MailPrivateRunner:
                 type(timeout) is not int or not 1 <= timeout <= 120):
             raise NativeSourceHold("MAIL_RUNNER_UNADMITTED")
         native_bin(tools.tofu, "tofu", tools)
-        native_bin(tools.curl, "curl", tools)
         inputs.check()
         self._inputs, self._tools, self._timeout = inputs, tools, timeout
 
@@ -796,84 +540,23 @@ class MailPrivateRunner:
             raise NativeSourceHold("MAIL_PRIVATE_PATH_OUTSIDE_OWNER")
         return path
 
-    def _command(self, cmd: NativeCommand) -> Path | None:
+    def _command(self, cmd: NativeCommand) -> None:
         inp = self._inputs
         inp.check()
         private_output_sink(self._path(cmd.private_stdout))
         private_output_sink(self._path(cmd.private_stderr))
         args = cmd.argv
-        if len(args) >= 4 and args[0] == self._tools.tofu:
-            if args[1] != "-chdir=" + str(inp.ops_root) or cmd.stdin is not None:
-                raise NativeSourceHold("MAIL_NATIVE_COMMAND_UNSELECTED")
-            if args[2] == "init":
-                valid = args[2:] == (
-                    "init", "-input=false", "-lockfile=readonly",
-                    "-backend-config=" + str(inp.backend))
-            elif args[2] == "plan":
-                valid = args[2:] == NOOP_PLAN_ARGS
-                if not valid:
-                    valid = (len(args) == 6 and args[3:5] == ("-input=false", "-lock=true")
-                             and args[5].startswith("-out="))
-                    if valid:
-                        output = self._path(args[5][5:])
-                        _private_streams(Path(cmd.private_stdout), Path(cmd.private_stderr), output)
-                        private_output_sink(output)
-            elif args[2] == "show":
-                valid = (len(args) == 6 and args[3].startswith("-plan=")
-                         and args[4].startswith("-json-into=") and args[5] == "-no-color")
-                if valid:
-                    original = self._path(args[3][6:])
-                    output = self._path(args[4][11:])
-                    _private_streams(Path(cmd.private_stdout), Path(cmd.private_stderr),
-                                     original, output)
-                    private_output_sink(output)
-            elif args[2] == "apply":
-                valid = len(args) == 6 and args[3:5] == ("-input=false", "-lock=true")
-                if valid:
-                    self._path(args[5])
-            else:
-                valid = False
-            if not valid:
-                raise NativeSourceHold("MAIL_NATIVE_COMMAND_UNSELECTED")
-            return None
-        if args != (self._tools.curl, "-q", "--config", "-") or not cmd.stdin:
+        if (len(args) < 4 or args[0] != self._tools.tofu
+                or args[1] != "-chdir=" + str(inp.ops_root) or cmd.stdin is not None):
             raise NativeSourceHold("MAIL_NATIVE_COMMAND_UNSELECTED")
-        try:
-            text = cmd.stdin.decode("utf-8")
-        except UnicodeError:
-            raise NativeSourceHold("MAIL_NATIVE_COMMAND_UNSELECTED") from None
-        # Reject arbitrary curl arguments and even additional native --config
-        # directives: require byte equality with this source's bound SigV4
-        # builder and the Owner-selected Mail object/credential.
-        def only(pattern: str) -> str:
-            values = re.findall(pattern, text, re.MULTILINE)
-            if len(values) != 1:
-                raise NativeSourceHold("MAIL_NATIVE_COMMAND_UNSELECTED")
-            return values[0]
-
-        method = only(r'^request = "(PUT|HEAD|GET)"$')
-        header = self._path(only(r'^dump-header = "([^"\r\n]+)"$'))
-        if method == "PUT":
-            source = self._path(only(r'^upload-file = "([^"\r\n]+)"$'))
-            tag = None
-        else:
-            tag = '"' + only(r'^header = "If-Match: \\"([A-Za-z0-9._-]{1,128})\\""$') + '"'
-            source = self._path(
-                only(r'^output = "([^"\r\n]+)"$') if method == "GET"
-                else str(inp.home / "unused-head")
-            )
-        expected = private_r2_object(
-            self._tools.curl, method, inp.account, inp.plan_bucket,
-            inp.plan_key, source, header,
-            inp.values["AWS_ACCESS_KEY_ID"], inp.values["AWS_SECRET_ACCESS_KEY"],
-            etag=tag, session_token=inp.values.get("AWS_SESSION_TOKEN"),
-            tools=self._tools,
-            private_stdout=Path(cmd.private_stdout),
-            private_stderr=Path(cmd.private_stderr),
+        valid = args[2:] in (
+            ("init", "-input=false", "-lockfile=readonly",
+             "-backend-config=" + str(inp.backend)),
+            NOOP_PLAN_ARGS,
+            APPLY_ARGS,
         )
-        if cmd != expected:
+        if not valid:
             raise NativeSourceHold("MAIL_NATIVE_COMMAND_UNSELECTED")
-        return header
 
     def _child_env(self, cmd: NativeCommand) -> dict[str, str]:
         inp = self._inputs
@@ -900,7 +583,7 @@ class MailPrivateRunner:
     def __call__(self, command: NativeCommand) -> PrivateNativeResult:
         if not isinstance(command, NativeCommand):
             raise NativeSourceHold("MAIL_NATIVE_COMMAND_UNSELECTED")
-        header = self._command(command)
+        self._command(command)
         out = self._sink(command.private_stdout)
         try:
             err = self._sink(command.private_stderr)
@@ -936,9 +619,6 @@ class MailPrivateRunner:
             return PrivateNativeResult(2)
         if result != 0:
             return PrivateNativeResult(1)
-        if header is not None:
-            # The conditional R2 ETag remains in the same private Owner home.
-            return PrivateNativeResult(0, _owner_file(header, self._inputs.home, 8192))
         return PrivateNativeResult(0)
 
 

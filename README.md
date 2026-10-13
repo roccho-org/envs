@@ -342,6 +342,34 @@ Not proven here: any real R2 effect, the parent token's permission (only the fir
 
 ## Effect toolchain
 
+### Mail plan lifecycle
+
+The Owner adopted [Mail M0 without persistent plans](https://github.com/roccho-dev/adrs/issues/578#issuecomment-6143250867).
+The matching operating contract is [ops PR #535](https://github.com/roccho-org/ops/pull/535);
+the helper pins its exact candidate commit/tree and unchanged native resources.
+The SOURCE-only Mail helper previews changes with native
+`plan -input=false -lock=true -detailed-exitcode`, without `-out`.
+A separately admitted future stage uses
+`apply -input=false -lock=true -auto-approve`; OpenTofu re-plans the approved
+fixed source and target at execution time. Approval concerns convergence to
+that declaration, not byte equality with an earlier speculative plan.
+
+There is no plan bucket/key, saved-plan show, R2 plan transfer or ETag gate.
+The strict private `MAIL_CONFIG` now contains 13 explicit fields: account,
+zone, literal alias, Gmail destination, priority, state bucket/key, verified
+destination ID and four managed/preflight flags. `plan_bucket` and `plan_key`
+are rejected. The existing four credential/passphrase slots remain separate.
+The state backend, encryption, lock and recovery still require independent
+qualification; this change does not migrate Mail state to a GitHub ref.
+
+Native outputs remain private. A public result may expose only a non-secret
+summary; an earlier CI diff never authorizes an apply or a retry. After an
+admitted apply, independently read the state/provider outcome and require
+native no-op exit 0; exit 2, errors, timeout and unknown outcomes are unfinished.
+The Mail CLI still returns unconditional `INACTIVE / NOT_RUN`, exit 78, and
+the whole job remains `if:false` before protected Environment resolution.
+This SOURCE change registers no Secret and performs no actual Mail operation.
+
 `flake.nix` and `flake.lock` define the only toolchain for authoring and projection: Python, SOPS, Wrangler, Git, GitHub CLI and curl from the locked nixpkgs input, plus the `envs-effect` entry running this source's adapter. `.#effect-artifact` is that entry's complete store closure as one tar with an `ENTRY` pointer.
 
 ```text
