@@ -54,10 +54,11 @@
         exec ${tools.python3} -I ${self}/adapters/mail_routing_read.py
       '';
 
-      # The candidate's real entry exists in the same provided closure, but
-      # refuses independently of the whole-job manual workflow gate.
+      # Mail consumes the same source-bound toolchain; no argument still refuses.
       mail-routing-root = pkgs.writeShellScriptBin "mail-routing-root" ''
-        exec ${tools.python3} -I ${self}/adapters/mail_routing_root.py
+        export ENVS_EFFECT_TOOLCHAIN=${manifest}
+        export SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt
+        exec ${tools.python3} -I ${self}/adapters/mail_routing_root.py "$@"
       '';
 
       # Public facts only. Bound source arguments come last and cannot be overridden by a caller.

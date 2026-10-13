@@ -347,9 +347,9 @@ Not proven here: any real R2 effect, the parent token's permission (only the fir
 The Owner adopted [Mail M0 without persistent plans](https://github.com/roccho-dev/adrs/issues/578#issuecomment-6143250867).
 The matching operating contract is [ops PR #535](https://github.com/roccho-org/ops/pull/535);
 the helper pins its exact candidate commit/tree and unchanged native resources.
-The SOURCE-only Mail helper previews changes with native
+The manual Mail entry previews changes with native
 `plan -input=false -lock=true -detailed-exitcode`, without `-out`.
-A separately admitted future stage uses
+An Owner-selected apply uses
 `apply -input=false -lock=true -auto-approve`; OpenTofu re-plans the approved
 fixed source and target at execution time. Approval concerns convergence to
 that declaration, not byte equality with an earlier speculative plan.
@@ -364,11 +364,29 @@ qualification; this change does not migrate Mail state to a GitHub ref.
 
 Native outputs remain private. A public result may expose only a non-secret
 summary; an earlier CI diff never authorizes an apply or a retry. After an
-admitted apply, independently read the state/provider outcome and require
+approved apply, independently read the state/provider outcome and require
 native no-op exit 0; exit 2, errors, timeout and unknown outcomes are unfinished.
-The Mail CLI still returns unconditional `INACTIVE / NOT_RUN`, exit 78, and
-the whole job remains `if:false` before protected Environment resolution.
-This SOURCE change registers no Secret and performs no actual Mail operation.
+Each fresh runner initializes the selected backend, then performs exactly
+one preview or apply. Init failure prevents the operation; there is no
+preview-to-apply chain or automatic retry. A preview delta is reported as
+`DELTA`; apply success is only `APPLIED_UNVERIFIED`.
+
+`operate-dev-mail-routing` is manual and restricted to the exact canonical
+SHA, `roccho-dev`, first attempt and serialized runs. Its operation defaults
+to preview; target data is never a dispatch input. Only the operation step
+receives the private `MAIL_CONFIG` and the four existing Environment slots.
+It copies the pinned Ops files into owner-only scratch and consumes the
+same-SHA provided effect artifact. Native streams stay in private scratch
+and are never uploaded. No arguments or unsupported operations still return
+`INACTIVE / NOT_RUN`, exit 78, before reading protected input.
+
+Before dispatch, the Owner must establish the exact target/preflight,
+Cloudflare operation permissions, state/lock access and passphrase recovery.
+Initial destination/DNS apply keeps the rule unmanaged; after human Gmail
+verification and fresh ready/verified readback, a separate rule apply retains
+the flags of already-owned resources. A later preview must return no-op 0,
+and actual delivery needs an independent test message. Source merge does
+not register Secrets, dispatch a workflow or establish live Mail completion.
 
 `flake.nix` and `flake.lock` define the only toolchain for authoring and projection: Python, SOPS, Wrangler, Git, GitHub CLI and curl from the locked nixpkgs input, plus the `envs-effect` entry running this source's adapter. `.#effect-artifact` is that entry's complete store closure as one tar with an `ENTRY` pointer.
 

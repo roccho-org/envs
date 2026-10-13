@@ -514,8 +514,8 @@ def check_author_targets(text: str, targets: dict[str, set[tuple[str, str]]]) ->
             "author target is selected or called outside its step")
 
 
-def check_manual_mail_inactive(root: Path, source: str, canonical: str) -> None:
-    """The Mail candidate must refuse before an Environment or any child."""
+def check_manual_mail(root: Path, source: str, canonical: str) -> None:
+    """Only the Owner's exact-source manual operation consumes Mail inputs."""
     require(source.startswith("name: operate-dev-mail-routing\n")
             and "\non:\n" in source
             and source.count("\non:") == 1,
@@ -538,13 +538,19 @@ def check_manual_mail_inactive(root: Path, source: str, canonical: str) -> None:
         "        description: Exact canonical source SHA (never a private account, mailbox, plan or key)",
         "        type: string",
         "        required: true",
+        "      operation:",
+        "        description: Preview only, or apply the approved private declaration",
+        "        type: choice",
+        "        options: [preview, apply]",
+        "        default: preview",
+        "        required: true",
     ], "Mail candidate must admit only the one manual event and its source input")
     job = source[source.find("\njobs:\n"):]
     require(re.findall(r"(?m)^  ([a-z0-9-]+):\s*$", job) == ["operate"],
             "Mail candidate must have one and only one job")
-    gate = "    if: ${{ false && github.repository == 'roccho-org/envs' && github.ref_name == 'proposals' && github.sha == inputs.expected_source_sha && github.run_attempt == 1 && github.actor == 'roccho-dev' && github.actor_id == '40359643' && github.triggering_actor == 'roccho-dev' }}"
+    gate = "    if: ${{ github.repository == 'roccho-org/envs' && github.ref_name == 'proposals' && github.sha == inputs.expected_source_sha && github.run_attempt == 1 && github.actor == 'roccho-dev' && github.actor_id == '40359643' && github.triggering_actor == 'roccho-dev' }}"
     require(source.count(gate) == 1 and source.count("\n    if:") == 1,
-            "Mail job must be hard-inactive and source/controller-bound")
+            "Mail job must be source/controller-bound without re-runs")
     require(-1 < source.find(gate) < source.find("    environment: dev-rent-tunnel\n")
             < source.find("    steps:\n"),
             "Mail job must fail before Environment resolution or child execution")
@@ -565,10 +571,16 @@ def check_manual_mail_inactive(root: Path, source: str, canonical: str) -> None:
             ], "Mail candidate may only grant effective actions/contents read")
     require("  cancel-in-progress: false\n" in source,
             "Mail candidate must not auto-cancel and replay")
-    require(not INPUT_REFERENCE.findall(source)
-            and "secrets." not in source and "vars." not in source
+    private_step = source[source.find("      - name: Initialize backend and run one selected Mail operation\n"):]
+    expected_inputs = {("secrets", name) for name in (
+        "MAIL_CONFIG", "CLOUDFLARE_API_TOKEN", "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY", "RENT_STATE_PASSPHRASE",
+    )}
+    require(set(INPUT_REFERENCE.findall(source)) == expected_inputs
+            and len(INPUT_REFERENCE.findall(source)) == len(expected_inputs)
+            and set(INPUT_REFERENCE.findall(private_step)) == expected_inputs
             and "R2_PARENT_" not in source and "TF_ENCRYPTION" not in source,
-            "Mail candidate must not read or map any protected input")
+            "Mail inputs must be the five existing/private slots in the operation step only")
     require(consumer_run(source, "operate-dev-mail-routing.yml") == canonical,
             "Mail candidate must use the existing exact-SHA artifact consumer")
     require({action for action, _ in ACTION_USE.findall(source)} == EFFECT_ACTIONS,
@@ -576,26 +588,37 @@ def check_manual_mail_inactive(root: Path, source: str, canonical: str) -> None:
     require("          ref: ${{ github.sha }}\n" in source
             and "          persist-credentials: false\n" in source,
             "Mail candidate checkout must be source-bound without retained auth")
+    require("          repository: roccho-org/ops\n"
+            "          ref: e0c208356d0e2908224cbbd356c69256cb0e4528\n"
+            "          path: mail-ops-source\n"
+            "          persist-credentials: false\n" in source,
+            "Mail must consume the fixed Ops declaration without retained auth")
     require(run_commands(source.replace(canonical, "")) == [
-        TOOLCHAIN_IDENTITY, '"$ENVS_EFFECT_BIN/mail-routing-root"',
-    ], "Mail candidate can run only artifact identity then inactive entry")
-    require(source.count("      - name: ") == 4,
-            "Mail candidate must not add pre-refusal children")
+        TOOLCHAIN_IDENTITY, "set -euo pipefail", "umask 077",
+        'home="$(mktemp -d "$RUNNER_TEMP/mail-m0.XXXXXX")"',
+        'mkdir -m 700 "$home/root"',
+        'for file in main.tf .terraform.lock.hcl README.md safety.tftest.hcl; do',
+        'install -m 600 "$GITHUB_WORKSPACE/mail-ops-source/providers/mail-routing/$file" "$home/root/$file"',
+        'done', 'echo "MAIL_HOME=$home" >>"$GITHUB_ENV"',
+        "set +e", '"$ENVS_EFFECT_BIN/mail-routing-root" --operation "$MAIL_OPERATION"',
+        'result=$?', 'if [ "$MAIL_OPERATION" = preview ] && [ "$result" -eq 2 ]; then',
+        'exit 0', 'fi', 'exit "$result"',
+    ], "Mail can run only artifact identity, private root preparation and one operation")
+    require(source.count("      - name: ") == 6,
+            "Mail manual consumer must retain the bounded step set")
     adapter_source = (root / "adapters/mail_routing_root.py").read_text(encoding="utf-8")
     require("EXIT_INACTIVE = 78\n" in adapter_source
             and "    return EXIT_INACTIVE\n" in adapter_source
             and "CLOSED_RESULT =" in adapter_source,
             "Mail root adapter must independently refuse")
-    # A future Owner-only private runner may be implemented in this module.
-    # Admission is ONLY the unchanged whole-job false + exact direct CLI
-    # refusal; a blanket ban on subprocess imports would block SOURCE work.
     require(adapter_source.count("import os\n") == 1
             and adapter_source.count("import subprocess\n") == 1
-            and "os.environ" not in adapter_source,
-            "Mail native private runner must not inherit ambient credentials")
+            and adapter_source.count("os.environ") == 1,
+            "Mail native private runner must use only its selected input snapshot")
     require('def main() -> int:\n' in adapter_source
-            and '    print(CLOSED_RESULT)\n    return EXIT_INACTIVE\n\n\nif __name__ == "__main__":\n    sys.exit(main())\n' in adapter_source,
-            "Mail public entry must remain unconditional INACTIVE / exit 78")
+            and 'sys.argv[2] not in ("preview", "apply")' in adapter_source
+            and '        print(CLOSED_RESULT)\n        return EXIT_INACTIVE\n' in adapter_source,
+            "Mail public entry must refuse unsupported/no-argument operation before inputs")
 
 def check_workflows(root: Path, environments: dict[str, dict[str, Any]],
                     author_targets: dict[str, set[tuple[str, str]]], adapter) -> None:
@@ -695,7 +718,7 @@ def check_workflows(root: Path, environments: dict[str, dict[str, Any]],
     for token in ("actions/checkout", "nix ", "install-nix"):
         require(token not in clean_start, f"clean-start must not use {token.strip()}")
     canonical = consumer_run(clean_start, "check.yml clean-start")
-    check_manual_mail_inactive(root, texts["operate-dev-mail-routing.yml"], canonical)
+    check_manual_mail(root, texts["operate-dev-mail-routing.yml"], canonical)
     require(clean_start.count(canonical) == 2, "clean-start must run the canonical consumer and its missing case")
     for marker in CONSUMER_BINDING:
         require(marker in canonical, f"consumer must bind the named commit: {marker}")
