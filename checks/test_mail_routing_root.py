@@ -691,6 +691,119 @@ def check_native_source_and_plan() -> None:
         sys.modules.pop(spec.name, None)
 
 
+def check_manual_integration(mail, manifest: str) -> None:
+    """Actual input/file/runner consumer; only process spawn is synthetic.
+
+    Runs under the supplied Linux interpreter and real manifest. Fixture
+    Ops blobs are deliberately synthetic; no provider/state call is made.
+    """
+    fixtures = {
+        "main.tf": ("OPS_MAIN_BLOB", b"synthetic accepted mail source\n"),
+        ".terraform.lock.hcl": ("OPS_LOCK_BLOB", b"synthetic accepted provider lock\n"),
+        "README.md": ("OPS_README_BLOB", b"synthetic operator notes\n"),
+        "safety.tftest.hcl": ("OPS_TEST_BLOB", b"synthetic source test\n"),
+    }
+    old_blobs = {attr: getattr(mail, attr) for attr, _ in fixtures.values()}
+    real_popen = mail.subprocess.Popen
+    marker = "PRIVATE_MANUAL_INTEGRATION_CANARY"
+    try:
+        for attr, data in fixtures.values():
+            setattr(mail, attr, mail.git_blob(data))
+        with tempfile.TemporaryDirectory(prefix="mail-entry-provided-") as directory:
+            for index, (operation, init_code, operation_code, expected) in enumerate((
+                ("preview", 0, 0, ("NO_OP", 0)),
+                ("preview", 0, 2, ("DELTA", 2)),
+                ("apply", 0, 0, ("APPLIED_UNVERIFIED", 0)),
+                ("apply", 1, 0, ("INIT_UNPROVEN", 1)),
+                ("apply", 0, 1, ("OPERATION_UNPROVEN", 1)),
+            )):
+                home = Path(directory) / str(index)
+                home.mkdir(mode=0o700)
+                root = home / "root"
+                root.mkdir(mode=0o700)
+                for name, (_, data) in fixtures.items():
+                    (root / name).write_bytes(data)
+                    (root / name).chmod(0o600)
+                config = {
+                    "account_id": "a" * 32, "zone_id": "b" * 32,
+                    "zone_name": "example.invalid", "alias_address": "fixture@example.invalid",
+                    "destination_address": "fixture@gmail.com", "rule_priority": 0,
+                    "state_bucket": "mail-state-fixture", "state_key": "mail-m0/state/fixture.tfstate",
+                    "verified_destination_id": None, "manage_dns": True,
+                    "manage_destination": True, "manage_rule": False, "preflight_approved": True,
+                }
+                environ = {
+                    "MAIL_HOME": str(home), "MAIL_CONFIG": json.dumps(config),
+                    "ENVS_EFFECT_TOOLCHAIN": manifest, "CLOUDFLARE_API_TOKEN": marker,
+                    "AWS_ACCESS_KEY_ID": marker, "AWS_SECRET_ACCESS_KEY": marker,
+                    "RENT_STATE_PASSPHRASE": "c" * 64,
+                    "TF_LOG": "TRACE", "AWS_PROFILE": marker, "HTTPS_PROXY": marker,
+                }
+                starts = []
+                def spawn(argv, **kwargs):
+                    starts.append(tuple(argv))
+                    assert argv[1] == "-chdir=" + str(root)
+                    assert argv[2] == ("init" if len(starts) == 1 else
+                                       "plan" if operation == "preview" else "apply")
+                    assert kwargs["umask"] == 0o077 and kwargs["close_fds"]
+                    assert kwargs["stdin"] == subprocess.DEVNULL
+                    child_env = kwargs["env"]
+                    assert child_env["CLOUDFLARE_API_TOKEN"] == marker
+                    assert child_env["AWS_SECRET_ACCESS_KEY"] == marker
+                    assert child_env["TF_VAR_alias_address"] == config["alias_address"]
+                    assert 'key_provider "pbkdf2" "mail_m0"' in child_env["TF_ENCRYPTION"]
+                    assert not {"TF_LOG", "AWS_PROFILE", "HTTPS_PROXY", "PATH"} & set(child_env)
+                    for stream in (kwargs["stdout"], kwargs["stderr"]):
+                        assert stat.S_IMODE(os.fstat(stream).st_mode) == 0o600
+                    code = init_code if len(starts) == 1 else operation_code
+                    script = ("import sys; sys.stdout.write(" + repr(marker) + "); "
+                              "sys.stderr.write(" + repr(marker) + "); sys.exit(" + str(code) + ")")
+                    return real_popen([sys.executable, "-I", "-c", script], **kwargs)
+                mail.subprocess.Popen = spawn
+                assert mail.manual_entry(operation, environ) == expected
+                assert len(starts) == (1 if init_code else 2)
+                backend = home / "backend.hcl"
+                assert stat.S_IMODE(backend.stat().st_mode) == 0o600
+                assert backend.read_text() == (
+                    'bucket = "mail-state-fixture"\nkey = "mail-m0/state/fixture.tfstate"\n'
+                    'endpoints = { s3 = "https://' + "a" * 32 + '.r2.cloudflarestorage.com" }\n')
+                captures = [home / "init.out", home / "init.err"]
+                if init_code == 0:
+                    captures += [home / (operation + ".out"), home / (operation + ".err")]
+                assert all(path.read_text() == marker for path in captures)
+                assert not any(path.suffix == ".tfplan" for path in home.rglob("*"))
+
+            # Refusals never launch a child, even with valid other inputs.
+            for index, failure in enumerate(("config", "slots", "preflight", "source")):
+                home = Path(directory) / ("refused-" + str(index))
+                home.mkdir(mode=0o700)
+                root = home / "root"
+                root.mkdir(mode=0o700)
+                for name, (_, data) in fixtures.items():
+                    (root / name).write_bytes(data)
+                bad = {**environ, "MAIL_HOME": str(home)}
+                if failure == "config":
+                    bad["MAIL_CONFIG"] = '{"private":' + marker
+                elif failure == "slots":
+                    bad["AWS_SECRET_ACCESS_KEY"] = marker + "\n"
+                elif failure == "preflight":
+                    bad["MAIL_CONFIG"] = json.dumps({**config, "preflight_approved": False})
+                else:
+                    (root / "main.tf").write_bytes(b"source drift\n")
+                def forbidden_spawn(*_args, **_kwargs):
+                    raise AssertionError("refused input started a child")
+                mail.subprocess.Popen = forbidden_spawn
+                try:
+                    mail.manual_entry("apply", bad)
+                    raise AssertionError("unproven manual input admitted")
+                except mail.NativeSourceHold as error:
+                    assert marker not in str(error) and "\n" not in str(error)
+    finally:
+        mail.subprocess.Popen = real_popen
+        for attr, value in old_blobs.items():
+            setattr(mail, attr, value)
+
+
 def check_provided_native_toolchain() -> None:
     """Source-only proof from actual Nix artifact and local HEAD fixture."""
     entry = os.environ.get("MAIL_TEST_TOOLCHAIN_ENTRY")
@@ -718,6 +831,15 @@ def check_provided_native_toolchain() -> None:
         )
         assert selection.tofu == from_existing["tools"]["tofu"]
         assert mail.native_bin(selection.tofu, "tofu", selection) == selection.tofu
+        check_manual_integration(mail, from_existing["manifest"])
+        wrapper = str(Path(entry).with_name("mail-routing-root"))
+        for operation in ("preview", "apply"):
+            refused = subprocess.run(
+                [wrapper, "--operation", operation], env={"LANG": "C"},
+                capture_output=True, text=True, check=False, timeout=15,
+            )
+            assert refused.returncode == 78 and refused.stderr == ""
+            assert json.loads(refused.stdout)["status"] == "INPUT_UNPROVEN"
         fake_nix = "/nix/store/" + "0" * 32 + "-other/bin/tofu"
         try:
             mail.native_bin(fake_nix, "tofu", selection)
