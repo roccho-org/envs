@@ -942,21 +942,36 @@ jobs:
           test "$("$resolver" --envs-sha "$composed")" = "$key"
           echo "COMPOSITION_STAGE composed"
 
-          # Stale: the ciphertext changed after the requested revision.
+          # Only the Go line changes or disappears; every other line of this commit's file keeps its exact bytes, so
+          # the bindings-blob check below can only fail because of the Go row itself.
+          go_line() {
+            local line
+            while IFS= read -r line; do
+              if [ "$(printf '%s\n' "$line" | "$tools/bin/jq" -r .id)" = "$binding" ]; then
+                [ "$1" = drop ] || printf '%s\n' "$line" | "$tools/bin/jq" -c '.target.kind = "process_env"'
+              else
+                printf '%s\n' "$line"
+              fi
+            done <contracts/bindings.jsonl >"$envs/contracts/bindings.jsonl"
+            test "$( (diff contracts/bindings.jsonl "$envs/contracts/bindings.jsonl" || true) | grep -c '^[<>]' || true)" = "$2"
+          }
+
+          # Stale ciphertext: the ciphertext changed after the requested revision.
           encrypt >"$envs/$cipher"
           refreshed=$(commit refreshed)
           refused stale "$composed"
           # Different: this commit's Go row with another target kind is neither bound nor accepted.
-          "$tools/bin/jq" -c --arg id "$binding" 'if .id == $id then .target.kind = "process_env" else . end' \
-            contracts/bindings.jsonl >"$envs/contracts/bindings.jsonl"
+          go_line kind 2
           different=$(commit different)
           if bound "$different"; then
-            echo "a different bindings blob was treated as this commit's input" >&2
+            echo "a different Go row was treated as this commit's bindings" >&2
             exit 1
           fi
           refused different "$different"
+          # Stale binding: the Go row changed on proposals after the requested revision.
+          refused stale-binding "$refreshed"
           # Missing: this commit's bindings without the Go row.
-          "$tools/bin/jq" -c --arg id "$binding" 'select(.id != $id)' contracts/bindings.jsonl >"$envs/contracts/bindings.jsonl"
+          go_line drop 1
           missing=$(commit missing)
           refused missing "$missing"
           # Uncomposed: no envs authority at all, and a revision that the envs authority does not contain.
@@ -964,7 +979,7 @@ jobs:
           refused uncomposed "$refreshed"
           mv "$fx/envs-away" "$envs"
           refused unknown "$(printf unknown | sha1sum | cut -c1-40)"
-          echo "COMPOSITION_STAGE missing stale different uncomposed refused"
+          echo "COMPOSITION_STAGE missing stale stale-binding different uncomposed refused"
 
           # Restored to this commit's exact bindings, the same composition is accepted again.
           cp contracts/bindings.jsonl "$envs/contracts/bindings.jsonl"
@@ -973,7 +988,7 @@ jobs:
           bound "$restored"
           test "$("$resolver" --envs-sha "$restored")" = "$key"
           test -z "$(git status --porcelain)"
-          echo "PASS agent-opencode-go-source-composition: windows $windows_commit tree $windows_tree resolver x envs $(git rev-parse HEAD) contracts/bindings.jsonl $(git rev-parse HEAD:contracts/bindings.jsonl); missing/stale/different/uncomposed/OID refused; fixture only"
+          echo "PASS agent-opencode-go-source-composition: windows $windows_commit tree $windows_tree resolver x envs $(git rev-parse HEAD) contracts/bindings.jsonl $(git rev-parse HEAD:contracts/bindings.jsonl); missing/stale/stale-binding/different/uncomposed/OID refused; fixture only"
 
       # Throwaway identities for the placement gate only, made by the check-only age; the gate's envelopes are
       # encrypted to them. They never enter the effect toolchain or the placement distribution.
