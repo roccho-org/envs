@@ -373,7 +373,14 @@ preview-to-apply chain or automatic retry. A preview delta is reported as
 action names and consistent add/change/remove counts. Native messages,
 attributes, IDs and output values never enter that summary. Missing,
 unrecognized or inconsistent inventory is `PREVIEW_UNPROVEN`, not permission
-to apply. Apply success is only `APPLIED_UNVERIFIED`. A failed apply remains
+to apply. Its fixed rejection reason and finite native exit distinguish parser
+rejection from native operation failure without exposing event payloads.
+OpenTofu uses apply-style hooks for data-source reads during planning. Preview
+accepts paired `action=read` hooks only for the two fixed verification data
+sources, before the plan summary; resource mutation hooks remain rejected.
+The supplied native toolchain checks this with a local synthetic data source.
+No provider authentication, real state or mail setting is used by that fixture.
+Apply success is only `APPLIED_UNVERIFIED`. A failed apply remains
 `OPERATION_UNPROVEN`; its bounded private JSON capture may identify fixed resource
 labels and numeric HTTP/API codes. Native diagnostic text, URLs and values are
 discarded. Unsupported or malformed evidence yields `UNCLASSIFIED`, with the

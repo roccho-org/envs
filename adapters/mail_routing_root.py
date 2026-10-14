@@ -823,23 +823,28 @@ def preview_summary(path: Path, code: int) -> dict:
         "data.cloudflare_email_routing_address.checked[0]": "verified_destination",
         "data.cloudflare_email_routing_settings.checked[0]": "routing_settings",
     }
+    reason = "CAPTURE"
     try:
         if code not in (0, 2):
             raise ValueError("native preview failed")
         _owner_home(path.parent)
         rows = _owner_file(path, path.parent, 8388608).decode("utf-8").splitlines()
         events = [_json_object(row.encode("utf-8")) for row in rows]
+        reason = "VERSION"
         if (events[0].get("type") != "version" or events[0].get("tofu") != "1.12.3"
                 or re.fullmatch(r"1\.[0-9]+", events[0].get("ui", "")) is None):
             raise ValueError("unsupported native stream")
-        actions, drift, summaries = {}, {}, []
+        actions, drift, summaries, reads = {}, {}, [], {}
         totals = {"add": 0, "change": 0, "remove": 0}
         for event in events[1:]:
             kind = event.get("type")
+            reason = "EVENT"
             if kind not in ("planned_change", "change_summary", "resource_drift", "refresh_start", "refresh_complete",
-                            "state_lock_acquire", "state_lock_release", "log", "diagnostic", "outputs"):
+                            "state_lock_acquire", "state_lock_release", "log", "diagnostic", "outputs",
+                            "apply_start", "apply_progress", "apply_complete"):
                 raise ValueError("unexpected plan event")
             if kind == "planned_change":
+                reason = "CHANGE"
                 change = event["change"]
                 label = labels[change["resource"]["addr"]]
                 action = change["action"]
@@ -851,19 +856,42 @@ def preview_summary(path: Path, code: int) -> dict:
                 totals["change"] += action == "update"
                 totals["remove"] += action in ("delete", "replace")
             elif kind == "resource_drift":
+                reason = "DRIFT"
                 change = event["change"]
                 label, action = labels[change["resource"]["addr"]], change["action"]
                 if label in drift or action not in ("update", "delete"):
                     raise ValueError("unrecognized drift")
                 drift[label] = action
             elif kind in ("refresh_start", "refresh_complete"):
+                reason = "REFRESH"
                 if event["hook"]["resource"]["addr"] not in labels:
                     raise ValueError("unrecognized refresh")
+            elif kind in ("apply_start", "apply_progress", "apply_complete"):
+                # OpenTofu uses apply hooks for data-source reads during plan.
+                # Admit only the two fixed verification reads, never mutations.
+                reason = "DATA_READ"
+                hook = event["hook"]
+                label = labels[hook["resource"]["addr"]]
+                if (label not in ("verified_destination", "routing_settings")
+                        or hook.get("action") != "read" or summaries):
+                    raise ValueError("unrecognized data read")
+                if kind == "apply_start":
+                    if label in reads:
+                        raise ValueError("repeated data read")
+                    reads[label] = "started"
+                else:
+                    if reads.get(label) != "started":
+                        raise ValueError("unpaired data read")
+                    if kind == "apply_complete":
+                        reads[label] = "complete"
             elif kind == "change_summary":
                 summaries.append(event["changes"])
             elif kind == "diagnostic" and event.get("@level") == "error":
+                reason = "NATIVE_ERROR"
                 raise ValueError("native diagnostic")
+        reason = "SUMMARY"
         if (len(summaries) != 1 or summaries[0].get("operation") != "plan"
+                or any(phase != "complete" for phase in reads.values())
                 or any(type(summaries[0].get(k)) is not int or summaries[0][k] != v for k, v in totals.items())
                 or any(type(summaries[0].get(k, 0)) is not int or summaries[0].get(k, 0) != 0 for k in ("import", "forget"))
                 or (code == 0 and (any(totals.values()) or any(a not in ("noop", "read") for a in actions.values())))
@@ -872,7 +900,7 @@ def preview_summary(path: Path, code: int) -> dict:
         return {"kind": "envs.mailM0.preview.v1", "status": "NO_OP" if code == 0 else "DELTA",
                 "changes": actions, "drift": drift, "totals": totals}
     except Exception:
-        raise NativeSourceHold("MAIL_PREVIEW_UNPROVEN") from None
+        raise NativeSourceHold("MAIL_PREVIEW_UNPROVEN_" + reason) from None
 
 
 def apply_failure_summary(path: Path) -> dict:
@@ -985,8 +1013,12 @@ def manual_entry(operation: str, environ: Mapping[str, str]) -> tuple[str, int] 
     if operation == "preview" and result[1] in (0, 2):
         try:
             return preview_summary(home / "preview.out", result[1])
-        except NativeSourceHold:
-            return "PREVIEW_UNPROVEN", 1
+        except NativeSourceHold as error:
+            reason = str(error).removeprefix("MAIL_PREVIEW_UNPROVEN_")
+            if reason not in ("CAPTURE", "VERSION", "EVENT", "CHANGE", "DRIFT", "REFRESH", "DATA_READ", "NATIVE_ERROR", "SUMMARY"):
+                reason = "UNCLASSIFIED"
+            return {"kind": "envs.mailM0.manual.v1", "status": "PREVIEW_UNPROVEN",
+                    "reason": reason, "native_exit": result[1], "_code": 1}
     if operation == "apply" and result[1] != 0:
         return {"kind": "envs.mailM0.manual.v1", "status": result[0],
                 "stage": "init" if result[0] == "INIT_UNPROVEN" else "apply",
