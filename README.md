@@ -369,7 +369,11 @@ native no-op exit 0; exit 2, errors, timeout and unknown outcomes are unfinished
 Each fresh runner initializes the selected backend, then performs exactly
 one preview or apply. Init failure prevents the operation; there is no
 preview-to-apply chain or automatic retry. A preview delta is reported as
-`DELTA`; apply success is only `APPLIED_UNVERIFIED`.
+`DELTA`; its private native JSON capture yields only fixed resource labels,
+action names and consistent add/change/remove counts. Native messages,
+attributes, IDs and output values never enter that summary. Missing,
+unrecognized or inconsistent inventory is `PREVIEW_UNPROVEN`, not permission
+to apply. Apply success is only `APPLIED_UNVERIFIED`.
 
 `operate-dev-mail-routing` is manual and restricted to the exact canonical
 SHA, `roccho-dev`, first attempt and serialized runs. Its closed operations

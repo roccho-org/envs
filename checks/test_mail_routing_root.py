@@ -51,6 +51,73 @@ def invalid_state_envelopes(data: bytes) -> list[bytes]:
     return bad
 
 
+def preview_journal(delta: bool, marker: str = "SYNTHETIC_PRIVATE_VALUE") -> str:
+    events = [{"type": "version", "tofu": "1.12.3", "ui": "1.0"},
+              {"type": "state_lock_acquire", "@message": marker}]
+    if delta:
+        for address in ("cloudflare_email_routing_address.gmail[0]", "cloudflare_email_routing_dns.zone[0]"):
+            events.append({"type": "planned_change", "@message": marker,
+                           "change": {"resource": {"addr": address}, "action": "create"}})
+    events.extend([{"type": "change_summary", "changes": {"operation": "plan", "add": 2 if delta else 0,
+                                                          "change": 0, "remove": 0}},
+                   {"type": "outputs", "outputs": {"private": {"sensitive": True, "value": marker}}},
+                   {"type": "state_lock_release", "@message": marker}])
+    return "\n".join(json.dumps(event) for event in events) + "\n"
+
+
+def check_preview_summary(mail) -> None:
+    if os.name != "posix":
+        return
+    marker = "SYNTHETIC_PRIVATE_PREVIEW_CANARY"
+    with tempfile.TemporaryDirectory() as directory:
+        home = Path(directory) / "private"
+        home.mkdir(mode=0o700)
+        capture = home / "preview.out"
+        for code in (0, 2):
+            journal = preview_journal(code == 2, marker)
+            capture.write_text(journal, encoding="utf-8")
+            capture.chmod(0o600)
+            result = mail.preview_summary(capture, code)
+            assert result["status"] == ("DELTA" if code == 2 else "NO_OP")
+            assert result["totals"] == {"add": 2 if code == 2 else 0, "change": 0, "remove": 0}
+            assert result["changes"] == ({"destination": "create", "dns": "create"} if code == 2 else {})
+            assert marker not in repr(result)
+        for bad in (journal.replace('"1.0"', '"2.0"'), journal.replace('"1.12.3"', '"1.12.2"'),
+                    journal.replace('"add": 2', '"add": true'), journal.replace('"add": 2', '"add": 1'),
+                    journal.replace('"create"', '"unknown"'), journal.replace('"create"', '"update"'),
+                    journal.replace('"action": "create"', '"action": "create", "importing": {"id": "private"}'),
+                    journal.replace('"action": "create"', '"action": "create", "generated_config": "private"'),
+                    journal.replace('"operation": "plan"', '"operation": "plan", "import": 2'),
+                    journal.replace('"operation": "plan"', '"operation": "plan", "forget": 1'),
+                    journal.replace('"addr":', '"addr":"duplicate", "addr":'),
+                    journal.replace('cloudflare_email_routing_dns.zone[0]', marker),
+                    journal.replace('cloudflare_email_routing_dns.zone[0]', 'cloudflare_email_routing_address.gmail[0]'),
+                    preview_journal(False), journal + journal, journal + "malformed", "", " " * 8388609,
+                    journal + json.dumps({"type": "version", "tofu": "1.12.3", "ui": "1.0"}),
+                    journal + json.dumps({"type": "apply_start", "hook": {"resource": {"addr": marker}}}),
+                    journal + json.dumps({"type": "refresh_start", "hook": {"resource": {"addr": marker}}}),
+                    journal + json.dumps({"type": "resource_drift", "change": {"resource": {"addr": marker}, "action": "update"}})):
+            capture.write_text(bad, encoding="utf-8")
+            try:
+                mail.preview_summary(capture, 2)
+                raise AssertionError("unsafe preview summary accepted")
+            except mail.NativeSourceHold:
+                pass
+        capture.write_text(preview_journal(True), encoding="utf-8")
+        for code in (0, 1, 124, 125):
+            try:
+                mail.preview_summary(capture, code)
+                raise AssertionError("inconsistent preview status accepted")
+            except mail.NativeSourceHold:
+                pass
+        capture.chmod(0o644)
+        try:
+            mail.preview_summary(capture, 2)
+            raise AssertionError("public preview capture accepted")
+        except mail.NativeSourceHold:
+            pass
+
+
 def check_state_contract(mail) -> None:
     data = state_envelope_fixture()
     assert mail.state_ciphertext(data) == "age1" + "q" * 58
@@ -192,6 +259,7 @@ def check_native_source_and_plan() -> None:
     try:
         spec.loader.exec_module(mail)
         check_state_contract(mail)
+        check_preview_summary(mail)
         with tempfile.TemporaryDirectory(prefix="mail-m0-native-fixture-") as directory:
             home = Path(directory)
             ops = home / "ops-mail-root"
@@ -605,7 +673,7 @@ def check_native_source_and_plan() -> None:
                     )
                     assert command.argv == (
                         tofu, "-chdir=" + str(ops), "plan", "-input=false",
-                        "-lock=true", "-detailed-exitcode",
+                        "-lock=true", "-detailed-exitcode", "-json",
                     )
                     result = run_synthetic(command, name, code=code, pause=pause,
                                            start_failure=start_failure)
@@ -901,11 +969,18 @@ def check_manual_integration(mail, manifest: str, identity: str, recipient: str)
                     for stream in (kwargs["stdout"], kwargs["stderr"]):
                         assert stat.S_IMODE(os.fstat(stream).st_mode) == 0o600
                     code = init_code if len(starts) == 1 else operation_code
-                    script = ("import sys; sys.stdout.write(" + repr(marker) + "); "
+                    stdout = preview_journal(operation_code == 2, marker) if len(starts) == 2 and operation == "preview" else marker
+                    script = ("import sys; sys.stdout.write(" + repr(stdout) + "); "
                               "sys.stderr.write(" + repr(marker) + "); sys.exit(" + str(code) + ")")
                     return real_popen([sys.executable, "-I", "-c", script], **kwargs)
                 mail.subprocess.Popen = spawn
-                assert mail.manual_entry(operation, environ) == expected
+                actual = mail.manual_entry(operation, environ)
+                if operation == "preview" and init_code == 0 and operation_code in (0, 2):
+                    assert actual == {"kind": "envs.mailM0.preview.v1", "status": expected[0],
+                                      "changes": {"destination": "create", "dns": "create"} if operation_code == 2 else {},
+                                      "drift": {}, "totals": {"add": 2 if operation_code == 2 else 0, "change": 0, "remove": 0}}
+                else:
+                    assert actual == expected
                 assert len(starts) == (1 if init_code else 2)
                 backend = home / "backend.hcl"
                 assert stat.S_IMODE(backend.stat().st_mode) == 0o600
@@ -915,7 +990,8 @@ def check_manual_integration(mail, manifest: str, identity: str, recipient: str)
                 captures = [home / "init.out", home / "init.err"]
                 if init_code == 0:
                     captures += [home / (operation + ".out"), home / (operation + ".err")]
-                assert all(path.read_text() == marker for path in captures)
+                assert all(path.read_text() == (preview_journal(operation_code == 2, marker)
+                           if path.name == "preview.out" else marker) for path in captures)
                 assert not any(path.suffix == ".tfplan" for path in home.rglob("*"))
 
             # Refusals never launch a child, even with valid other inputs.
@@ -1094,6 +1170,26 @@ def check_provided_native_toolchain() -> None:
                         umask=0o077, check=False, timeout=15,
                     )
                 assert native.returncode == expected, "provided automatic apply did not converge"
+                if stage in ("preview", "converged"):
+                    journal = (fixture / (stage + ".out")).read_text(encoding="utf-8")
+                    private_summary = fixture / (stage + "-summary")
+                    private_summary.mkdir(mode=0o700)
+                    capture = private_summary / "capture.jsonl"
+                    # Test-only resource-name translation; actual native JSON
+                    # and exit0/2 still drive the strict privacy boundary.
+                    capture.write_text(journal.replace("terraform_data.fixture", "cloudflare_email_routing_dns.zone[0]"), encoding="utf-8")
+                    capture.chmod(0o600)
+                    try:
+                        summary = mail.preview_summary(capture, native.returncode)
+                    except mail.NativeSourceHold:
+                        # Synthetic fixture only: expose schema metadata to
+                        # diagnose a version/event compatibility failure.
+                        events = [json.loads(row) for row in capture.read_text(encoding="utf-8").splitlines()]
+                        print("SYNTHETIC_NATIVE_SCHEMA", [(event.get("type"), event.get("ui"),
+                              event.get("tofu"), event.get("terraform"), event.get("changes")) for event in events])
+                        raise
+                    assert summary["totals"] == {"add": 1 if stage == "preview" else 0, "change": 0, "remove": 0}
+                    assert canary not in repr(summary)
             state = (fixture / "terraform.tfstate").read_bytes()
             assert state and canary.encode() not in state, "synthetic state was not encrypted"
             assert not any(path.suffix in (".tfplan", ".enc") for path in fixture.iterdir())
