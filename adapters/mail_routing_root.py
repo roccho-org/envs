@@ -832,31 +832,44 @@ def preview_summary(path: Path, code: int) -> dict:
         if (events[0].get("type") != "version" or events[0].get("tofu") != "1.12.3"
                 or re.fullmatch(r"1\.[0-9]+", events[0].get("ui", "")) is None):
             raise ValueError("unsupported native stream")
-        actions, summaries = {}, []
+        actions, drift, summaries = {}, {}, []
         totals = {"add": 0, "change": 0, "remove": 0}
         for event in events[1:]:
             kind = event.get("type")
+            if kind not in ("planned_change", "change_summary", "resource_drift", "refresh_start", "refresh_complete",
+                            "log", "diagnostic", "outputs"):
+                raise ValueError("unexpected plan event")
             if kind == "planned_change":
                 change = event["change"]
                 label = labels[change["resource"]["addr"]]
                 action = change["action"]
-                if (label in actions or action not in ("noop", "create", "read", "update", "replace", "delete", "move")
+                if (label in actions or action not in ("noop", "create", "read", "update", "replace", "delete")
                         or "previous_resource" in change):
                     raise ValueError("unrecognized change")
                 actions[label] = action
                 totals["add"] += action in ("create", "replace")
                 totals["change"] += action == "update"
                 totals["remove"] += action in ("delete", "replace")
+            elif kind == "resource_drift":
+                change = event["change"]
+                label, action = labels[change["resource"]["addr"]], change["action"]
+                if label in drift or action not in ("update", "delete"):
+                    raise ValueError("unrecognized drift")
+                drift[label] = action
+            elif kind in ("refresh_start", "refresh_complete"):
+                if event["hook"]["resource"]["addr"] not in labels:
+                    raise ValueError("unrecognized refresh")
             elif kind == "change_summary":
                 summaries.append(event["changes"])
             elif kind == "diagnostic" and event.get("@level") == "error":
                 raise ValueError("native diagnostic")
         if (len(summaries) != 1 or summaries[0].get("operation") != "plan"
                 or any(type(summaries[0].get(k)) is not int or summaries[0][k] != v for k, v in totals.items())
-                or (code == 0 and (any(totals.values()) or any(a not in ("noop", "read") for a in actions.values())))):
+                or (code == 0 and (any(totals.values()) or any(a not in ("noop", "read") for a in actions.values())))
+                or (code == 2 and not any(totals.values()))):
             raise ValueError("inconsistent native summary")
         return {"kind": "envs.mailM0.preview.v1", "status": "NO_OP" if code == 0 else "DELTA",
-                "changes": actions, "totals": totals}
+                "changes": actions, "drift": drift, "totals": totals}
     except Exception:
         raise NativeSourceHold("MAIL_PREVIEW_UNPROVEN") from None
 

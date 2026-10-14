@@ -86,7 +86,11 @@ def check_preview_summary(mail) -> None:
                     journal.replace('"addr":', '"addr":"duplicate", "addr":'),
                     journal.replace('cloudflare_email_routing_dns.zone[0]', marker),
                     journal.replace('cloudflare_email_routing_dns.zone[0]', 'cloudflare_email_routing_address.gmail[0]'),
-                    journal + journal, journal + "malformed", "", " " * 8388609):
+                    preview_journal(False), journal + journal, journal + "malformed", "", " " * 8388609,
+                    journal + json.dumps({"type": "version", "tofu": "1.12.3", "ui": "1.0"}),
+                    journal + json.dumps({"type": "apply_start", "hook": {"resource": {"addr": marker}}}),
+                    journal + json.dumps({"type": "refresh_start", "hook": {"resource": {"addr": marker}}}),
+                    journal + json.dumps({"type": "resource_drift", "change": {"resource": {"addr": marker}, "action": "update"}})):
             capture.write_text(bad, encoding="utf-8")
             try:
                 mail.preview_summary(capture, 2)
@@ -968,7 +972,7 @@ def check_manual_integration(mail, manifest: str, identity: str, recipient: str)
                 if operation == "preview" and init_code == 0 and operation_code in (0, 2):
                     assert actual == {"kind": "envs.mailM0.preview.v1", "status": expected[0],
                                       "changes": {"destination": "create", "dns": "create"} if operation_code == 2 else {},
-                                      "totals": {"add": 2 if operation_code == 2 else 0, "change": 0, "remove": 0}}
+                                      "drift": {}, "totals": {"add": 2 if operation_code == 2 else 0, "change": 0, "remove": 0}}
                 else:
                     assert actual == expected
                 assert len(starts) == (1 if init_code else 2)
@@ -980,7 +984,8 @@ def check_manual_integration(mail, manifest: str, identity: str, recipient: str)
                 captures = [home / "init.out", home / "init.err"]
                 if init_code == 0:
                     captures += [home / (operation + ".out"), home / (operation + ".err")]
-                assert all(path.read_text() == marker for path in captures)
+                assert all(path.read_text() == (preview_journal(operation_code == 2, marker)
+                           if path.name == "preview.out" else marker) for path in captures)
                 assert not any(path.suffix == ".tfplan" for path in home.rglob("*"))
 
             # Refusals never launch a child, even with valid other inputs.
