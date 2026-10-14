@@ -241,7 +241,8 @@ class LifecycleSUT(unittest.TestCase):
         guessed = {"attempt": "ci-attempt-1", "preimage": STORE0,
                    "selected": STORE1, "effect": "SYNTHETIC_ONLY"}
         with self.assertRaises(ValueError):
-            self.host.rollback_fixture(guessed, "ci-attempt-1", quiet=True, writer=True)
+            self.host.rollback_fixture(guessed, "ci-attempt-1", quiet=True,
+                                       writer=True, current_desired=self.desired)
         self.assertEqual(self.host.effect_count, 1)
         # Old effect is UNKNOWN even though the selector looks new; no auto change/success.
         e = copy.deepcopy(self.effect)
@@ -351,7 +352,8 @@ class LifecycleSUT(unittest.TestCase):
             with self.subTest(forged=claimed_attempt, preimage=forged["preimage"]):
                 with self.assertRaises(ValueError):
                     self.host.rollback_fixture(
-                        forged, claimed_attempt, quiet=True, writer=True
+                        forged, claimed_attempt, quiet=True, writer=True,
+                        current_desired=self.desired,
                     )
                 self.assertEqual(self.host.observe(), ("SELECTED", STORE1))
                 self.assertEqual(self.host.effect_count, old_count)
@@ -362,12 +364,27 @@ class LifecycleSUT(unittest.TestCase):
         # issued record; restoring it is not an arbitrary new admission.
         actual["preimage"] = STORE1
         with self.assertRaises(ValueError):
-            self.host.rollback_fixture(actual, "ci-rotate", quiet=True, writer=True)
+            self.host.rollback_fixture(actual, "ci-rotate", quiet=True,
+                                           writer=True, current_desired=self.desired)
         self.assertEqual(self.host.effect_count, old_count)
         actual["preimage"] = STORE0
+        # Even a genuinely issued receipt belongs to its originally selected
+        # D revision/store; an intervening desired revision cannot reuse it.
+        for changed in ({"revision": "ci-q-new"}, {"store_path": STORE0}):
+            updated_d = copy.deepcopy(self.desired)
+            updated_d.update(changed)
+            with self.assertRaisesRegex(ValueError, "superseded synthetic D"):
+                self.host.rollback_fixture(
+                    actual, "ci-rotate", quiet=True, writer=True,
+                    current_desired=updated_d,
+                )
+            self.assertEqual(self.host.effect_count, old_count)
+            self.assertEqual(self.host.observe(), ("SELECTED", STORE1))
+            self.assertEqual(self.host.snapshot(), old_state)
 
         self.assertEqual(
-            self.host.rollback_fixture(actual, "ci-rotate", quiet=True, writer=True),
+            self.host.rollback_fixture(actual, "ci-rotate", quiet=True,
+                                           writer=True, current_desired=self.desired),
             "SYNTHETIC_ROLLBACK_NOT_NEW_D_SUCCESS",
         )
         self.assertEqual(self.host.observe(), ("SELECTED", STORE0))
@@ -378,7 +395,8 @@ class LifecycleSUT(unittest.TestCase):
         # A previously issued/consumed receipt cannot be replayed even if a
         # later attempt happens to select the very same store path.
         with self.assertRaises(ValueError):
-            self.host.rollback_fixture(actual, "ci-rotate", quiet=True, writer=True)
+            self.host.rollback_fixture(actual, "ci-rotate", quiet=True,
+                                           writer=True, current_desired=self.desired)
         self.assertEqual(self.host.effect_count, count_after_new)
         self.assertEqual(self.host.observe(), ("SELECTED", STORE1))
         self.assertEqual(self.host.snapshot(), old_state)
@@ -397,17 +415,19 @@ class LifecycleSUT(unittest.TestCase):
             {"attempt": "ci-1", "quiet": True, "writer": False},
         ):
             with self.assertRaises(ValueError):
-                self.host.rollback_fixture(second, **options)
+                self.host.rollback_fixture(second, current_desired=self.desired, **options)
             self.assertEqual(self.host.observe(), ("SELECTED", STORE1))
         before = self.host.snapshot()
-        self.assertEqual(self.host.rollback_fixture(second, "ci-1", quiet=True, writer=True),
+        self.assertEqual(self.host.rollback_fixture(second, "ci-1", quiet=True, writer=True,
+                                                current_desired=self.desired),
                          "SYNTHETIC_ROLLBACK_NOT_NEW_D_SUCCESS")
         self.assertEqual(self.host.observe(), ("SELECTED", STORE0))
         self.assertEqual(self.host.snapshot(), before)
         self.assertEqual(self.host.effect_count, 3)
         self.assertEqual(first["preimage"], None)
         with self.assertRaises(ValueError):
-            self.host.rollback_fixture(first, "ci-0", quiet=True, writer=True)
+            self.host.rollback_fixture(first, "ci-0", quiet=True, writer=True,
+                                           current_desired=self.desired)
 
     def test_source_change_is_not_target_noop_or_success(self):
         before = self.host.snapshot()
