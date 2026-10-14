@@ -773,7 +773,7 @@ jobs:
       # Exactly this disposable SOURCE-candidate PR: immutable public metadata GET only.
       # No token, Target, permission/trigger expansion or production job dependency.
       - name: Verify real public SOURCE candidate provenance (not S4 admission)
-        if: github.event_name == 'pull_request' && github.head_ref == 'codex/host-common-source-provenance-gate-20261014'
+        if: github.event_name == 'pull_request' && (github.head_ref == 'codex/host-common-source-provenance-gate-20261014' || github.head_ref == 'codex/host-common-v5-source-composite-20261015')
         run: python3 checks/host_tool_source_provenance.py --snapshot checks/fixtures/host-tool-source-set.json
 
       - name: Install pinned Nix
