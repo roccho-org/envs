@@ -339,6 +339,7 @@ def test_targets_are_separate() -> None:
         "jev-api": ["JEV_API_KEY", "SOPS_AGE_RECIPIENTS"],
         jev.OCI_BINDING: ["JEV_API_KEY", jev.OCI_RECIPIENT],
         jev.GO_BINDING: [jev.GO_KEY, jev.OCI_RECIPIENT],
+        jev.OWN_GO_BINDING: [jev.GO_KEY, jev.OWN_GO_RECIPIENT],
     }
     try:
         jev.authoring_inputs(contracts, "rent-tunnel")
@@ -558,6 +559,23 @@ def test_author_own_go_red() -> None:
                 pass
             else:
                 raise AssertionError("invalid committed own OCI Go ciphertext accepted")
+        finally:
+            go_fixture_clear(root)
+    # The own binding row never names the host-native versapro or the oci-dev target.
+    for host in ("versapro", "oci-dev"):
+        root = copy_root()
+        try:
+            path = root / jev.BINDINGS
+            text = path.read_text()
+            own = '"repository":"roccho-dev/resources","host":"versapro-own-oci"'
+            assert text.count(own) == 1
+            path.write_text(text.replace(own, f'"repository":"roccho-dev/resources","host":"{host}"'))
+            try:
+                jev.validate_contracts(root)
+            except jev.EnvsError:
+                pass
+            else:
+                raise AssertionError(f"own OCI Go binding retargeted to {host} accepted")
         finally:
             go_fixture_clear(root)
 

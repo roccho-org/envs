@@ -96,6 +96,7 @@ THIRD_PARTY_NOTICES.md
 | `dev-authoring/OPENCODE_API_KEY` | secret | opaque | one_shot_ingress |
 | `dev-authoring/SOPS_AGE_RECIPIENTS` | variable | age_recipient_list | persistent |
 | `dev-authoring/OCI_DEV_AGE_RECIPIENT` | variable | age_recipient | persistent |
+| `dev-authoring/VERSAPRO_OWN_OCI_AGE_RECIPIENT` | variable | age_recipient | persistent |
 | `dev-projection/SOPS_AGE_KEY` | secret | age_identity | persistent |
 | `dev-projection/CLOUDFLARE_API_TOKEN` | secret | opaque | persistent |
 | `dev-projection/CLOUDFLARE_ACCOUNT_ID` | variable | cloudflare_account_id | persistent |
@@ -185,7 +186,7 @@ dev-authoring/OPENCODE_API_KEY + dev-authoring/OCI_DEV_AGE_RECIPIENT
 ```
 
 - `dev.opencode-go-authoring` declares the Go source separately from `dev.authoring` (Jev).
-  The existing workflow's three literal target steps never pass `OPENCODE_API_KEY` to a
+  The workflow's literal target steps never pass `OPENCODE_API_KEY` to a
   Jev step or `JEV_API_KEY` to the Go step. Cloudflare's `SOPS_AGE_RECIPIENTS` list
   is not an OCI-dev author input. Sharing the target age recipient does not share the source key.
 - The Windows target is exactly `{"repository":"roccho-dev/windows","host":"oci-dev","kind":"pi_auth_command"}`;
@@ -199,6 +200,28 @@ dev-authoring/OPENCODE_API_KEY + dev-authoring/OCI_DEV_AGE_RECIPIENT
   No real `OPENCODE_API_KEY` value, production ciphertext, provider call, target key or runtime
   adoption is part of this source stage. The committed Go plane is `NOT_CONFIGURED`; only
   later real canonical ciphertext/provisioning can move the live acceptance gate.
+
+## Dev OpenCode Go VersaPro own OCI authoring (roccho-dev/resources#10)
+
+`opencode-go.versapro-own-oci` is the same Go source capability for the VersaPro own OCI's
+target-bound Pi resolver. It reads the same Go source plane but its own single recipient:
+
+```text
+dev-authoring/OPENCODE_API_KEY + dev-authoring/VERSAPRO_OWN_OCI_AGE_RECIPIENT
+→ author-dev-jev-api, `author --target opencode-go.versapro-own-oci` (manual dispatch on proposals only)
+→ ciphertexts/dev-opencode-go.versapro-own-oci.sops.yaml (exactly OPENCODE_API_KEY + SOPS metadata; one recipient)
+→ ciphertext-only source PR → accepted canonical proposals revision
+```
+
+- The target is exactly `{"repository":"roccho-dev/resources","host":"versapro-own-oci","kind":"pi_auth_command"}`,
+  the one the resolver built for that OCI compares as a whole value; host `versapro` or `oci-dev` is RED.
+- Each target reads only its own declared recipient: `OCI_DEV_AGE_RECIPIENT` is never a fallback for
+  this target, and `VERSAPRO_OWN_OCI_AGE_RECIPIENT` never reaches the `opencode-go.oci-dev` step.
+- The recipient is the public key the target creates in place with its own bounded `jev-age-init`;
+  no private identity leaves the target.
+- Declared is not usable: this binding has no ciphertext until it is authored and accepted at an
+  exact envs revision, and the target resolver then checks that ciphertext, its one recipient and
+  this exact target before any key is released to Pi.
 
 ## Dev rent tunnel flow (windows #14)
 
