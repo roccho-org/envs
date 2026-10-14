@@ -122,7 +122,7 @@ def check_v6_coverage(document: str, snapshot: dict) -> dict:
     # review ID elsewhere (e.g. A1) must not mask a corrupted registry entry.
     registry = {}
     for line in document.splitlines():
-        match = re.match(r"^\\| (F1|F2|X|R) \\|", line)
+        match = re.match(r"^\| (F1|F2|X|R) \|", line)
         if not match:
             continue
         label = match.group(1)
