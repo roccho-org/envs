@@ -22,6 +22,12 @@ SHA = re.compile(r"[0-9a-f]{40}\Z")
 NAR = re.compile(r"sha256-[A-Za-z0-9+/]+={0,2}\Z")
 FLAKE_PIN = re.compile(r'(?m)^[ \t]*inputs\.windows\.url = "github:roccho-dev/windows/([0-9a-f]{40})";[ \t]*$')
 KIND = "envs.hostToolSourceProvenanceCandidate.v0"
+RELATION_PATH = "nixos/tests/host_relation_source.py"
+RELATION_METHOD = "test_containment_cycles_self_and_multi_parent_refused_same_scope"
+RELATION_BLOB = "4aa50be2c62c714def0b2aa97aa24573bd8b5344"
+RELATION_STEP = "Test synthetic Host contains/manages/optional wrap (NOT_ADMITTED)"
+S2_MARKER = (f"SOURCE-RELATION:roccho-dev/resources#19/{RELATION_PATH}"
+             f"#{RELATION_METHOD}")
 REQUIRED = {
     "roccho-dev/windows": {
         "pr": 91,
@@ -33,21 +39,38 @@ REQUIRED = {
             "Prove native rent Tool selection, quiet refusal, rollback and retained state"}},
     },
     "roccho-org/envs": {
-        "pr": 86,
+        "pr": 87,
         "jobs": {"repository", "toolchain", "placement-artifact", "placement-author",
                  "placement-windows", "placement-rent", "effect-shape", "clean-start"},
         "skipped": {"placement-publish"},
         "steps": {
-            "repository": {"Test synthetic D/O/authority guard (always effect forbidden)"},
-            "toolchain": {"Built source is the named commit",
-                          "Test Host Tool proposal at exact source head",
-                          "Test synthetic Host Tool guard at exact source head"}},
+            "repository": {
+                "Test unadmitted Host Tool D/q proposal",
+                "Test synthetic D/O/authority guard (always effect forbidden)",
+                "Test stage-local READ, SOURCE, CHANGE, RECORD and receiver-start guards",
+                "Test v6 complete synthetic Target I(D)/I(O) gap and alternative plans",
+                "Prove ordinary accepted projection rejects Host Tool proposal/admission",
+                "Test temporary native Tool generation and UNKNOWN/recovery SUT",
+                "Test cross-repo public SOURCE provenance refusal (offline)",
+            },
+            "toolchain": {
+                "Built source is the named commit",
+                "Test Host Tool proposal at exact source head",
+                "Test synthetic Host Tool guard at exact source head",
+                "Test stage-local SOURCE/READ/CHANGE/RECORD/HANDOFF at exact head",
+                "Test v6 full synthetic Target I(D)/I(O) gap at exact head",
+                "Prove ordinary accepted entry is hard-closed at exact SOURCE head",
+                "Test disposable native generation SUT at exact head",
+                "Test public SOURCE provenance refusal at exact source head",
+                "Verify real public SOURCE candidate provenance (not S4 admission)",
+            },
+        },
     },
     "roccho-dev/resources": {
-        "pr": 17,
+        "pr": 19,
         "jobs": {"source-vm"},
         "skipped": set(),
-        "steps": {"source-vm": {"Verify fixed inputs",
+        "steps": {"source-vm": {RELATION_STEP, "Verify fixed inputs",
                               "Build host, production images, and standard VM proof"}},
     },
 }
@@ -103,8 +126,17 @@ def decode_source(payload: dict[str, Any], label: str) -> str:
 
 
 def verify_candidate(snapshot: dict[str, Any],
-                     get: Callable[[str], dict[str, Any]]) -> dict[str, Any]:
+                     get: Callable[[str], dict[str, Any]], *,
+                     coverage_text: str) -> dict[str, Any]:
     fields(snapshot, {"kind", "admission", "entries"}, "candidate set")
+    # The local S2 mapping cannot substitute a Target/unit string fixture
+    # for the independently CI-executed resources #19 relation test.
+    require(type(coverage_text) is str and len(coverage_text) < 100_000,
+            "S2 SOURCE coverage unavailable")
+    s2_rows = [line for line in coverage_text.splitlines() if line.startswith("| S2 |")]
+    require(len(s2_rows) == 1 and S2_MARKER in s2_rows[0]
+            and "test_host_tool_target_gap.py" not in s2_rows[0],
+            "S2 coverage does not cite the actual resources #19 relation test")
     require(snapshot["kind"] == KIND and snapshot["admission"] == "NOT_ADMITTED",
             "candidate tried to admit SOURCE")
     entries = snapshot["entries"]
@@ -175,6 +207,15 @@ def verify_candidate(snapshot: dict[str, Any],
     resources = by_repo["roccho-dev/resources"]["head"]
     envs = by_repo["roccho-org/envs"]["head"]
     source_root = API + "/repos/roccho-dev/resources/contents/nixos"
+    relation = get(f"{source_root}/tests/host_relation_source.py?ref={resources}")
+    require(relation.get("sha") == RELATION_BLOB,
+            "resources #19 relation test blob differs from the reviewed SOURCE")
+    relation_text = decode_source(relation, "resources relation test")
+    require(f"def {RELATION_METHOD}(self):" in relation_text
+            and "class ProposedRelationCases(unittest.TestCase):" in relation_text
+            and '"admission": "NOT_ADMITTED"' in relation_text
+            and '"effect": "FORBIDDEN"' in relation_text,
+            "resources relation method or no-effect boundary missing")
     flake = decode_source(get(f"{source_root}/flake.nix?ref={resources}"), "Nix source")
     matches = FLAKE_PIN.findall(flake)
     require(matches == [target], "resources Nix source Producer pin mismatch")
@@ -206,7 +247,8 @@ def verify_candidate(snapshot: dict[str, Any],
 
     return {
         "kind": "envs.hostToolSourceProvenanceReadback.v0",
-        "stage": "PUBLIC_SOURCE_CANDIDATE_VERIFIED",
+        "stage": "V5_CURRENT_SOURCE_CANDIDATES_VERIFIED",
+        "s2_relation_evidence": "RESOURCES19_TEST_AND_CI_VERIFIED",
         "sources": [{"repository": name, "pr": e["pr"], "head": e["head"],
                      "tree": e["tree"], "run_id": e["run_id"]}
                     for name, e in sorted(by_repo.items())],
@@ -229,7 +271,9 @@ def main() -> int:
     args = parser.parse_args()
     try:
         snapshot = json.loads(args.snapshot.read_text(encoding="utf-8"))
-        result = verify_candidate(snapshot, public_get)
+        coverage_text = Path("checks/host_tool_source_coverage.md").read_text(
+            encoding="utf-8")
+        result = verify_candidate(snapshot, public_get, coverage_text=coverage_text)
     except (OSError, ValueError) as exc:
         print(f"SOURCE_PROVENANCE_REFUSED: {exc}", file=sys.stderr)
         return 1
