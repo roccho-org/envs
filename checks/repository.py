@@ -212,10 +212,27 @@ OCI_ROUNDTRIP = ('"$tool/python3" -I checks/test_jev_api.py --sops "$tool/sops"'
                  ' --age-keygen "$RUNNER_TEMP/check-age/bin/age-keygen"')
 # The author dispatch names one declared binding; each has exactly one literal step carrying only its own inputs.
 AUTHOR_STEP = re.compile(r"(?ms)^      - name: [^\n]+\n        if: inputs\.target == '([a-z.-]+)'\n(.*?)(?=^      - name: |\Z)")
-EFFECT_PACKAGES = "packages = with pkgs; [ python3 sops wrangler git gh openssh curl ] ++ [ cloudflared opentofu ];"
+EFFECT_PACKAGES = ("packages = with pkgs; [ python3 sops wrangler git gh openssh curl ]"
+                   " ++ [ cloudflared opentofu terraform-backend-git ];")
 PROBE_PINS = (
     'cloudflared = assert pkgs.cloudflared.version == "2026.6.1"; pkgs.cloudflared;',
     "opentofu = pkgs.opentofu.withPlugins (p: [ p.cloudflare_cloudflare ]);",
+)
+# GitHub-ref state transport: the exact upstream v0.1.12 release binary windows infra/git-state also pins, run
+# unmodified through the Nix loader. The toolchain build itself executes it (the existing check builds the toolchain),
+# so these lines, including the build-time smoke check, must each appear exactly once.
+BACKEND_PINS = (
+    'gitBackendElf = pkgs.runCommand "terraform-backend-git-0.1.12-elf" {',
+    '          url = "https://github.com/plumber-cd/terraform-backend-git/releases/download/v0.1.12/'
+    'terraform-backend-git-linux-amd64";',
+    '          hash = "sha256-LumYYi0ryF7WaaGuZ6k+DNi564hn/IOda9bw9iLrDYA=";',
+    '      terraform-backend-git = pkgs.writeTextFile {',
+    '          exec ${pkgs.stdenv.cc.bintools.dynamicLinker} \\',
+    '            ${gitBackendElf}/bin/terraform-backend-git-elf "$@"',
+    '        checkPhase = \'\'\n'
+    '          "$target" --help >backend.help 2>&1 || true\n'
+    '          grep -qF -- --address backend.help\n'
+    "        '';",
 )
 TOOLCHAIN_BUILD = 'nix build .#effect-toolchain --no-update-lock-file'
 ARTIFACT_BUILD = 'nix build .#effect-artifact --no-update-lock-file'
@@ -1000,10 +1017,12 @@ def check_toolchain(root: Path, adapter) -> None:
     require(len(pinned) == 1 and "inputs." not in FLAKE_NIXPKGS.sub("", flake), "flake must have exactly one pinned nixpkgs input")
     require(adapter.locked_nixpkgs(root)["rev"] == pinned[0], "flake.lock differs from flake.nix")
     for tool in adapter.TOOLCHAIN_TOOLS:
-        require(re.search(rf'(?m)^        {tool} = "\$\{{(pkgs\.[a-z0-9]+|cloudflared|opentofu)\}}/bin/[a-z0-9-]+";$', flake)
-                is not None, f"flake does not provide {tool}")
+        require(re.search(rf'(?m)^        {tool} = "\$\{{(pkgs\.[a-z0-9]+|cloudflared|opentofu|terraform-backend-git)\}}'
+                          r'/bin/[a-z0-9-]+";$', flake) is not None, f"flake does not provide {tool}")
     for pin in PROBE_PINS:
         require(pin in flake, f"flake must pin the probe tool: {pin}")
+    for pin in BACKEND_PINS:
+        require(flake.count(pin) == 1, f"flake must pin and build-check the upstream state backend exactly once: {pin}")
     require(flake.count("packages = with pkgs; [") == 1 and EFFECT_PACKAGES in flake,
             "effect toolchain packages differ; check-only age must stay outside them")
     require(flake.count("pkgs.age") == 1 and "        check-age = pkgs.age;\n" in flake, "check-age must be a separate check-only output")

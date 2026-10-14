@@ -165,7 +165,7 @@ def main() -> None:
     expect_red(replace_text(selected, literal, literal.replace("roccho-org/envs", "roccho-dev/envs")))
     expect_red(replace_text(selected, "rent-root-inspect'", "rent-root-other'"))
     expect_red(replace_text(selected, "rent-root-inspect'", "rent-root'"))
-    calendar =".github/workflows/deploy-calendar-pages.yml"
+    calendar = ".github/workflows/deploy-calendar-pages.yml"
     for old, new in (
         ("github.event.issue.number == 69", "github.event.issue.number == 70"),
         ("github.event.comment.user.id == 40359643", "github.event.comment.user.id == 44"),
@@ -488,6 +488,15 @@ def main() -> None:
     expect_red(replace_text("flake.nix", 'pkgs.cloudflared.version == "2026.6.1"', 'pkgs.cloudflared.version != ""'))
     expect_red(replace_text("flake.nix", "[ p.cloudflare_cloudflare ]", "[ p.cloudflare_cloudflare p.hashicorp_random ]"))
     expect_red(replace_text("flake.nix", 'tofu = "${opentofu}/bin/tofu";', 'tofu = "/usr/bin/tofu";'))
+    # GitHub-ref state transport: the pinned upstream v0.1.12 binary, in the closure, executed by its own build.
+    expect_red(replace_text("flake.nix", "/download/v0.1.12/terraform-backend-git", "/download/v0.1.11/terraform-backend-git"))
+    expect_red(replace_text("flake.nix", '"sha256-LumYYi0ryF7WaaGuZ6k+DNi564hn/IOda9bw9iLrDYA="', "lib.fakeHash"))
+    expect_red(replace_text("flake.nix", " cloudflared opentofu terraform-backend-git ];", " cloudflared opentofu ];"))
+    expect_red(replace_text("flake.nix", 'terraform_backend_git = "${terraform-backend-git}/bin/terraform-backend-git";',
+                            'terraform_backend_git = "/usr/bin/terraform-backend-git";'))
+    expect_red(replace_text("flake.nix", "          grep -qF -- --address backend.help\n", ""))
+    expect_red(replace_text("flake.nix", "grep -qF -- --address backend.help", "true"))
+    expect_red(replace_text("flake.nix", '"$target" --help >backend.help 2>&1 || true', "true >backend.help"))
     expect_red(replace_text(check, "HTTPS_PROXY=http://127.0.0.1:9 HTTP_PROXY=http://127.0.0.1:9 ", ""))
     expect_red(replace_text(check, ' --real-ssh "$tool"', ""))
     # The state proof job enters only for the dispatched expected SHA on attempt 1; the input stays required.

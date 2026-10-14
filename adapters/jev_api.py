@@ -32,7 +32,8 @@ HANDOFF = Path("handoffs/dev-jev-api.json")
 FLAKE_LOCK = Path("flake.lock")
 RECEIPT_KIND = "envs.projectionReceipt.v1"
 TOOLCHAIN_KIND = "envs.effectToolchain.v1"
-TOOLCHAIN_TOOLS = ("python3", "sops", "wrangler", "git", "gh", "tofu", "cloudflared", "ssh", "sshd", "ssh_keygen", "curl")
+TOOLCHAIN_TOOLS = ("python3", "sops", "wrangler", "git", "gh", "tofu", "cloudflared", "ssh", "sshd", "ssh_keygen", "curl",
+                   "terraform_backend_git")
 STORE = Path("/nix/store")
 # Rent tunnel (windows #14): a provider-issued Named Tunnel token, encrypted to exactly one target age recipient.
 RENT_PLANE = "dev.rent-tunnel"

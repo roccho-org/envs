@@ -485,6 +485,12 @@ fixture tools; it never performs real inspection. No key/ref/backend migration,
 activation, provider apply, transport or credential change is authorized by
 this source.
 
+The effect toolchain carries the same pinned upstream `terraform-backend-git`
+v0.1.12 release binary as windows `infra/git-state` (manifest tool
+`terraform_backend_git`). Building the toolchain runs only its `--help` and
+requires the loopback `--address` flag; nothing starts it as a backend or
+points any root at a GitHub ref yet.
+
 ## Family calendar Cloudflare Pages (bounded exception)
 
 The static product bytes are owned by `roccho-dev/apps/packages/calendar/src`. This repo owns only one explicitly authorized provider upload of an exact, CI-green apps source to the fixed `roccho-family-calendar-2026` Direct Upload Pages project. `dev-projection` supplies its existing `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` to a single bounded effect step. No secret is transferred to apps, no Pages secret is projected into the browser, and this is not a generic deployment platform.
