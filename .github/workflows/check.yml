@@ -867,8 +867,8 @@ jobs:
       - name: Compose the pinned windows Pi resolver with this commit's Go binding
         run: |
           set -euo pipefail
-          windows_commit=d3c7c02de70c680c5790f030ef6b128d5a002b54
-          windows_tree=604f32a44507f8c66ae85294e53c99c25c79ea9e
+          windows_commit=b63be11dc4dd75978ed703d40fea999690ea5a66
+          windows_tree=6f4488eddd16b09d0a2089b374a5cea6d67e860e
           binding=opencode-go.oci-dev
           fx="$RUNNER_TEMP/agent-composition"
           win="$fx/windows-src"
@@ -900,7 +900,7 @@ jobs:
           expr="import $win/oci/dev/pi.nix { pkgs = $pkgs; envsRemote = \"file://$envs\"; identity = \"$fx/age.key\"; agentDir = \"$fx/agent\"; }"
           resolver=$(nix build --impure --no-link --print-out-paths --expr "($expr).resolver")/bin/pi-opencode-go-key
           tools=$(nix build --impure --no-link --print-out-paths --expr "($expr).fixtureTools")
-          grep -qF "binding=$binding" "$resolver"
+          grep -qxE "[[:space:]]*binding='?${binding//./[.]}'?" "$resolver"
           echo "COMPOSITION_STAGE resolver built from the pinned tree"
 
           "$tools/bin/age-keygen" -o "$fx/age.key" >/dev/null 2>&1
