@@ -50,7 +50,8 @@ def real_relation_projector():
 class ExactProposedBindingTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.relation_project, cls.relation_error = real_relation_projector()
+        projector, cls.relation_error = real_relation_projector()
+        cls.relation_project = staticmethod(projector)  # never auto-bind testcase 'self'
         cls.source = read_jsonl(PROPOSALS)
         cls.targets = read_jsonl(TARGETS)
         cls.fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
