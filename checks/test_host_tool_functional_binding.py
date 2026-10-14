@@ -10,6 +10,7 @@ import json
 import sys
 import types
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -62,6 +63,20 @@ class ExactProposedBindingTests(unittest.TestCase):
             self.source, self.targets, self.relation_project,
         )
 
+    def planned(self, binding, observed, *, revision, effect_resolved,
+                checks_ok, binding_source=None):
+        # Prove the plan came from the same independently checked SOURCE
+        # and the actual immutable Relation projector, NOT from a dict claim.
+        return plan(
+            binding, observed, revision=revision,
+            effect_resolved=effect_resolved, checks_ok=checks_ok,
+            binding_source=copy.deepcopy(
+                self.fixture if binding_source is None else binding_source
+            ),
+            proposals=self.source, targets=self.targets,
+            relation_project=self.relation_project,
+        )
+
     def test_f1_real_relation_projector_and_actual_envs_proposed_q_same_target(self):
         binding = self.ok()
         self.assertEqual(binding["target_ref"], "pc7337-rent")
@@ -75,7 +90,7 @@ class ExactProposedBindingTests(unittest.TestCase):
         self.assertIsNone(binding["accepted_q"])
         o = copy.deepcopy(binding["identity"])
         o["tool"] = "ci:rent-tool-T1"
-        outcome = plan(
+        outcome = self.planned(
             binding, o,
             revision="ci-" + binding["proposed_q"][7:23],
             effect_resolved=True, checks_ok=True,
@@ -84,6 +99,88 @@ class ExactProposedBindingTests(unittest.TestCase):
         self.assertEqual(outcome["gap"], ["tool"])
         self.assertEqual(outcome["effect"], "FORBIDDEN")
         self.assertFalse(outcome["target_ready"])
+
+    def test_r1_mutated_bound_host_target_unit_scope_q_refuses_before_gap(self):
+        bound = self.ok()
+        observed = copy.deepcopy(bound["identity"])
+        observed["tool"] = "ci:rent-tool-T1"
+        revisions = []
+        mutators = [
+            ("host_ref", lambda v: v.update(host_ref="ci-foreign-host")),
+            ("parent_ref", lambda v: v.update(parent_ref="ci-foreign-parent")),
+            ("target_ref", lambda v: v.update(target_ref="ci-foreign-target")),
+            ("unit_ref", lambda v: v.update(unit_ref="ci-foreign-unit")),
+            ("scope", lambda v: v.update(scope="ci-foreign-scope")),
+            ("selector", lambda v: v.update(selector="/nix/foreign/profile")),
+            ("material", lambda v: v["material"].update(source_commit="f" * 40)),
+            ("proposed_q", lambda v: v.update(proposed_q="sha256:" + "f" * 64)),
+            ("identity_unit", lambda v: v["identity"].update(unit_ref="ci-foreign-unit")),
+            ("identity_target", lambda v: v["identity"].update(target_ref="ci-foreign-target")),
+            ("identity_tool", lambda v: v["identity"].update(tool="ci:malicious-T3")),
+            ("admission", lambda v: v.update(admission="ADMITTED")),
+            ("accepted_q", lambda v: v.update(accepted_q="ci-accepted")),
+            ("effect", lambda v: v.update(effect="ALLOWED")),
+            ("extra", lambda v: v.update(proposal_claim="authenticated")),
+        ]
+        for label, mutation in mutators:
+            with self.subTest(label=label):
+                changed = copy.deepcopy(bound)
+                mutation(changed)
+                revision = "ci-" + changed["proposed_q"][7:23]
+                revisions.append(revision)
+                with patch("host_tool_functional_binding.target_gap") as gap:
+                    with self.assertRaisesRegex(ProposalError, "unvalidated or modified"):
+                        self.planned(
+                            changed, observed, revision=revision,
+                            effect_resolved=True, checks_ok=True,
+                        )
+                    gap.assert_not_called()
+        self.assertEqual(self.ok(), bound)
+        self.assertIn("ci-" + "f" * 16, revisions)
+
+    def test_r1_coherent_outer_and_inner_edits_or_foreign_source_refused(self):
+        bound = self.ok()
+        observed = copy.deepcopy(bound["identity"])
+        observed["tool"] = "ci:rent-tool-T1"
+        q = "ci-" + bound["proposed_q"][7:23]
+        for label, mutate in (
+            ("target", lambda b: (b.update(target_ref="ci-foreign-target"),
+                                  b["identity"].update(target_ref="ci-foreign-target"))),
+            ("unit", lambda b: (b.update(unit_ref="ci-foreign-unit"),
+                                b["identity"].update(unit_ref="ci-foreign-unit"))),
+            ("host_and_scope", lambda b: b.update(
+                host_ref="ci-foreign-host", scope="ci-foreign-scope",
+                parent_ref="ci-foreign-parent")),
+            ("material_q", lambda b: (
+                b["material"].update(source_commit="f" * 40),
+                b.update(proposed_q="sha256:" + "f" * 64))),
+        ):
+            with self.subTest(label=label):
+                changed = copy.deepcopy(bound)
+                mutate(changed)
+                revision = "ci-" + changed["proposed_q"][7:23]
+                with patch("host_tool_functional_binding.target_gap") as gap:
+                    with self.assertRaises(ProposalError):
+                        self.planned(changed, observed, revision=revision,
+                                     effect_resolved=True, checks_ok=True)
+                    gap.assert_not_called()
+
+        # An attacker cannot substitute a different source graph as the
+        # authority for an already returned binding.
+        changed_source = copy.deepcopy(self.fixture)
+        changed_source["scope"] = "ci-foreign-scope"
+        with patch("host_tool_functional_binding.target_gap") as gap:
+            with self.assertRaises(ProposalError):
+                self.planned(bound, observed, revision=q, effect_resolved=True,
+                             checks_ok=True, binding_source=changed_source)
+            gap.assert_not_called()
+        # Reusing an unchanged content-equivalent dict is fine: integrity,
+        # not object identity, is the SOURCE proof. No effects are granted.
+        valid = self.planned(copy.deepcopy(bound), observed, revision=q,
+                             effect_resolved=True, checks_ok=True)
+        self.assertEqual(valid["stage"], "SYNTHETIC_TOOL_ONLY_CANDIDATE")
+        self.assertEqual(valid["effect"], "FORBIDDEN")
+        self.assertFalse(valid["target_ready"])
 
     def test_wrong_explicit_host_scope_parent_and_unit_prewrite_refuse(self):
         for key, bad in (
@@ -158,19 +255,19 @@ class ExactProposedBindingTests(unittest.TestCase):
         o = copy.deepcopy(b["identity"])
         o["base"] = "ci:unexpected-B"
         q = "ci-" + b["proposed_q"][7:23]
-        self.assertEqual(plan(b, o, revision=q, effect_resolved=True,
+        self.assertEqual(self.planned(b, o, revision=q, effect_resolved=True,
                               checks_ok=True)["stage"], "DIFFERENT_PLAN_REQUIRED")
         o = copy.deepcopy(b["identity"])
         o["unit_ref"] = "ci-wrong-unit"
-        self.assertEqual(plan(b, o, revision=q, effect_resolved=True,
+        self.assertEqual(self.planned(b, o, revision=q, effect_resolved=True,
                               checks_ok=True)["stage"], "TARGET_OR_UNIT_MISMATCH")
         o = copy.deepcopy(b["identity"])
         o["tool"] = "ci:rent-tool-T1"
-        self.assertEqual(plan(b, o, revision="ci-stale", effect_resolved=True,
+        self.assertEqual(self.planned(b, o, revision="ci-stale", effect_resolved=True,
                               checks_ok=True)["stage"], "D_REVISION_NOT_CURRENT")
-        self.assertEqual(plan(b, o, revision=q, effect_resolved=None,
+        self.assertEqual(self.planned(b, o, revision=q, effect_resolved=None,
                               checks_ok=True)["stage"], "E_UNKNOWN")
-        self.assertEqual(plan(b, None, revision=q, effect_resolved=True,
+        self.assertEqual(self.planned(b, None, revision=q, effect_resolved=True,
                               checks_ok=True)["stage"], "O_NOT_READ")
 
 
