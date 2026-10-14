@@ -46,6 +46,9 @@ jobs:
       - name: Test stage-local READ, SOURCE, CHANGE, RECORD and receiver-start guards
         run: python3 checks/test_host_tool_continuation.py
 
+      - name: Prove ordinary accepted projection rejects Host Tool proposal/admission
+        run: python3 checks/test_host_tool_normal_entry.py
+
       - name: Test temporary native Tool generation and UNKNOWN/recovery SUT
         run: python3 checks/test_host_tool_transition_sut.py
 
@@ -751,6 +754,9 @@ jobs:
 
       - name: Test stage-local SOURCE/READ/CHANGE/RECORD/HANDOFF at exact head
         run: python3 checks/test_host_tool_continuation.py
+
+      - name: Prove ordinary accepted entry is hard-closed at exact SOURCE head
+        run: python3 checks/test_host_tool_normal_entry.py
 
       - name: Test disposable native generation SUT at exact head
         run: python3 checks/test_host_tool_transition_sut.py
