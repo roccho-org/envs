@@ -217,7 +217,7 @@ class SourceProvenanceTests(unittest.TestCase):
 
     def test_v6_coverage_has_all_64_distinct_obligations_with_exact_sources(self):
         cover = (ROOT / "checks/host_tool_source_coverage.md").read_text(encoding="utf-8")
-        ids = re.findall(r"^\\| (V\\d{2}|[SBGHA]\\d|L\\d{2}) \\|", cover, re.MULTILINE)
+        ids = re.findall(r"^\| (V\d{2}|[SBGHA]\d|L\d{2}) \|", cover, re.MULTILINE)
         expected = (
             {f"V{i:02}" for i in range(1, 15)}
             | {f"S{i}" for i in range(1, 5)}
