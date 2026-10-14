@@ -221,6 +221,13 @@ class LifecycleSUT(unittest.TestCase):
             self.guarded_set(crash=True)
         self.assertEqual(self.host.effect_count, 1)
         self.assertEqual(self.host.observe(), ("SELECTED", STORE1))
+        # Interrupted receipt transport must not allow a guessed rollback of
+        # the same effect; the SUT returned no issued receipt to the caller.
+        guessed = {"attempt": "ci-attempt-1", "preimage": STORE0,
+                   "selected": STORE1, "effect": "SYNTHETIC_ONLY"}
+        with self.assertRaises(ValueError):
+            self.host.rollback_fixture(guessed, "ci-attempt-1", quiet=True, writer=True)
+        self.assertEqual(self.host.effect_count, 1)
         # Old effect is UNKNOWN even though the selector looks new; no auto change/success.
         e = copy.deepcopy(self.effect)
         e["state"] = "UNKNOWN"
@@ -262,6 +269,104 @@ class LifecycleSUT(unittest.TestCase):
         self.host.profiles.chmod(0o777)
         self.assertEqual(self.host.observe(), ("UNKNOWN", None))
         self.host.profiles.chmod(0o755)
+
+    def test_r1_wrong_allowlisted_tool_or_stale_supplied_d_refused_without_writes(self):
+        # R's exact counterexample: desired T1, but allowed T0 was directly
+        # supplied as the selector argument. Both closures exist in the test store.
+        original = self.host.snapshot()
+        self.assertEqual(self.host.observe(), ("ABSENT", None))
+        self.assertEqual(self.desired["store_path"], STORE1)
+        for bad_path in (STORE0, "/nix/store/" + "c" * 32 + "-other"):
+            self.assertEqual(
+                self.guarded_set(path=bad_path, attempt="ci-wrong-tool"),
+                "REFUSED",
+            )
+            self.assertEqual(self.host.effect_count, 0)
+            self.assertEqual(self.host.number, 0)
+            self.assertFalse(self.host.attempts)
+            self.assertEqual(self.host.observe(), ("ABSENT", None))
+            self.assertEqual(self.host.snapshot(), original)
+
+        # Even a correctly shaped synthetic alternative D is not the currently
+        # bound D for this SUT. The caller cannot swap D and choose an old q.
+        old_revision = copy.deepcopy(self.desired)
+        old_revision["revision"] = "ci-r2"
+        self.assertEqual(self.guarded_set(desired=old_revision), "REFUSED")
+        old_tool = copy.deepcopy(self.desired)
+        old_tool["store_path"] = STORE0
+        self.assertEqual(self.guarded_set(path=STORE0, desired=old_tool), "REFUSED")
+        self.assertEqual(self.host.effect_count, 0)
+        self.assertEqual(self.host.observe(), ("ABSENT", None))
+        self.assertEqual(self.host.snapshot(), original)
+
+        # The same allowed closure becomes eligible only after the SUT's own
+        # current synthetic D explicitly selects it.
+        self.desired["store_path"] = STORE0
+        emitted = self.guarded_set(path=STORE0, attempt="ci-explicit-d-t0")
+        self.assertIsInstance(emitted, dict)
+        self.assertEqual(emitted["selected"], STORE0)
+        self.assertEqual(self.host.observe(), ("SELECTED", STORE0))
+        self.assertEqual(self.host.effect_count, 1)
+        self.assertEqual(self.host.snapshot(), original)
+
+    def test_r2_forged_receipt_and_old_attempt_preimage_never_roll_back(self):
+        self.desired["store_path"] = STORE0
+        first = self.guarded_set(path=STORE0, attempt="ci-preimage")
+        self.assertIsInstance(first, dict)
+        self.desired["store_path"] = STORE1
+        actual = self.guarded_set(path=STORE1, attempt="ci-rotate")
+        self.assertEqual(actual["preimage"], STORE0)
+        self.assertEqual(self.host.observe(), ("SELECTED", STORE1))
+        old_state = self.host.snapshot()
+        old_count = self.host.effect_count
+        old_generation = self.host.number
+
+        fake_never_issued = {
+            "attempt": "never-ran", "selected": STORE1,
+            "preimage": STORE0, "effect": "SYNTHETIC_ONLY",
+        }
+        fake_same_fields = copy.deepcopy(actual)
+        fake_altered_preimage = copy.deepcopy(actual)
+        fake_altered_preimage["preimage"] = STORE1
+        for forged, claimed_attempt in (
+            (fake_never_issued, "never-ran"),
+            (fake_same_fields, "ci-rotate"),
+            (fake_altered_preimage, "ci-rotate"),
+        ):
+            with self.subTest(forged=claimed_attempt, preimage=forged["preimage"]):
+                with self.assertRaises(ValueError):
+                    self.host.rollback_fixture(
+                        forged, claimed_attempt, quiet=True, writer=True
+                    )
+                self.assertEqual(self.host.observe(), ("SELECTED", STORE1))
+                self.assertEqual(self.host.effect_count, old_count)
+                self.assertEqual(self.host.number, old_generation)
+                self.assertEqual(self.host.snapshot(), old_state)
+
+        # A mutation to the actual object must also invalidate the frozen SUT
+        # issued record; restoring it is not an arbitrary new admission.
+        actual["preimage"] = STORE1
+        with self.assertRaises(ValueError):
+            self.host.rollback_fixture(actual, "ci-rotate", quiet=True, writer=True)
+        self.assertEqual(self.host.effect_count, old_count)
+        actual["preimage"] = STORE0
+
+        self.assertEqual(
+            self.host.rollback_fixture(actual, "ci-rotate", quiet=True, writer=True),
+            "SYNTHETIC_ROLLBACK_NOT_NEW_D_SUCCESS",
+        )
+        self.assertEqual(self.host.observe(), ("SELECTED", STORE0))
+        self.desired["store_path"] = STORE1
+        self.guarded_set(path=STORE1, attempt="ci-newer-selection")
+        self.assertEqual(self.host.observe(), ("SELECTED", STORE1))
+        count_after_new = self.host.effect_count
+        # A previously issued/consumed receipt cannot be replayed even if a
+        # later attempt happens to select the very same store path.
+        with self.assertRaises(ValueError):
+            self.host.rollback_fixture(actual, "ci-rotate", quiet=True, writer=True)
+        self.assertEqual(self.host.effect_count, count_after_new)
+        self.assertEqual(self.host.observe(), ("SELECTED", STORE1))
+        self.assertEqual(self.host.snapshot(), old_state)
 
     def test_rollback_only_same_attempt_and_same_preimage(self):
         # First T0 is the original preimage of an actual synthetic T1 selection.
