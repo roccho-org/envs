@@ -5,9 +5,9 @@
 | 記号 | 公開exact根拠 | 証拠の範囲 |
 |---|---|---|
 | W | [windows #91](https://github.com/roccho-dev/windows/pull/91) head `355b038bcbe2b24a8ad0121f79b7cc4c72b76b3f` tree `8406cd25827891066eb3d3ec4eeaab4abfabfe07`、[CI 38529430362](https://github.com/roccho-dev/windows/actions/runs/38529430362) 6/6 SUCCESS | Core/Tool分離、生成とOCI試験、geometry-only observer |
-| E | [envs #86](https://github.com/roccho-org/envs/pull/86) head `b3afeb156c2fca9eb93256c9b66b0a8b96bd1068` tree `a0a94e6ff490126279a5fa7cafa5ae30328cf110`、[CI 38551552641](https://github.com/roccho-org/envs/actions/runs/38551552641) 8/8 SUCCESS | 未採択D/q候補、合成D/O/authority guard、申告値合成 |
-| R | [resources #17](https://github.com/roccho-dev/resources/pull/17) head `d5cfc205ef718473a615b2606b61eb35402c9d59` tree `2f61a46ea05ba990486790bcbdb9b6af6811b758`、[CI 38560548295](https://github.com/roccho-dev/resources/actions/runs/38560548295) 1/1 SUCCESS | 旧#15と別SOURCE、現Producer pinでB-only OCI/Native別世代VM |
-| P | このPR #87の `checks/host_tool_source_provenance.py` と既存CI | 公開GitHub PR/commit/run/job/source pinの実照合 **候補のみ**（独立R未評価） |
+| E | [envs #87](https://github.com/roccho-org/envs/pull/87) head `df97ae4f70a1abe3426dda1831b518b0b87a7246` tree `33609f3483d38e129b0cb7f4a8bbe380426a61cd`、[CI 38594653516](https://github.com/roccho-org/envs/actions/runs/38594653516) 8/8 SUCCESS | #86未採択D/q候補を含む合成D/O/authority/stage/rollback SUT；通常入口はfail-closed |
+| R | [resources #19](https://github.com/roccho-dev/resources/pull/19) head `5746f46b149c15d57a6ea006f4b79cff60dbf83b` tree `bbdb1db54d59bc89e24cf535632e03e9d6a7ffd9`、[CI 38599405139](https://github.com/roccho-dev/resources/actions/runs/38599405139) source-vm SUCCESS | #17 current Producer pinとNative/OCI VMを保持、Host relationの隔離SOURCEテストも同jobでSUCCESS |
+| P | この後続SOURCE候補の `checks/host_tool_source_provenance.py` と既存CI | #91/#87/#19の凍結済み新v5集合を公開GitHub GETで照合、S2の実stepを必須化。**候補のみ・本番S4ではない**（新head独立R評価待ち） |
 | ADRS | [設計v6](https://github.com/roccho-dev/adrs/pull/633)および親[v4](https://github.com/roccho-dev/adrs/blob/b6d837157454764c4b5c9fd83d66b177e7b4a53b/decisions/host-native-oci-update-integration-261014.jsonl)、[v5](https://github.com/roccho-dev/adrs/blob/a38d5330503c55bbdd7f5a571ed1f889f46595f2/decisions/host-native-oci-update-integration-261014.jsonl) | 設計合意。製品のGO・LIVE権限ではない |
 
 **凡例：** `SOURCE`=独立Rが限定受容したsource/VM、`SYNTHETIC`=入力が合成/模擬、`UNPROVEN`=本番/実Target確認がない。すべての行で正式`D_ADMITTED=false`、`TARGET_READY=false`、`S4_REAL_COMPOSITE_GREEN=false`。利用する固定checkのSUCCESSは実HeadのSOURCE上のもの。個々の行の結果を実Host成功へ昇格しない。
@@ -36,7 +36,7 @@
 | ID | 期待する事実・拒否 | 既存証拠の所在 | 未達の厳密な境界 |
 |---|---|---|---|
 | S1 | Host IDをrepo/OSから生成しない | E:target_ref明示 · `SOURCE-SUT:checks/test_host_tool_normal_entry.py#test_unadmitted_proposal_is_not_an_accepted_contract_or_effect` | 実Host relation投入未実証 |
-| S2 | 不正contains関係を拒否 | ADRS #633 v6設計 · `SOURCE-SUT:checks/test_host_tool_target_gap.py#test_target_unit_not_derived_from_repo_or_oci_path` | 実relation source fixture未確認 |
+| S2 | 不正contains関係を拒否 | resources #19 `nixos/tests/host_relation_source.py#test_containment_cycles_self_and_multi_parent_refused_same_scope` が自己・循環・同scope多親を拒否。実 `source-vm` step `Test synthetic Host contains/manages/optional wrap (NOT_ADMITTED)` SUCCESSを横断gateで必須化：`SOURCE-RELATION:roccho-dev/resources#19/nixos/tests/host_relation_source.py#test_containment_cycles_self_and_multi_parent_refused_same_scope` | **合成関係テストのみ**。正式Host relation意味/入力schema/実稼働instanceはADRS/resources owner未採択 |
 | S3 | Native/OCIと別storeを区別 | R:Native-only VMとOCI VM · `SOURCE-SUT:checks/test_host_tool_transition_sut.py#test_same_target_tool_delta_does_not_mutate_base_or_work` | 実Host/別store受入は未試験 |
 | S4 | Producer C/envs D/Target O/Eを分離 | W/E/R SOURCE別責務 | 現Targetへの正規接続は未実装 |
 | B1 | 固定Tool pin、latest禁止 | W:fixed flake; R:lock · `SOURCE-SUT:checks/test_host_tool_normal_entry.py#test_forged_tool_admission_into_ordinary_bindings_is_rejected` | 正式D採用は未実施 |
@@ -110,3 +110,10 @@
 
 **必要な残owner判断**：正式Dのターゲット/ユニット/版/B/T/launch/config/state含意とqの採択・読取/変更権限、relationの意味/Host IDの正規source、実Targetの連続quietとagent子孫/単一writerの実施入口、事故後の既存provider receipt/recoveryの配置。合成TRUEやID対応だけではSOURCEからLIVEへ進めず、固定Rのexact版独立判断を待つ。
 
+
+## v5 latest triple S2 external SOURCE evidence
+
+- 以前のS2行が参照していた`test_target_unit_not_derived_from_repo_or_oci_path`は**Host relationのcontainsを検査せず偽陽性**だったため、S2のSOURCE根拠から退役。変更前のテスト自体はTarget/Unit識別の独立試験として残す。
+- resources [#19](https://github.com/roccho-dev/resources/pull/19)の凍結head/tree、`nixos/tests/host_relation_source.py`のGit blob `4aa50be2c62c714def0b2aa97aa24573bd8b5344`、指定test method、およびrun 38599405139の実 `source-vm` jobの`Test synthetic Host contains/manages/optional wrap (NOT_ADMITTED)` **SUCCESS**を、後続検証器が公開GitHub GETで照合。S2の試験が欠落/失敗/SKIPPEDなら検証器はPASSにしない。
+- 上記の事実はSOURCEと合成relationのみに有効。旧resources #18のBrowser SUID sandbox FATAL/VM RED、ADRS #630/resources #1の正式Host relation採択、実Host同時性や管理権限/稼働/作用の証拠には昇格しない。
+- 最新 SOURCE `windows #91 / envs #87 / resources #19`はすべて独立Rで限定技術GREENの**前段候補**。この後続検証器のrunが自分自身を検証対象に含めて循環しないよう、まだ未完了の新CI headはsnapshotに入れない。`D_ADMITTED=false`、`TARGET_READY=false`、`S4_REAL_COMPOSITE_GREEN=false`、`MERGE_READY=false`を維持。
