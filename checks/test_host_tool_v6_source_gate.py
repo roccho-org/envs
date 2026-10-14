@@ -120,8 +120,13 @@ def check_v6_coverage(document: str, snapshot: dict) -> dict:
                           "roccho-dev/resources"}, "v6 source owners differ")
     # Bind each exact SHA/tree to its OWN evidence registry row. Repeating an R
     # review ID elsewhere (e.g. A1) must not mask a corrupted registry entry.
+    registry_heading = "## v6 現行F1・F2・横断SOURCEの独立R受容済み固定版"
+    need(document.count(registry_heading) == 1,
+         "v6 exact R-reviewed source registry section absent or duplicated")
+    section = document.split(registry_heading, 1)[1].split("## V01–V14", 1)[0]
+    need("## V01–V14" in document, "missing v6 obligation section boundary")
     registry = {}
-    for line in document.splitlines():
+    for line in section.splitlines():
         match = re.match(r"^\| (F1|F2|X|R) \|", line)
         if not match:
             continue
