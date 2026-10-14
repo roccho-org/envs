@@ -43,6 +43,9 @@ jobs:
       - name: Test synthetic D/O/authority guard (always effect forbidden)
         run: python3 checks/test_host_tool_guard.py
 
+      - name: Test cross-repo public SOURCE provenance refusal (offline)
+        run: python3 checks/test_host_tool_source_provenance.py
+
       - name: Test Jev adapter
         run: python3 checks/test_jev_api.py
 
@@ -739,6 +742,15 @@ jobs:
 
       - name: Test synthetic Host Tool guard at exact source head
         run: python3 checks/test_host_tool_guard.py
+
+      - name: Test public SOURCE provenance refusal at exact source head
+        run: python3 checks/test_host_tool_source_provenance.py
+
+      # Exactly this disposable SOURCE-candidate PR: immutable public metadata GET only.
+      # No token, Target, permission/trigger expansion or production job dependency.
+      - name: Verify real public SOURCE candidate provenance (not S4 admission)
+        if: github.event_name == 'pull_request' && github.head_ref == 'codex/host-common-source-provenance-gate-20261014'
+        run: python3 checks/host_tool_source_provenance.py --snapshot checks/fixtures/host-tool-source-set.json
 
       - name: Install pinned Nix
         uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24
