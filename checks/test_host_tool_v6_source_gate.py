@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 import copy
 import json
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -86,6 +87,120 @@ def files(snapshot):
                        "locked": {"rev": source, "narHash": "sha256-k1k3Y1DuOvXkpntXFyHGaw4ICJBJ1vlsBuDIVAF52nM="}}}}),
     }
 
+
+
+COVERAGE = ROOT / "checks/host_tool_source_coverage.md"
+SOURCE_MARKERS = {"SOURCE-proven:F1", "SOURCE-proven:F2",
+                  "SOURCE-proven:X", "SOURCE-proven:R"}
+V6_REVIEWED = {
+    "X_head": "b82713b02c06fe65082f557fce9bcf710c6e723f",
+    "X_tree": "a04756a35341f794620ccbc48140044610e7b73e",
+    "X_run": "38646956225",
+    "X_R": "5525631594",
+    "F1_R": "5524498474",
+    "F2_R": "5525335505",
+    "R_R": "5521439539",
+}
+
+
+def check_v6_coverage(document: str, snapshot: dict) -> dict:
+    """Refuse SOURCE evidence-map omissions. Does NOT attest a live Target.
+
+    SOURCE-proven markers relate fixed completed SOURCE/CI to the case, not
+    fulfillment of the entire case against real D/O/authority/effects.
+    """
+    def need(ok: bool, msg: str):
+        if not ok:
+            raise ProvenanceError(msg)
+
+    need(isinstance(document, str) and len(document) < 45_000,
+         "v6 coverage absent or unbounded")
+    evidence = {row["repository"]: row for row in snapshot["entries"]}
+    need(set(evidence) == {"roccho-org/envs", "roccho-dev/windows",
+                          "roccho-dev/resources"}, "v6 source owners differ")
+    for repo, label, rev in (
+        ("roccho-org/envs", "F1", V6_REVIEWED["F1_R"]),
+        ("roccho-dev/windows", "F2", V6_REVIEWED["F2_R"]),
+        ("roccho-dev/resources", "R", V6_REVIEWED["R_R"]),
+    ):
+        row = evidence[repo]
+        # Enforce exact R-reviewed PR, commit tree and CI reference, not just
+        # an unrelated identifier or the earlier #91/#86/#17 trio.
+        need((f"{label} |" in document or f"| {label} |" in document)
+             and row["head"] in document and row["tree"] in document
+             and str(row["run_id"]) in document and rev in document
+             and f"#{row['pr']}" in document,
+             f"{label}: current frozen SOURCE/CI/R reference missing")
+    for name, value in V6_REVIEWED.items():
+        if name.startswith("X_"):
+            need(value in document, f"v6 X: frozen reviewed provenance {name} missing")
+    need("凍結済みのR受容head" in document,
+         "v6 X must be historical frozen head, never this PR's own new CI")
+    need("SOURCE-proven は行全体の本番保証ではない" in document,
+         "SOURCE CI may not be promoted to real Target proof")
+    need("S4_REAL_COMPOSITE_GREEN=false" in document
+         and "D_ADMITTED=false" in document and "TARGET_READY=false" in document,
+         "admission or real S4 status was lost")
+    ids = (
+        {f"V{i:02}" for i in range(1, 15)}
+        | {f"S{i}" for i in range(1, 5)}
+        | {f"B{i}" for i in range(1, 6)}
+        | {f"G{i}" for i in range(1, 7)}
+        | {f"H{i}" for i in range(1, 5)}
+        | {f"A{i}" for i in range(1, 4)}
+        | {f"L{i:02}" for i in range(1, 29)}
+    )
+    found = {}
+    for line in document.splitlines():
+        match = re.match(r"^\| (V\d{2}|[SBGHA]\d|L\d{2}) \|", line)
+        if not match:
+            continue
+        ident = match.group(1)
+        columns = line.split("|")
+        need(len(columns) == 7 and ident not in found,
+             f"{ident}: duplicated/untyped obligation row")
+        category = {x.strip() for x in columns[5].split(";")}
+        need(category and "REAL_TARGET_UNPROVEN" in category
+             and category <= ({"SYNTHETIC", "REAL_TARGET_UNPROVEN"} | SOURCE_MARKERS)
+             and "SOURCE-PROVEN" not in category,
+             f"{ident}: false Target success or invalid source category")
+        if "SOURCE-SUT:" in columns[3] or ident in ("S2", "S4"):
+            need("SYNTHETIC" in category,
+                 f"{ident}: synthetic assertions may not become live proofs")
+        found[ident] = (columns[3], columns[4], category)
+    need(len(found) == 64 and set(found) == ids,
+         "not all 64 v6 obligations are classified exactly once")
+    need(sum(any(x.startswith("SOURCE-proven:") for x in row[2])
+             for row in found.values()) > 30,
+         "v6 SOURCE evidence is not attached to actual obligation rows")
+    critical = {
+        "V01": {"SOURCE-proven:F2"},
+        "V09": {"SOURCE-proven:F1"},
+        "S2": {"SOURCE-proven:F1", "SOURCE-proven:R", "SYNTHETIC"},
+        "S4": SOURCE_MARKERS,
+        "A1": SOURCE_MARKERS,
+        "G1": {"SOURCE-proven:F2"},
+        "L12": {"SOURCE-proven:X"},
+        "L20": {"SYNTHETIC"},
+        "L27": {"SYNTHETIC"},
+    }
+    for ident, required in critical.items():
+        need(required <= found[ident][2],
+             f"{ident}: current direct SOURCE or synthetic boundary missing")
+    s2 = found["S2"][0]
+    need("resources #19" in s2
+         and "test_containment_cycles_self_and_multi_parent_refused_same_scope" in s2
+         and "Test synthetic Host contains/manages/optional wrap (NOT_ADMITTED)" in s2
+         and "test_target_unit_not_derived_from_repo_or_oci_path" not in s2,
+         "S2 uses a Target string test instead of real Relation SOURCE/CI")
+    return {
+        "kind": "envs.syntheticV6CoverageCheck.v0",
+        "ids": len(found), "source_classes": len(SOURCE_MARKERS),
+        "stage": "FROZEN_V6_SOURCE_MAPPING_VERIFIED",
+        "admission": "NOT_ADMITTED",
+        "effect": "FORBIDDEN",
+        "real_target_proven": False, "real_composite_green": False,
+    }
 
 class FrozenV6Source(unittest.TestCase):
     def setUp(self):
@@ -246,6 +361,45 @@ class FrozenV6Source(unittest.TestCase):
         with self.assertRaises(ProvenanceError):
             real_file("roccho-org/envs", "a" * 40,
                       "checks/source.txt", lambda _: contents)
+
+
+    def test_v6_64_obligations_map_current_reviewed_f1_f2_x_relation_without_real_go(self):
+        result = self.check()
+        self.assertEqual(result["stage"], "V6_F1_F2_DISPOSABLE_SOURCE_EVIDENCE_VERIFIED")
+        mapped = check_v6_coverage(COVERAGE.read_text(encoding="utf-8"), self.snap)
+        self.assertEqual(mapped["stage"], "FROZEN_V6_SOURCE_MAPPING_VERIFIED")
+        self.assertEqual(mapped["ids"], 64)
+        self.assertEqual(mapped["admission"], "NOT_ADMITTED")
+        self.assertEqual(mapped["effect"], "FORBIDDEN")
+        self.assertFalse(mapped["real_target_proven"])
+        self.assertFalse(mapped["real_composite_green"])
+
+    def test_false_coverage_or_missing_v6_source_mapping_cannot_pass(self):
+        original = COVERAGE.read_text(encoding="utf-8")
+        for before, after in (
+            ("| S4 |", "| S3 |"),
+            ("| V01 |", "| V02 |"),
+            ("SOURCE-proven:F1 ; SOURCE-proven:F2 ; SOURCE-proven:X",
+             "SOURCE-proven:F1 ; SOURCE-proven:X"),
+            ("SYNTHETIC ; SOURCE-proven:F1 ; SOURCE-proven:R",
+             "SOURCE-proven:F1 ; SOURCE-proven:R"),
+            ("REAL_TARGET_UNPROVEN", "REAL_TARGET_SUCCESS"),
+            ("SOURCE-proven:F2", "SOURCE-proven:unreviewed"),
+            ("Test synthetic Host contains/manages/optional wrap (NOT_ADMITTED)",
+             "Test fake Target ID only"),
+            ("5524498474", "0000000000"),
+            ("5525335505", "0000000000"),
+            ("5525631594", "0000000000"),
+            ("b82713b02c06fe65082f557fce9bcf710c6e723f",
+             "f" * 40),
+            ("SOURCE-proven は行全体の本番保証ではない",
+             "SOURCE-proven implies Target success"),
+        ):
+            with self.subTest(changed=before[:50]):
+                self.assertIn(before, original)
+                altered = original.replace(before, after, 1)
+                with self.assertRaises(ProvenanceError):
+                    check_v6_coverage(altered, self.snap)
 
 
 if __name__ == "__main__":
