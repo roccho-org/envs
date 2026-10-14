@@ -144,15 +144,23 @@ def check_v6_coverage(document: str, snapshot: dict) -> dict:
     ):
         row = evidence[repo]
         src, ci = registry[label]
+        run_link = (f"[CI {row['run_id']}]"
+                    f"(https://github.com/{repo}/actions/runs/{row['run_id']})")
+        review_link = (f"[R {rev}]"
+                       f"(https://github.com/{repo}/pull/{row['pr']}"
+                       f"#pullrequestreview-{rev})")
         need(row["head"] in src and row["tree"] in src
-             and f"#{row['pr']}" in src and str(row["run_id"]) in ci
-             and rev in ci,
+             and f"#{row['pr']}" in src
+             and run_link in ci and review_link in ci,
              f"{label}: wrong head/tree/run/R inside its own registry row")
     x_source, x_ci = registry["X"]
     need(V6_REVIEWED["X_head"] in x_source
          and V6_REVIEWED["X_tree"] in x_source
-         and V6_REVIEWED["X_run"] in x_ci
-         and V6_REVIEWED["X_R"] in x_ci
+         and (f"[CI {V6_REVIEWED['X_run']}]"
+              f"(https://github.com/roccho-org/envs/actions/runs/{V6_REVIEWED['X_run']})") in x_ci
+         and (f"[R {V6_REVIEWED['X_R']}]"
+              f"(https://github.com/roccho-org/envs/pull/92"
+              f"#pullrequestreview-{V6_REVIEWED['X_R']})") in x_ci
          and "#92" in x_source,
          "X: frozen independently R-reviewed v6 SOURCE differs")
     need("凍結済みのR受容head" in document,
