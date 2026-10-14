@@ -546,7 +546,7 @@ def check_manual_mail(root: Path, source: str, canonical: str) -> None:
         "        default: qualify",
         "        required: true",
         "      recipient:",
-        "        description: Existing owner public age recipient for qualification or recovery; never a private key",
+        "        description: Existing owner public age recipient for recovery; never a private key",
         "        type: string",
         "        default: ''",
     ], "Mail candidate must admit only the one manual event and its source input")
@@ -579,12 +579,15 @@ def check_manual_mail(root: Path, source: str, canonical: str) -> None:
             "Mail candidate must not auto-cancel and replay")
     recovery_step = source[source.find("      - name: Seal unchanged state inputs"):source.find("      - name: Provide encrypted recovery")]
     private_step = source[source.find("      - name: Initialize backend and run one selected Mail operation\n"):]
+    qualification_step = source[source.find("      - name: Qualify projection with GET only\n"):source.find("      # The state-input Secret")]
     recovery_inputs = {("secrets", name) for name in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "RENT_STATE_PASSPHRASE")}
-    projection_inputs = {("secrets", name) for name in ("MAIL_CONFIG", "CLOUDFLARE_API_TOKEN", "MAIL_STATE_AGE_KEY")}
+    qualification_inputs = {("secrets", name) for name in ("MAIL_CONFIG", "CLOUDFLARE_API_TOKEN")}
+    projection_inputs = qualification_inputs | {("secrets", "MAIL_STATE_INPUTS")}
     expected_inputs = recovery_inputs | projection_inputs
     require(set(INPUT_REFERENCE.findall(source)) == expected_inputs
-            and len(INPUT_REFERENCE.findall(source)) == len(expected_inputs)
+            and len(INPUT_REFERENCE.findall(source)) == len(recovery_inputs) + len(qualification_inputs) + len(projection_inputs)
             and set(INPUT_REFERENCE.findall(recovery_step)) == recovery_inputs
+            and set(INPUT_REFERENCE.findall(qualification_step)) == qualification_inputs
             and set(INPUT_REFERENCE.findall(private_step)) == projection_inputs
             and "R2_PARENT_" not in source and "TF_ENCRYPTION" not in source,
             "Mail inputs must remain isolated to the selected operation's slots")
@@ -597,7 +600,8 @@ def check_manual_mail(root: Path, source: str, canonical: str) -> None:
             and "          retention-days: 1\n" in source
             and "uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02\n" in source
             and recovery_step.count("if: inputs.operation == 'recover'") == 1
-            and private_step.count("if: inputs.operation != 'recover'") == 1,
+            and qualification_step.count("if: inputs.operation == 'qualify'") == 1
+            and private_step.count("if: inputs.operation == 'preview' || inputs.operation == 'apply'") == 1,
             "Recovery and projection must remain isolated; upload only the encrypted carrier")
     require("          ref: ${{ github.sha }}\n" in source
             and "          persist-credentials: false\n" in source,
@@ -619,11 +623,12 @@ def check_manual_mail(root: Path, source: str, canonical: str) -> None:
         'install -m 600 "$GITHUB_WORKSPACE/mail-ops-source/providers/mail-routing/$file" "$home/root/$file"',
         'done', 'fi', 'echo "MAIL_HOME=$home" >>"$GITHUB_ENV"',
         '"$ENVS_EFFECT_BIN/mail-routing-root" --operation recover',
+        '"$ENVS_EFFECT_BIN/mail-routing-root" --operation qualify',
         "set +e", '"$ENVS_EFFECT_BIN/mail-routing-root" --operation "$MAIL_OPERATION"',
         'result=$?', 'if [ "$MAIL_OPERATION" = preview ] && [ "$result" -eq 2 ]; then',
         'exit 0', 'fi', 'exit "$result"',
     ], "Mail can run only artifact identity, private root preparation and one operation")
-    require(source.count("      - name: ") == 8,
+    require(source.count("      - name: ") == 9,
             "Mail manual consumer must retain the bounded step set")
     adapter_source = (root / "adapters/mail_routing_root.py").read_text(encoding="utf-8")
     require("EXIT_INACTIVE = 78\n" in adapter_source

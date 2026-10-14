@@ -61,44 +61,11 @@ def check_state_contract(mail) -> None:
         except mail.NativeSourceHold:
             pass
 
-    config = {"account_id": "a" * 32, "zone_id": "b" * 32, "zone_name": "example.invalid",
-              "alias_address": "fixture@example.invalid", "destination_address": "fixture@gmail.com",
-              "rule_priority": 0, "state_bucket": "mail-state-fixture",
-              "state_key": "mail-m0/state/fixture.tfstate", "verified_destination_id": None,
-              "manage_dns": True, "manage_destination": True, "manage_rule": False,
-              "preflight_approved": False}
-    original_source, original_sops = mail._source_module, mail._sops
-    class Reader:
-        @staticmethod
-        def observe_selected(*args, **kwargs):
-            return {"status": "READ_OBSERVED"}
-    try:
-        mail._source_module = lambda name: Reader if name == "mail_routing_read" else original_source(name)
-        for failure, expected_stage in (("SEAL", "SEAL"), ("OPEN", "OPEN"),
-                                        ("PARSE", "COMPARE"), ("UNEQUAL", "COMPARE"),
-                                        (None, "COMPLETE")):
-            def sops(*args, recipient=None, identity=None):
-                if (recipient is not None and failure == "SEAL") or (identity is not None and failure == "OPEN"):
-                    raise mail.NativeSourceHold("PRIVATE_ERROR_CANARY")
-                if recipient is not None:
-                    return b"sealed fixture"
-                return (b"invalid JSON" if failure == "PARSE" else b'{"CANARY":"different"}' if failure == "UNEQUAL"
-                        else b'{"CANARY":"mail-key-qualification-v1"}')
-            mail._sops = sops
-            result = mail.qualify({"MAIL_CONFIG": json.dumps(config), "CLOUDFLARE_API_TOKEN": "PRIVATE_TOKEN_CANARY",
-                                   "MAIL_STATE_AGE_KEY": "PRIVATE_IDENTITY_CANARY", "MAIL_STATE_AGE_RECIPIENT": "fixture"},
-                                  None, Path("."))
-            assert result["status"] == "READ_OBSERVED" and result["key_check_stage"] == expected_stage
-            assert result["key_recovery"] == ("RECIPIENT_MATCH" if failure is None else "UNPROVEN")
-            assert all(marker not in json.dumps(result) for marker in
-                       ("PRIVATE_ERROR_CANARY", "PRIVATE_TOKEN_CANARY", "PRIVATE_IDENTITY_CANARY", "example.invalid"))
-    finally:
-        mail._source_module, mail._sops = original_source, original_sops
     values = {"AWS_ACCESS_KEY_ID": "SYNTHETIC_ID", "AWS_SECRET_ACCESS_KEY": "SYNTHETIC_SECRET",
               "RENT_STATE_PASSPHRASE": "c" * 64}
     assert mail._decode_state(json.dumps(values).encode()) == values
     for bad in (json.dumps(list(values.items())).encode(), json.dumps({**values, "UNKNOWN": "x"}).encode(),
-                json.dumps({**values, "AWS_ACCESS_KEY_ID": 7}).encode(), b"{}", b"[]",
+                json.dumps({**values, "AWS_ACCESS_KEY_ID": 7}).encode(), b"{}", b"[]", b" " * 65537,
                 b'{"AWS_ACCESS_KEY_ID":"x","AWS_ACCESS_KEY_ID":"y"}'):
         try:
             mail._decode_state(bad)
@@ -196,9 +163,10 @@ def check_manual_job() -> None:
     assert content.count("\n    if:") == 1
     assert "on:\n  workflow_dispatch:" in content
     assert "      expected_source_sha:" in content
-    for name in ("MAIL_CONFIG", "CLOUDFLARE_API_TOKEN", "AWS_ACCESS_KEY_ID",
-                 "AWS_SECRET_ACCESS_KEY", "RENT_STATE_PASSPHRASE", "MAIL_STATE_AGE_KEY"):
-        assert content.count("${{ secrets." + name + " }}") == 1
+    for name, count in (("MAIL_CONFIG", 2), ("CLOUDFLARE_API_TOKEN", 2), ("AWS_ACCESS_KEY_ID", 1),
+                        ("AWS_SECRET_ACCESS_KEY", 1), ("RENT_STATE_PASSPHRASE", 1), ("MAIL_STATE_INPUTS", 1)):
+        assert content.count("${{ secrets." + name + " }}") == count
+    assert "secrets.SOPS_AGE_KEY" not in content and "secrets.MAIL_STATE_AGE_KEY" not in content
     for clause in ("github.sha == inputs.expected_source_sha", "github.run_attempt == 1",
                    "github.actor == 'roccho-dev'", "github.actor_id == '40359643'",
                    "github.triggering_actor == 'roccho-dev'"):
@@ -564,6 +532,7 @@ def check_native_source_and_plan() -> None:
                         assert kwargs["close_fds"] and kwargs["start_new_session"]
                         assert kwargs["umask"] == 0o077
                         child_env = kwargs["env"]
+                        assert "MAIL_STATE_INPUTS" not in child_env and "SOPS_AGE_KEY" not in child_env
                         assert "PATH" not in child_env
                         assert "TF_LOG" not in child_env
                         assert "AWS_PROFILE" not in child_env
@@ -846,8 +815,8 @@ def check_manual_integration(mail, manifest: str, identity: str, recipient: str)
             except mail.NativeSourceHold:
                 pass
 
-            # Real GET observer with only its socket boundary replaced; real
-            # supplied SOPS proves the projection-key canary independently.
+            # Real GET observer with only its socket boundary replaced.
+            # Qualification must not enter SOPS or state-input parsing.
             read_spec = importlib.util.spec_from_file_location("mail_read_fixtures", ROOT / "checks/test_mail_routing_read.py")
             read_tests = importlib.util.module_from_spec(read_spec)
             read_spec.loader.exec_module(read_tests)
@@ -867,29 +836,22 @@ def check_manual_integration(mail, manifest: str, identity: str, recipient: str)
             qualification_env = {"MAIL_CONFIG": json.dumps(qualification_config),
                                  "MAIL_HOME": str(recovery), "ENVS_EFFECT_TOOLCHAIN": manifest,
                                  "CLOUDFLARE_API_TOKEN": read_tests.TOKEN,
-                                 "MAIL_STATE_AGE_KEY": identity, "MAIL_STATE_AGE_RECIPIENT": recipient,
-                                 "SOPS_AGE_KEY": "UNUSED_EXISTING_PROJECTION_IDENTITY"}
+                                 "MAIL_STATE_INPUTS": "UNUSED_STATE_INPUTS", "SOPS_AGE_KEY": identity}
+            original_sops = mail._sops
+            def reject_crypto(*args, **kwargs):
+                raise AssertionError("GET qualification entered crypto")
             try:
+                mail._sops = reject_crypto
                 qualified = mail.manual_entry("qualify", qualification_env)
-                assert qualified["status"] == "READ_OBSERVED"
-                assert qualified["key_recovery"] == "RECIPIENT_MATCH"
-                assert qualified["key_check_stage"] == "COMPLETE"
-                assert qualified["write_authority"] == "NOT_PROVEN"
+                assert qualified["status"] == "READ_OBSERVED" and qualified["write_authority"] == "NOT_PROVEN"
+                assert "key_recovery" not in qualified and "key_check_stage" not in qualified
                 assert all(private not in json.dumps(qualified) for private in
-                           (read_tests.TOKEN, read_tests.DOMAIN, identity))
-                wrong_key = mail.manual_entry("qualify", {**qualification_env, "MAIL_STATE_AGE_KEY": "AGE-SECRET-KEY-INVALID"})
-                assert wrong_key["status"] == "READ_OBSERVED" and wrong_key["key_recovery"] == "UNPROVEN"
-                assert wrong_key["key_check_stage"] == "OPEN"
-                missing_key = mail.manual_entry("qualify", {**qualification_env, "MAIL_STATE_AGE_KEY": "",
-                                                           "SOPS_AGE_KEY": identity})
-                assert missing_key["key_recovery"] == "UNPROVEN" and missing_key["key_check_stage"] == "OPEN"
+                           (read_tests.TOKEN, read_tests.DOMAIN, identity, "UNUSED_STATE_INPUTS"))
                 denied = read_tests.Fake(deny="/user/tokens/verify")
                 reader.safe_opener = lambda: denied
-                failed_read = mail.manual_entry("qualify", qualification_env)
-                assert failed_read["status"] != "READ_OBSERVED" and failed_read["key_recovery"] == "RECIPIENT_MATCH"
-                assert failed_read["key_check_stage"] == "COMPLETE"
+                assert mail.manual_entry("qualify", qualification_env)["status"] != "READ_OBSERVED"
             finally:
-                mail._source_module = source_module
+                mail._source_module, mail._sops = source_module, original_sops
             for index, (operation, init_code, operation_code, expected) in enumerate((
                 ("preview", 0, 0, ("NO_OP", 0)),
                 ("preview", 0, 2, ("DELTA", 2)),
@@ -917,16 +879,12 @@ def check_manual_integration(mail, manifest: str, identity: str, recipient: str)
                     "ENVS_EFFECT_TOOLCHAIN": manifest, "CLOUDFLARE_API_TOKEN": marker,
                     "AWS_ACCESS_KEY_ID": marker, "AWS_SECRET_ACCESS_KEY": marker,
                     "RENT_STATE_PASSPHRASE": "c" * 64,
-                    "MAIL_STATE_AGE_KEY": identity, "MAIL_STATE_AGE_RECIPIENT": recipient,
+                    "MAIL_STATE_INPUTS": json.dumps(values), "SOPS_AGE_KEY": identity,
                     "TF_LOG": "TRACE", "AWS_PROFILE": marker, "HTTPS_PROXY": marker,
                 }
                 starts = []
                 def spawn(argv, **kwargs):
-                    if argv[0] == tools.sops:
-                        assert "SOPS_AGE_KEY" in kwargs["env"]
-                        assert not {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "CLOUDFLARE_API_TOKEN"} & set(kwargs["env"])
-                        assert identity not in repr(argv)
-                        return real_popen(argv, **kwargs)
+                    assert argv[0] != tools.sops, "native operation entered SOPS"
                     starts.append(tuple(argv))
                     assert argv[1] == "-chdir=" + str(root)
                     assert argv[2] == ("init" if len(starts) == 1 else
@@ -934,6 +892,7 @@ def check_manual_integration(mail, manifest: str, identity: str, recipient: str)
                     assert kwargs["umask"] == 0o077 and kwargs["close_fds"]
                     assert kwargs["stdin"] == subprocess.DEVNULL
                     child_env = kwargs["env"]
+                    assert "MAIL_STATE_INPUTS" not in child_env and "SOPS_AGE_KEY" not in child_env
                     assert child_env["CLOUDFLARE_API_TOKEN"] == marker
                     assert child_env["AWS_SECRET_ACCESS_KEY"] == marker
                     assert child_env["TF_VAR_alias_address"] == config["alias_address"]

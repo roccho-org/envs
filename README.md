@@ -376,60 +376,49 @@ SHA, `roccho-dev`, first attempt and serialized runs. Its closed operations
 are `qualify`, `recover`, `preview` and `apply`, defaulting to qualification.
 Target data is never a dispatch input; `recipient` is an existing public age
 recipient, never an identity. Runtime uses the existing `dev-projection`
-Environment: `MAIL_CONFIG`, its Cloudflare token and `MAIL_STATE_AGE_KEY`.
-The Mail identity slot reuses the Owner-selected existing age identity;
-the unrelated existing `SOPS_AGE_KEY` remains untouched and is not a fallback.
-It copies the pinned Ops files into owner-only scratch and consumes the
-same-SHA provided effect artifact for preview/apply. Native streams stay in private scratch
-and are never uploaded. No arguments or unsupported operations still return
-`INACTIVE / NOT_RUN`, exit 78, before reading protected input.
+Environment: `MAIL_CONFIG`, its Cloudflare token and `MAIL_STATE_INPUTS`.
+The state-input Secret is one JSON object containing only `AWS_ACCESS_KEY_ID`,
+`AWS_SECRET_ACCESS_KEY` and the unchanged `RENT_STATE_PASSPHRASE`. Its exact
+field/type/ASCII/passphrase checks precede private native composition.
+The real age identity stays on the Owner's computer; Mail maps no private
+age-key Secret and does not use the unrelated existing `SOPS_AGE_KEY`.
 
-Before dispatch, the Owner must establish the exact target/preflight,
-Cloudflare operation permissions, state/lock access and passphrase recovery.
-Initial destination/DNS apply keeps the rule unmanaged; after human Gmail
-verification and fresh ready/verified readback, a separate rule apply retains
-the flags of already-owned resources. A later preview must return no-op 0,
-and actual delivery needs an independent test message. Source merge does
-not register Secrets, dispatch a workflow or establish live Mail completion.
+Qualification is a separate GET-only step with only target config/token.
+It does not receive state inputs or enter crypto. Preview/apply consume the
+state-input Secret in memory, copy the pinned Ops files to owner-only scratch,
+and use the same-SHA provided effect artifact. Preflight precedes backend init;
+init precedes exactly one native operation, with no saved plan or automatic
+retry. The packed Secret does not reach native child environments; only the
+selected backend/provider inputs do. Native streams remain private and are
+never uploaded. No arguments or unsupported operations still return
+`INACTIVE / NOT_RUN`, exit78 before reading protected input.
 
-Qualification reuses the GET-only reader against the actual projection
-token and exact private zone, independently of the apply preflight flag.
-A fixed non-secret canary checks whether projection's selected Mail key can
-open an envelope addressed to the selected existing recipient. Read and key
-results are separate; neither establishes Write rights or backend recovery.
-The bounded `key_check_stage` reports SEAL, OPEN, COMPARE or COMPLETE without
-exposing private errors; UNPROVEN alone does not identify a key mismatch.
+Recovery selects historical `dev-rent-tunnel` solely to seal its unchanged
+three state slots to the existing owner public recipient. It receives no
+Cloudflare token or real private age key and invokes no OpenTofu. Only the
+validated encrypted carrier is uploaded for one day. The fixed
+`ciphertexts/dev-mail-state.sops.json` is a recovery copy, not a CI decryption
+dependency. Local restoration with the Owner's existing identity provides
+only the three necessary values for the projection Secret. Credential entry
+and submission in the browser belong to the Owner. Existing rent slots,
+private keys and the unrelated projection identity are not replaced.
 
-The fixed Mail state carrier was sealed by canonical manual recovery
-run38511433848, artifact11869414743. Exact ZIP digest/member bytes were
-verified, archived encrypted under an owner-only ACL, and authenticated
-decryption to memory with the Owner-selected existing identity passed the
-three-field contract. Source adopts those same encrypted bytes. This proves
-input recovery, not existing-state restoration, projection key compatibility,
-backend/lock access, Mail apply or delivery.
+The adopted carrier came from canonical recovery run38511433848,
+artifact11869414743. Exact ZIP digest/member bytes were independently
+verified, archived under an owner-only ACL, and authenticated decryption to
+private memory passed the three-field contract. Source adopts identical
+encrypted bytes. No plaintext file or decrypted value/key hash was produced.
+Shared age-key holders can open this backup. Structural Source checks reject
+duplicate members, plaintext fields/comments, extra documents and alternative
+key mechanisms; they do not replace authenticated recovery verification.
 
-Recovery selects the historical `dev-rent-tunnel` Environment solely to
-SOPS-seal its unchanged `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and
-`RENT_STATE_PASSPHRASE`. It reads no Cloudflare token or private age key and
-invokes no OpenTofu. Only the validated ciphertext is uploaded, with one-day
-retention. The Owner acquires exact producer/head/digest bytes, archives an
-encrypted copy and verifies authenticated decryption privately with the
-existing identity before adopting the same bytes at
-`ciphertexts/dev-mail-state.sops.json`. An expiring artifact alone is not a
-recovery copy. All authorized holders of the shared age identity can open
-this carrier; it is not an exclusive Mail key.
-
-Source checks require exactly three encrypted JSON scalars and the pinned
-single-recipient age metadata, rejecting duplicate members, comments,
-additional documents and other key mechanisms. This is structural validation;
-private authenticated decryption remains a separate recovery check.
-
-Preview/apply consume only that fixed source carrier. SOPS opens it into
-memory; strict duplicate/key/type/format checks precede composition. The
-age identity reaches only SOPS, while backend credentials/passphrase reach
-only OpenTofu. No plaintext file/log/argv/artifact, new key, rent Secret
-replacement, cross-Environment GitHub Secret copy or backend migration is
-introduced. The existing state passphrase and method names are preserved.
+Before dispatch, establish the exact target/preflight, operation permissions
+and state/lock access. Initial destination/DNS apply keeps the rule unmanaged.
+After human Gmail verification and fresh ready/verified readback, a separate
+rule apply preserves flags of already-owned resources. A later preview must
+return no-op0, and actual delivery needs an independent test message. Input
+recovery does not prove existing-state restoration, backend/lock access or
+Mail delivery. Source merge does not register inputs or dispatch an operation.
 
 `flake.nix` and `flake.lock` define the only toolchain for authoring and projection: Python, SOPS, Wrangler, Git, GitHub CLI and curl from the locked nixpkgs input, plus the `envs-effect` entry running this source's adapter. `.#effect-artifact` is that entry's complete store closure as one tar with an `ENTRY` pointer.
 
