@@ -43,6 +43,12 @@ jobs:
       - name: Test synthetic D/O/authority guard (always effect forbidden)
         run: python3 checks/test_host_tool_guard.py
 
+      - name: Test stage-local READ, SOURCE, CHANGE, RECORD and receiver-start guards
+        run: python3 checks/test_host_tool_continuation.py
+
+      - name: Test temporary native Tool generation and UNKNOWN/recovery SUT
+        run: python3 checks/test_host_tool_transition_sut.py
+
       - name: Test cross-repo public SOURCE provenance refusal (offline)
         run: python3 checks/test_host_tool_source_provenance.py
 
@@ -742,6 +748,12 @@ jobs:
 
       - name: Test synthetic Host Tool guard at exact source head
         run: python3 checks/test_host_tool_guard.py
+
+      - name: Test stage-local SOURCE/READ/CHANGE/RECORD/HANDOFF at exact head
+        run: python3 checks/test_host_tool_continuation.py
+
+      - name: Test disposable native generation SUT at exact head
+        run: python3 checks/test_host_tool_transition_sut.py
 
       - name: Test public SOURCE provenance refusal at exact source head
         run: python3 checks/test_host_tool_source_provenance.py
