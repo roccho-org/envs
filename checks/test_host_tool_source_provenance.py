@@ -235,6 +235,19 @@ class SourceProvenanceTests(unittest.TestCase):
         self.assertIn("S4_REAL_COMPOSITE_GREEN=false", cover)
         self.assertIn("D_ADMITTED=false", cover)
         self.assertIn("TARGET_READY=false", cover)
+        # v5: case IDs alone do NOT constitute exercised SOURCE evidence.
+        # Every SOURCE-SUT method reference must exist in a CI-executed test file.
+        sut_links = re.findall(
+            r"`SOURCE-SUT:(checks/test_host_tool_[A-Za-z0-9_]+\.py)#(test_[A-Za-z0-9_]+)`",
+            cover,
+        )
+        self.assertGreaterEqual(len(sut_links), 50)
+        for path, method in sut_links:
+            with self.subTest(path=path, method=method):
+                file = ROOT / path
+                self.assertTrue(file.is_file())
+                source = file.read_text(encoding="utf-8")
+                self.assertRegex(source, rf"(?m)^    def {re.escape(method)}\(")
 
     def test_missing_public_api_evidence_fails_closed(self):
         del self.records[next(iter(self.records))]
