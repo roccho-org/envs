@@ -34,7 +34,7 @@ OPS_TEST_BLOB = "04db81a38059da98bb07a397727cf0fb291e5b29"
 NATIVE_PROVIDER_H1 = "h1:HiX8Q7db7YrAYCuOBOMsvcmyX1RmvFqALtgJDvtYRhc="
 NIX_BIN = re.compile(r"^/nix/store/[a-z0-9]{32}-[^/]+/bin/tofu$")
 BUCKET = re.compile(r"^[a-z0-9][a-z0-9.-]{2,62}$")
-NOOP_PLAN_ARGS = ("plan", "-input=false", "-lock=true", "-detailed-exitcode")
+NOOP_PLAN_ARGS = ("plan", "-input=false", "-lock=true", "-detailed-exitcode", "-json")
 APPLY_ARGS = ("apply", "-input=false", "-lock=true", "-auto-approve")
 
 
@@ -814,6 +814,53 @@ def qualify(environ: Mapping[str, str], tools: NativeToolset, home: Path) -> dic
                                    expected_zone=config["zone_id"])
 
 
+def preview_summary(path: Path, code: int) -> dict:
+    """Expose fixed resource/action names only, never native messages or values."""
+    labels = {
+        "cloudflare_email_routing_address.gmail[0]": "destination",
+        "cloudflare_email_routing_dns.zone[0]": "dns",
+        "cloudflare_email_routing_rule.literal[0]": "rule",
+        "data.cloudflare_email_routing_address.checked[0]": "verified_destination",
+        "data.cloudflare_email_routing_settings.checked[0]": "routing_settings",
+    }
+    try:
+        if code not in (0, 2):
+            raise ValueError("native preview failed")
+        _owner_home(path.parent)
+        rows = _owner_file(path, path.parent, 8388608).decode("utf-8").splitlines()
+        events = [_json_object(row.encode("utf-8")) for row in rows]
+        if (events[0].get("type") != "version" or events[0].get("tofu") != "1.12.3"
+                or re.fullmatch(r"1\.[0-9]+", events[0].get("ui", "")) is None):
+            raise ValueError("unsupported native stream")
+        actions, summaries = {}, []
+        totals = {"add": 0, "change": 0, "remove": 0}
+        for event in events[1:]:
+            kind = event.get("type")
+            if kind == "planned_change":
+                change = event["change"]
+                label = labels[change["resource"]["addr"]]
+                action = change["action"]
+                if (label in actions or action not in ("noop", "create", "read", "update", "replace", "delete", "move")
+                        or "previous_resource" in change):
+                    raise ValueError("unrecognized change")
+                actions[label] = action
+                totals["add"] += action in ("create", "replace")
+                totals["change"] += action == "update"
+                totals["remove"] += action in ("delete", "replace")
+            elif kind == "change_summary":
+                summaries.append(event["changes"])
+            elif kind == "diagnostic" and event.get("@level") == "error":
+                raise ValueError("native diagnostic")
+        if (len(summaries) != 1 or summaries[0].get("operation") != "plan"
+                or any(type(summaries[0].get(k)) is not int or summaries[0][k] != v for k, v in totals.items())
+                or (code == 0 and (any(totals.values()) or any(a not in ("noop", "read") for a in actions.values())))):
+            raise ValueError("inconsistent native summary")
+        return {"kind": "envs.mailM0.preview.v1", "status": "NO_OP" if code == 0 else "DELTA",
+                "changes": actions, "totals": totals}
+    except Exception:
+        raise NativeSourceHold("MAIL_PREVIEW_UNPROVEN") from None
+
+
 def manual_entry(operation: str, environ: Mapping[str, str]) -> tuple[str, int] | dict:
     """Consume the selected Environment slots without credential discovery.
 
@@ -863,7 +910,13 @@ def manual_entry(operation: str, environ: Mapping[str, str]) -> tuple[str, int] 
         config_json, {**state_inputs, "CLOUDFLARE_API_TOKEN": selected.get("CLOUDFLARE_API_TOKEN", "")},
         environment_name="dev-projection", home=home, ops_root=ops_root, backend=backend,
     )
-    return run_after(operation, inputs, tools)
+    result = run_after(operation, inputs, tools)
+    if operation == "preview" and result[1] in (0, 2):
+        try:
+            return preview_summary(home / "preview.out", result[1])
+        except NativeSourceHold:
+            return "PREVIEW_UNPROVEN", 1
+    return result
 
 
 def main() -> int:
@@ -875,7 +928,7 @@ def main() -> int:
         result = manual_entry(sys.argv[2], os.environ)
         if isinstance(result, dict):
             print(json.dumps(result, separators=(",", ":"), sort_keys=True))
-            return 0 if result["status"] == "READ_OBSERVED" else 1
+            return {"READ_OBSERVED": 0, "NO_OP": 0, "DELTA": 2}.get(result["status"], 1)
         status, code = result
     except Exception:
         # No exception text, traceback, path, target or child output escapes.
