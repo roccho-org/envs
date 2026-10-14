@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""One explicit Mail operation with fixed Ops source and private captures.
+"""Explicit Mail qualification, encrypted recovery and projection.
 
-No arguments still refuse before protected inputs. The manual entry consumes
-one private input snapshot, initializes the selected backend, then performs
-exactly one preview or apply. It never saves a plan or retries an operation.
+No arguments refuse before protected inputs. Qualification uses GET and a
+key canary; recovery seals unchanged state inputs. Projection opens the
+adopted envelope, initializes, then performs one preview/apply without a
+saved plan or retry. These operations never activate one another.
 """
 from __future__ import annotations
 
@@ -97,6 +98,7 @@ class NativeToolset:
     """Identity minted only by the existing validated envs toolchain loader."""
 
     tofu: str
+    sops: str | None = field(default=None, repr=False)
     _proof: object = field(default=None, repr=False, compare=False)
 
 
@@ -124,7 +126,7 @@ def provided_native_tools(root: Path, manifest: str, interpreter: str) -> Native
             )
         finally:
             sys.modules.pop(spec.name, None)
-        return NativeToolset(tofu=verified["tofu"], _proof=_NATIVE_TOOL_PROOF)
+        return NativeToolset(tofu=verified["tofu"], sops=verified["sops"], _proof=_NATIVE_TOOL_PROOF)
     except (OSError, LookupError, ValueError, TypeError, RuntimeError):
         raise NativeSourceHold("TOOLCHAIN_NOT_PROVEN") from None
     except Exception:
@@ -403,6 +405,10 @@ MAIL_CONFIG_KEYS = frozenset({
 })
 MAIL_FLAGS = ("manage_dns", "manage_destination", "manage_rule", "preflight_approved")
 MAIL_METHOD_NAME = "mail_m0"
+STATE_INPUT_KEYS = MAIL_AFTER_SLOTS - {"CLOUDFLARE_API_TOKEN"}
+STATE_CIPHERTEXT = Path("ciphertexts/dev-mail-state.sops.yaml")
+AGE_RECIPIENT = re.compile(r"^age1[023456789acdefghjklmnpqrstuvwxyz]{58}$")
+MAIL_OPERATIONS = ("qualify", "recover", "preview", "apply")
 MAIL_ZONE_NAME = re.compile(
     r"(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+"
     r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
@@ -468,7 +474,7 @@ def compose_after_inputs(config_json: bytes, slots: Mapping[str, str], *,
     supply provider authority, verified status or key recovery.
     """
     try:
-        if (environment_name != "dev-rent-tunnel"
+        if (environment_name != "dev-projection"
                 or any(not isinstance(path, Path) for path in (home, ops_root, backend))):
             raise NativeSourceHold("MAIL_AFTER_CONTEXT_UNSELECTED")
         config = _selected_config(config_json)
@@ -668,18 +674,152 @@ def run_after(operation: str, inputs: MailPrivateInputs, tools: NativeToolset,
     return ("NO_OP" if operation == "preview" else "APPLIED_UNVERIFIED"), 0
 
 
-def manual_entry(operation: str, environ: Mapping[str, str]) -> tuple[str, int]:
+def _state_values(values: Mapping[str, str]) -> dict[str, str]:
+    snapshot = dict(values)
+    if (set(snapshot) != STATE_INPUT_KEYS
+            or any(not isinstance(value, str) or not 0 < len(value) <= 4096
+                   or any(not 33 <= ord(char) <= 126 for char in value)
+                   for value in snapshot.values())
+            or re.fullmatch(r"[0-9a-f]{64}", snapshot["RENT_STATE_PASSPHRASE"]) is None):
+        raise NativeSourceHold("MAIL_STATE_INPUT_UNPROVEN")
+    return snapshot
+
+
+def _source_module(name: str):
+    path = Path(__file__).with_name(name + ".py")
+    spec = importlib.util.spec_from_file_location("_mail_" + name, path)
+    if spec is None or spec.loader is None or path.is_symlink():
+        raise NativeSourceHold("MAIL_SOURCE_UNPROVEN")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    try:
+        exec(compile(path.read_bytes(), str(path), "exec"), module.__dict__)
+    finally:
+        sys.modules.pop(spec.name, None)
+    return module
+
+
+def state_ciphertext(data: bytes, recipient: str | None = None,
+                     values: Mapping[str, str] | None = None) -> str:
+    """One authenticated age envelope shape; plaintext is never Source."""
+    if not isinstance(data, bytes) or not 0 < len(data) <= 65536:
+        raise NativeSourceHold("MAIL_STATE_CIPHERTEXT_UNPROVEN")
+    try:
+        existing = _source_module("jev_api")
+        for name in STATE_INPUT_KEYS:
+            existing.validate_ciphertext(data, None if values is None else values[name].encode(),
+                                         None if recipient is None else [recipient], key=name)
+        text = data.decode("utf-8")
+        if (set(re.findall(r"(?m)^([^\s#][^:]*):", text)) != {*STATE_INPUT_KEYS, "sops"}
+                or len(existing.RECIPIENT_METADATA.findall(text)) != 1):
+            raise NativeSourceHold("MAIL_STATE_CIPHERTEXT_UNPROVEN")
+        metadata = text.split("\nsops:", 1)[1]
+        for mechanism in ("kms", "gcp_kms", "azure_kv", "hc_vault", "pgp", "key_groups"):
+            if re.search(r"(?m)^    " + mechanism + r":(?![ \t]*\[\][ \t]*$)", metadata):
+                raise NativeSourceHold("MAIL_STATE_CIPHERTEXT_UNPROVEN")
+        return existing.RECIPIENT_METADATA.findall(text)[0]
+    except Exception:
+        raise NativeSourceHold("MAIL_STATE_CIPHERTEXT_UNPROVEN") from None
+
+
+def _sops(tools: NativeToolset, home: Path, data: bytes, *,
+          recipient: str | None = None, identity: str | None = None) -> bytes:
+    """Pinned SOPS, private pipes, no ambient environment/config or plaintext file."""
+    _owner_home(home)
+    if (tools._proof is not _NATIVE_TOOL_PROOF or not isinstance(tools.sops, str)
+            or re.fullmatch(r"/nix/store/[a-z0-9]{32}-[^/]+/bin/sops", tools.sops) is None
+            or (recipient is None) == (identity is None)):
+        raise NativeSourceHold("MAIL_SOPS_UNPROVEN")
+    env = {"HOME": str(home), "TMPDIR": str(home), "XDG_CONFIG_HOME": str(home), "LANG": "C"}
+    if recipient is not None:
+        if not AGE_RECIPIENT.fullmatch(recipient):
+            raise NativeSourceHold("MAIL_RECIPIENT_UNPROVEN")
+        args = ("--encrypt", "--input-type", "json", "--output-type", "yaml")
+        env["SOPS_AGE_RECIPIENTS"] = recipient
+    else:
+        if (not isinstance(identity, str) or not 0 < len(identity) <= 16384 or "\0" in identity):
+            raise NativeSourceHold("MAIL_IDENTITY_UNPROVEN")
+        args = ("--decrypt", "--input-type", "yaml", "--output-type", "json")
+        env["SOPS_AGE_KEY"] = identity
+    try:
+        result = subprocess.run((tools.sops, "--config", "/dev/null", *args, "/dev/stdin"),
+                                input=data, cwd=home, env=env, capture_output=True,
+                                timeout=45, check=False, umask=0o077)
+        if result.returncode != 0 or not 0 < len(result.stdout) <= 65536:
+            raise NativeSourceHold("MAIL_SOPS_UNPROVEN")
+        return result.stdout
+    except Exception:
+        raise NativeSourceHold("MAIL_SOPS_UNPROVEN") from None
+
+
+def recover_state(environ: Mapping[str, str], tools: NativeToolset, home: Path) -> tuple[str, int]:
+    values = _state_values({name: environ.get(name, "") for name in STATE_INPUT_KEYS})
+    recipient = environ.get("MAIL_STATE_AGE_RECIPIENT", "")
+    payload = json.dumps(values, separators=(",", ":")).encode("utf-8")
+    encrypted = _sops(tools, home, payload, recipient=recipient)
+    state_ciphertext(encrypted, recipient, values)
+    target = home / "mail-state.sops.yaml"
+    private_output_sink(target)
+    fd = os.open(str(target), os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                 os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    with os.fdopen(fd, "wb") as stream:
+        stream.write(encrypted)
+    return "STATE_INPUTS_SEALED", 0
+
+
+def _decode_state(data: bytes) -> dict[str, str]:
+    def unique(pairs):
+        result = {}
+        for name, value in pairs:
+            if name in result:
+                raise NativeSourceHold("MAIL_STATE_INPUT_UNPROVEN")
+            result[name] = value
+        return result
+    try:
+        return _state_values(json.loads(data, object_pairs_hook=unique))
+    except Exception:
+        raise NativeSourceHold("MAIL_STATE_INPUT_UNPROVEN") from None
+
+
+def qualify(environ: Mapping[str, str], tools: NativeToolset, home: Path) -> dict:
+    config = _selected_config(environ.get("MAIL_CONFIG", "").encode("utf-8"))
+    reader = _source_module("mail_routing_read")
+    result = reader.observe_selected(config["zone_name"].lower(), config["account_id"],
+                                     environ.get("CLOUDFLARE_API_TOKEN", ""),
+                                     expected_zone=config["zone_id"])
+    result["key_recovery"] = "UNPROVEN"
+    try:
+        canary = b'{"CANARY":"mail-key-qualification-v1"}'
+        sealed = _sops(tools, home, canary, recipient=environ.get("MAIL_STATE_AGE_RECIPIENT", ""))
+        opened = _sops(tools, home, sealed, identity=environ.get("SOPS_AGE_KEY", ""))
+        if json.loads(opened) == json.loads(canary):
+            result["key_recovery"] = "RECIPIENT_MATCH"
+    except Exception:
+        pass
+    return result
+
+
+def manual_entry(operation: str, environ: Mapping[str, str]) -> tuple[str, int] | dict:
     """Consume the selected Environment slots without credential discovery.
 
-    The workflow prepares an absent owner-only home and the four pinned Ops
-    files. No key is generated, decrypted, copied or persisted here.
+    The workflow prepares an absent owner-only home. Recovery seals unchanged
+    input slots; projection opens the adopted source envelope in memory.
+    No persistent key is generated or rotated, and no plaintext file is made.
     """
-    selected = {name: environ.get(name, "") for name in
-                (*MAIL_AFTER_SLOTS, "MAIL_CONFIG", "MAIL_HOME", "ENVS_EFFECT_TOOLCHAIN")}
+    if operation not in MAIL_OPERATIONS:
+        raise NativeSourceHold("MAIL_OPERATION_UNSELECTED")
+    names = {"MAIL_HOME", "ENVS_EFFECT_TOOLCHAIN"}
+    names |= (STATE_INPUT_KEYS | {"MAIL_STATE_AGE_RECIPIENT"} if operation == "recover" else
+              {"MAIL_CONFIG", "CLOUDFLARE_API_TOKEN", "SOPS_AGE_KEY", "MAIL_STATE_AGE_RECIPIENT"})
+    selected = {name: environ.get(name, "") for name in names}
     source = Path(__file__).resolve().parents[1]
     tools = provided_native_tools(source, selected.get("ENVS_EFFECT_TOOLCHAIN", ""), sys.executable)
     home = Path(selected.get("MAIL_HOME", ""))
     _owner_home(home)
+    if operation == "recover":
+        return recover_state(selected, tools, home)
+    if operation == "qualify":
+        return qualify(selected, tools, home)
     ops_root = home / "root"
     verify_native_source(ops_root, OPS_MAIL_COMMIT, OPS_MAIL_TREE)
     config_json = selected.get("MAIL_CONFIG", "").encode("utf-8")
@@ -688,6 +828,15 @@ def manual_entry(operation: str, environ: Mapping[str, str]) -> tuple[str, int]:
     # resources; false never authorizes even an init with protected inputs.
     if config["preflight_approved"] is not True:
         raise NativeSourceHold("MAIL_PREFLIGHT_UNAPPROVED")
+    token = selected.get("CLOUDFLARE_API_TOKEN", "")
+    if not 0 < len(token) <= 4096 or any(not 33 <= ord(char) <= 126 for char in token):
+        raise NativeSourceHold("MAIL_AFTER_SLOTS_UNSELECTED")
+    cipher = source / STATE_CIPHERTEXT
+    if cipher.is_symlink() or not cipher.is_file():
+        raise NativeSourceHold("MAIL_STATE_CIPHERTEXT_UNPROVEN")
+    encrypted = cipher.read_bytes()
+    state_ciphertext(encrypted)
+    state_inputs = _decode_state(_sops(tools, home, encrypted, identity=selected.get("SOPS_AGE_KEY", "")))
     backend = home / "backend.hcl"
     private_output_sink(backend)
     content = ('bucket = "' + config["state_bucket"] + '"\n'
@@ -699,19 +848,23 @@ def manual_entry(operation: str, environ: Mapping[str, str]) -> tuple[str, int]:
     with os.fdopen(fd, "wb") as stream:
         stream.write(content)
     inputs = compose_after_inputs(
-        config_json, {name: selected.get(name, "") for name in MAIL_AFTER_SLOTS},
-        environment_name="dev-rent-tunnel", home=home, ops_root=ops_root, backend=backend,
+        config_json, {**state_inputs, "CLOUDFLARE_API_TOKEN": selected.get("CLOUDFLARE_API_TOKEN", "")},
+        environment_name="dev-projection", home=home, ops_root=ops_root, backend=backend,
     )
     return run_after(operation, inputs, tools)
 
 
 def main() -> int:
     # Invalid/no arguments still refuse before reading any protected input.
-    if len(sys.argv) != 3 or sys.argv[1] != "--operation" or sys.argv[2] not in ("preview", "apply"):
+    if len(sys.argv) != 3 or sys.argv[1] != "--operation" or sys.argv[2] not in MAIL_OPERATIONS:
         print(CLOSED_RESULT)
         return EXIT_INACTIVE
     try:
-        status, code = manual_entry(sys.argv[2], os.environ)
+        result = manual_entry(sys.argv[2], os.environ)
+        if isinstance(result, dict):
+            print(json.dumps(result, separators=(",", ":"), sort_keys=True))
+            return 0 if result["status"] == "READ_OBSERVED" and result["key_recovery"] == "RECIPIENT_MATCH" else 1
+        status, code = result
     except Exception:
         # No exception text, traceback, path, target or child output escapes.
         status, code = "INPUT_UNPROVEN", 78

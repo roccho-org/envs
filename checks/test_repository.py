@@ -104,8 +104,8 @@ def main() -> None:
     finally:
         shutil.rmtree(commented.parent, ignore_errors=True)
     expect_red(replace_text(manual, "github.run_attempt == 1", "github.run_attempt >= 1"))
-    expect_red(replace_text(manual, "options: [preview, apply]", "options: [preview, apply, destroy]"))
-    expect_red(replace_text(manual, "environment: dev-rent-tunnel", "environment: dev-projection"))
+    expect_red(replace_text(manual, "options: [qualify, recover, preview, apply]", "options: [qualify, recover, preview, apply, destroy]"))
+    expect_red(replace_text(manual, "|| 'dev-projection' }}", "|| 'dev-authoring' }}"))
     expect_red(replace_text(manual,
                             '"$ENVS_EFFECT_BIN/mail-routing-root"',
                             '"$ENVS_EFFECT_BIN/envs-effect"'))

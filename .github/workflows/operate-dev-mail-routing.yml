@@ -12,9 +12,13 @@ on:
       operation:
         description: Preview only, or apply the approved private declaration
         type: choice
-        options: [preview, apply]
-        default: preview
+        options: [qualify, recover, preview, apply]
+        default: qualify
         required: true
+      recipient:
+        description: Existing owner public age recipient for qualification or recovery; never a private key
+        type: string
+        default: ''
 
 permissions:
   actions: read
@@ -27,10 +31,10 @@ concurrency:
 jobs:
   operate:
     # Reject stale source, another actor and re-runs before resolving Secrets.
-    if: ${{ github.repository == 'roccho-org/envs' && github.ref_name == 'proposals' && github.sha == inputs.expected_source_sha && github.run_attempt == 1 && github.actor == 'roccho-dev' && github.actor_id == '40359643' && github.triggering_actor == 'roccho-dev' }}
+    if: ${{ github.repository == 'roccho-org/envs' && github.ref_name == 'proposals' && github.sha == inputs.expected_source_sha && github.run_attempt == 1 && github.actor == 'roccho-dev' && github.actor_id == '40359643' && github.triggering_actor == 'roccho-dev' && contains(fromJSON('["qualify","recover","preview","apply"]'), inputs.operation) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    environment: dev-rent-tunnel
+    environment: ${{ inputs.operation == 'recover' && 'dev-rent-tunnel' || 'dev-projection' }}
     steps:
       - name: Checkout exact canonical revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -78,6 +82,7 @@ jobs:
         run: '"$ENVS_EFFECT_BIN/envs-effect" --root "$GITHUB_WORKSPACE" toolchain'
 
       - name: Checkout fixed Ops declaration
+        if: inputs.operation == 'preview' || inputs.operation == 'apply'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: roccho-org/ops
@@ -86,25 +91,49 @@ jobs:
           persist-credentials: false
 
       - name: Prepare private writable Mail root
+        env:
+          MAIL_OPERATION: ${{ inputs.operation }}
         run: |
           set -euo pipefail
           umask 077
           home="$(mktemp -d "$RUNNER_TEMP/mail-m0.XXXXXX")"
-          mkdir -m 700 "$home/root"
-          for file in main.tf .terraform.lock.hcl README.md safety.tftest.hcl; do
-            install -m 600 "$GITHUB_WORKSPACE/mail-ops-source/providers/mail-routing/$file" "$home/root/$file"
-          done
+          if [ "$MAIL_OPERATION" = preview ] || [ "$MAIL_OPERATION" = apply ]; then
+            mkdir -m 700 "$home/root"
+            for file in main.tf .terraform.lock.hcl README.md safety.tftest.hcl; do
+              install -m 600 "$GITHUB_WORKSPACE/mail-ops-source/providers/mail-routing/$file" "$home/root/$file"
+            done
+          fi
           echo "MAIL_HOME=$home" >>"$GITHUB_ENV"
 
-      # Only this step receives private configuration/credentials. All native
-      # streams remain in owner-only scratch; no capture/artifact upload.
-      - name: Initialize backend and run one selected Mail operation
+      # The historical rent Environment produces only an encrypted envelope.
+      # Its token, private age identity and provider resources are untouched.
+      - name: Seal unchanged state inputs to existing owner recipient
+        if: inputs.operation == 'recover'
         env:
-          MAIL_CONFIG: ${{ secrets.MAIL_CONFIG }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           RENT_STATE_PASSPHRASE: ${{ secrets.RENT_STATE_PASSPHRASE }}
+          MAIL_STATE_AGE_RECIPIENT: ${{ inputs.recipient }}
+        run: '"$ENVS_EFFECT_BIN/mail-routing-root" --operation recover'
+
+      - name: Provide encrypted recovery envelope only
+        if: inputs.operation == 'recover'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: mail-state-${{ github.sha }}-${{ github.run_id }}
+          path: ${{ env.MAIL_HOME }}/mail-state.sops.yaml
+          if-no-files-found: error
+          retention-days: 1
+
+      # Projection reads the adopted source envelope into memory. State input
+      # values are not copied into another GitHub Secret or public capture.
+      - name: Initialize backend and run one selected Mail operation
+        if: inputs.operation != 'recover'
+        env:
+          MAIL_CONFIG: ${{ secrets.MAIL_CONFIG }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          SOPS_AGE_KEY: ${{ secrets.SOPS_AGE_KEY }}
+          MAIL_STATE_AGE_RECIPIENT: ${{ inputs.recipient }}
           MAIL_OPERATION: ${{ inputs.operation }}
         run: |
           set +e

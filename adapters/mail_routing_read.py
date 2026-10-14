@@ -269,10 +269,22 @@ def _empty() -> dict[str, Any]:
 
 
 def observe(event_path: str, environ: Mapping[str, str], opener: Opener | None = None) -> dict[str, Any]:
-    output = _empty()
     try:
         domain, account, token = private_inputs(event_path, environ)
     except ReadFailure:
+        return _empty()
+    return observe_selected(domain, account, token, opener)
+
+
+def observe_selected(domain: str, account: str, token: str,
+                     opener: Opener | None = None, *, expected_zone: str | None = None) -> dict[str, Any]:
+    """Same GET-only observer for a validated private Mail target snapshot."""
+    output = _empty()
+    if (not isinstance(domain, str) or not 4 <= len(domain) <= 253
+            or "." not in domain or any(not LABEL.fullmatch(part) for part in domain.split("."))
+            or not isinstance(account, str) or not ACCOUNT.fullmatch(account)
+            or not isinstance(token, str) or not token or len(token) > 4096 or token != token.strip()
+            or (expected_zone is not None and not ACCOUNT.fullmatch(expected_zone))):
         return output
     if opener is None:
         opener = safe_opener()
@@ -339,7 +351,8 @@ def observe(event_path: str, environ: Mapping[str, str], opener: Opener | None =
     zone = zones[0]
     owner = zone.get("account")
     if (zone.get("name") != domain or not isinstance(owner, dict)
-            or owner.get("id") != account or not ACCOUNT.fullmatch(str(zone.get("id", "")))):
+            or owner.get("id") != account or not ACCOUNT.fullmatch(str(zone.get("id", "")))
+            or (expected_zone is not None and zone.get("id") != expected_zone)):
         output["read"]["zone"] = "UNKNOWN"
         output["zone_unknown_reason"] = "owner_or_id_mismatch"
         return output
