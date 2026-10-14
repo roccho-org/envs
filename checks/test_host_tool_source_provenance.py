@@ -13,7 +13,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "checks"))
 from host_tool_source_provenance import (  # noqa: E402
-    API, REQUIRED, ProvenanceError, verify_candidate,
+    API, REQUIRED, RELATION_BLOB, RELATION_METHOD, S2_MARKER,
+    ProvenanceError, verify_candidate,
 )
 
 SNAPSHOT = ROOT / "checks/fixtures/host-tool-source-set.json"
@@ -68,6 +69,18 @@ def reference_records(snapshot: dict) -> dict:
             "locked": {"rev": windows, "narHash": "sha256-k1k3Y1DuOvXkpntXFyHGaw4ICJBJ1vlsBuDIVAF52nM="},
         }},
     }))
+    relation_url = (f"{source_root}/tests/host_relation_source.py?ref={resources}")
+    result[relation_url] = {
+        **payload(
+            "import unittest\n"
+            "class ProposedRelationCases(unittest.TestCase):\n"
+            f"    def {RELATION_METHOD}(self):\n"
+            "        pass\n"
+            '"admission": "NOT_ADMITTED"\n'
+            '"effect": "FORBIDDEN"\n'
+        ),
+        "sha": RELATION_BLOB,
+    }
     envs_url = (API + "/repos/roccho-org/envs/contents/contracts/"
                 f"proposals/host-tool-selection.jsonl?ref={envs}")
     result[envs_url] = payload(json.dumps({
@@ -88,9 +101,12 @@ class SourceProvenanceTests(unittest.TestCase):
     def setUp(self):
         self.snapshot = json.loads(SNAPSHOT.read_text(encoding="utf-8"))
         self.records = reference_records(self.snapshot)
+        self.coverage_text = (ROOT / "checks/host_tool_source_coverage.md").read_text(
+            encoding="utf-8")
 
     def check(self):
-        return verify_candidate(self.snapshot, self.records.__getitem__)
+        return verify_candidate(self.snapshot, self.records.__getitem__,
+                                coverage_text=self.coverage_text)
 
     def refuse(self, reason=None):
         with self.assertRaises(ProvenanceError) as context:
@@ -106,7 +122,12 @@ class SourceProvenanceTests(unittest.TestCase):
 
     def test_real_shape_source_passes_but_never_grants_target(self):
         result = self.check()
-        self.assertEqual(result["stage"], "PUBLIC_SOURCE_CANDIDATE_VERIFIED")
+        self.assertEqual(result["stage"], "V5_CURRENT_SOURCE_CANDIDATES_VERIFIED")
+        self.assertEqual(result["s2_relation_evidence"], "RESOURCES19_TEST_AND_CI_VERIFIED")
+        self.assertEqual([(row["repository"], row["pr"]) for row in result["sources"]],
+                         [("roccho-dev/resources", 19),
+                          ("roccho-dev/windows", 91),
+                          ("roccho-org/envs", 87)])
         self.assertEqual(result["admission"], "NOT_ADMITTED")
         self.assertIsNone(result["accepted_q"])
         self.assertEqual(result["target_observation"], "NOT_READ")
@@ -248,6 +269,72 @@ class SourceProvenanceTests(unittest.TestCase):
                 self.assertTrue(file.is_file())
                 source = file.read_text(encoding="utf-8")
                 self.assertRegex(source, rf"(?m)^    def {re.escape(method)}\(")
+
+    def test_v5_exact_latest_candidates_refuse_fallback_to_old_green_prs(self):
+        for repository, obsolete in (("roccho-org/envs", 86),
+                                     ("roccho-dev/resources", 17)):
+            with self.subTest(repository=repository):
+                old = copy.deepcopy(self.snapshot)
+                for row in self.snapshot["entries"]:
+                    if row["repository"] == repository:
+                        row["pr"] = obsolete
+                self.refuse("non-exact")
+                self.snapshot = old
+
+    def test_s2_missing_skipped_failed_or_removed_relation_step_refused(self):
+        resource = self.snapshot["entries"][2]
+        url = (f"{API}/repos/roccho-dev/resources/actions/runs/"
+               f"{resource['run_id']}/jobs?per_page=100")
+        original = copy.deepcopy(self.records[url])
+        for action in ("skipped", "failure", "removed"):
+            with self.subTest(action=action):
+                self.records[url] = copy.deepcopy(original)
+                proof = next(job for job in self.records[url]["jobs"]
+                             if job["name"] == "source-vm")
+                steps = proof["steps"]
+                step = next(s for s in steps if s["name"] in (
+                    "Test synthetic Host contains/manages/optional wrap (NOT_ADMITTED)",))
+                if action == "removed":
+                    steps.remove(step)
+                else:
+                    step["conclusion"] = action
+                self.refuse("required CI proof step")
+        self.records[url] = original
+
+    def test_s2_evidence_source_and_mapping_must_both_be_real(self):
+        resource_head = self.snapshot["entries"][2]["head"]
+        url = (f"{API}/repos/roccho-dev/resources/contents/nixos/"
+               f"tests/host_relation_source.py?ref={resource_head}")
+        original = copy.deepcopy(self.records[url])
+        for mutation in ("foreign_blob", "missing_method", "lost_not_admitted"):
+            with self.subTest(mutation=mutation):
+                self.records[url] = copy.deepcopy(original)
+                if mutation == "foreign_blob":
+                    self.records[url]["sha"] = "a" * 40
+                else:
+                    content = base64.b64decode(self.records[url]["content"]).decode()
+                    if mutation == "missing_method":
+                        content = content.replace(RELATION_METHOD, "test_unrelated_target")
+                    else:
+                        content = content.replace('"admission": "NOT_ADMITTED"',
+                                                  '"admission": "ADMITTED"')
+                    self.records[url]["content"] = base64.b64encode(content.encode()).decode()
+                self.refuse()
+        self.records[url] = original
+        before = self.coverage_text
+        for tamper in ("missing", "old_target_unit_test", "wrong_resource_method"):
+            with self.subTest(tamper=tamper):
+                if tamper == "missing":
+                    self.coverage_text = before.replace(S2_MARKER, "")
+                elif tamper == "old_target_unit_test":
+                    self.coverage_text = before.replace(
+                        S2_MARKER,
+                        "SOURCE-SUT:checks/test_host_tool_target_gap.py"
+                        "#test_target_unit_not_derived_from_repo_or_oci_path")
+                else:
+                    self.coverage_text = before.replace(RELATION_METHOD, "test_nonexistent")
+                self.refuse("S2 coverage")
+        self.coverage_text = before
 
     def test_missing_public_api_evidence_fails_closed(self):
         del self.records[next(iter(self.records))]
