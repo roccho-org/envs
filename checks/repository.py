@@ -22,19 +22,28 @@ REQUIRED_FILES = {
     ".github/workflows/probe-dev-rent-access-ssh.yml",
     ".github/workflows/probe-dev-rent-state.yml",
     ".github/workflows/probe-dev-linode-read.yml",
+    ".github/workflows/probe-dev-mail-routing.yml",
+    ".github/workflows/operate-dev-mail-routing.yml",
+    ".github/workflows/deploy-calendar-pages.yml",
     ".gitignore",
     "LICENSE_POLICY.md",
     "LICENSES/README.md",
     "README.md",
     "THIRD_PARTY_NOTICES.md",
     "adapters/jev_api.py",
+    "adapters/calendar_pages.py",
+    "adapters/mail_routing_read.py",
+    "adapters/mail_routing_root.py",
     "adapters/place.ps1",
     "adapters/rent-receive.sh",
     "checks/repository.py",
     "checks/test_jev_api.py",
+    "checks/test_calendar_pages.py",
     "checks/test_rent_access_probe.py",
     "checks/test_rent_state_proof.py",
     "checks/test_linode_read_probe.py",
+    "checks/test_mail_routing_read.py",
+    "checks/test_mail_routing_root.py",
     "checks/test_rent_tunnel.py",
     "checks/test_repository.py",
     "contracts/bindings.jsonl",
@@ -155,6 +164,7 @@ EFFECT_WORKFLOWS = {
     "probe-dev-rent-access-ssh.yml": "dev.rent-access-probe",
     "probe-dev-rent-state.yml": "dev.rent-state-proof",
     "probe-dev-linode-read.yml": "dev.linode-read-probe",
+    "probe-dev-mail-routing.yml": "dev.projection",
 }
 PROBE_CONFIG = "providers/dev-rent-access-probe/main.tf"
 RENT_CONFIG = "providers/dev-rent-cloudflare/main.tf"
@@ -189,6 +199,7 @@ PROBE_TOOL_CHECKS = (
     '"$tool/python3" -I checks/test_rent_access_probe.py --real-ssh "$tool"',
 )
 CIPHERTEXTS = {
+    "ciphertexts/dev-mail-state.sops.json",
     "ciphertexts/dev-jev-api.sops.yaml", "ciphertexts/dev-rent-tunnel.sops.yaml", "ciphertexts/dev-jev-api.oci-dev.sops.yaml",
     "ciphertexts/dev-rent-client.sops.yaml", "ciphertexts/dev-opencode-go.oci-dev.sops.yaml",
 }
@@ -504,12 +515,141 @@ def check_author_targets(text: str, targets: dict[str, set[tuple[str, str]]]) ->
             "author target is selected or called outside its step")
 
 
+def check_manual_mail(root: Path, source: str, canonical: str) -> None:
+    """Only the Owner's exact-source manual operation consumes Mail inputs."""
+    require(source.startswith("name: operate-dev-mail-routing\n")
+            and "\non:\n" in source
+            and source.count("\non:") == 1,
+            "Mail manual entry must be workflow_dispatch only")
+    require("      expected_source_sha:\n" in source and "        required: true\n" in source,
+            "Mail candidate must name a required source SHA")
+    # Admit this exact S1 manual event+input shape only. Remove harmless
+    # whole-line comments/blank lines so prose does not become a false alarm.
+    # Unlike a blacklist, this rejects schedule, repository_dispatch, etc.
+    significant = [line.rstrip() for line in source.splitlines()
+                   if line.strip() and not line.lstrip().startswith("#")]
+    require(significant.count("on:") == 1 and significant.count("permissions:") == 1
+            and significant.index("on:") < significant.index("permissions:"),
+            "Mail candidate requires single on and permissions blocks")
+    trigger = significant[significant.index("on:") + 1:significant.index("permissions:")]
+    require(trigger == [
+        "  workflow_dispatch:",
+        "    inputs:",
+        "      expected_source_sha:",
+        "        description: Exact canonical source SHA (never a private account, mailbox, plan or key)",
+        "        type: string",
+        "        required: true",
+        "      operation:",
+        "        description: Qualify, seal recovery, preview, or apply the approved declaration",
+        "        type: choice",
+        "        options: [qualify, recover, preview, apply]",
+        "        default: qualify",
+        "        required: true",
+        "      recipient:",
+        "        description: Existing owner public age recipient for recovery; never a private key",
+        "        type: string",
+        "        default: ''",
+    ], "Mail candidate must admit only the one manual event and its source input")
+    job = source[source.find("\njobs:\n"):]
+    require(re.findall(r"(?m)^  ([a-z0-9-]+):\s*$", job) == ["operate"],
+            "Mail candidate must have one and only one job")
+    gate = "    if: ${{ github.repository == 'roccho-org/envs' && github.ref_name == 'proposals' && github.sha == inputs.expected_source_sha && github.run_attempt == 1 && github.actor == 'roccho-dev' && github.actor_id == '40359643' && github.triggering_actor == 'roccho-dev' && contains(fromJSON('[\"qualify\",\"recover\",\"preview\",\"apply\"]'), inputs.operation) }}"
+    require(source.count(gate) == 1 and source.count("\n    if:") == 1,
+            "Mail job must be source/controller-bound without re-runs")
+    environment = "    environment: ${{ inputs.operation == 'recover' && 'dev-rent-tunnel' || 'dev-projection' }}\n"
+    require(-1 < source.find(gate) < source.find(environment)
+            < source.find("    steps:\n"),
+            "Mail job must fail before Environment resolution or child execution")
+    require(source.count("    environment:") == 1 and source.count(environment) == 1,
+            "Only recovery reads the historical rent slots; runtime uses projection")
+    require(source.count("    runs-on: ubuntu-24.04\n") == 1
+            and "    timeout-minutes: 10\n" in source,
+            "Mail candidate job must be finite and fixed")
+    # GitHub job-level permissions override workflow-level defaults. Require
+    # the whole noncommented permission map and reject any job override.
+    headers = [line for line in significant if re.match(r"^\s*permissions\s*:", line)]
+    require(headers == ["permissions:"],
+            "Mail candidate must have no job-level permission override")
+    require("concurrency:" in significant
+            and significant.index("permissions:") < significant.index("concurrency:")
+            and significant[significant.index("permissions:"):significant.index("concurrency:")] == [
+                "permissions:", "  actions: read", "  contents: read",
+            ], "Mail candidate may only grant effective actions/contents read")
+    require("  cancel-in-progress: false\n" in source,
+            "Mail candidate must not auto-cancel and replay")
+    recovery_step = source[source.find("      - name: Seal unchanged state inputs"):source.find("      - name: Provide encrypted recovery")]
+    private_step = source[source.find("      - name: Initialize backend and run one selected Mail operation\n"):]
+    qualification_step = source[source.find("      - name: Qualify projection with GET only\n"):source.find("      # The state-input Secret")]
+    recovery_inputs = {("secrets", name) for name in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "RENT_STATE_PASSPHRASE")}
+    qualification_inputs = {("secrets", name) for name in ("MAIL_CONFIG", "CLOUDFLARE_API_TOKEN")}
+    projection_inputs = qualification_inputs | {("secrets", "MAIL_STATE_INPUTS")}
+    expected_inputs = recovery_inputs | projection_inputs
+    require(set(INPUT_REFERENCE.findall(source)) == expected_inputs
+            and len(INPUT_REFERENCE.findall(source)) == len(recovery_inputs) + len(qualification_inputs) + len(projection_inputs)
+            and set(INPUT_REFERENCE.findall(recovery_step)) == recovery_inputs
+            and set(INPUT_REFERENCE.findall(qualification_step)) == qualification_inputs
+            and set(INPUT_REFERENCE.findall(private_step)) == projection_inputs
+            and "R2_PARENT_" not in source and "TF_ENCRYPTION" not in source,
+            "Mail inputs must remain isolated to the selected operation's slots")
+    require(consumer_run(source, "operate-dev-mail-routing.yml") == canonical,
+            "Mail candidate must use the existing exact-SHA artifact consumer")
+    require({action for action, _ in ACTION_USE.findall(source)} ==
+            EFFECT_ACTIONS | {"actions/upload-artifact"},
+            "Mail uses pinned checkout and ciphertext-only upload")
+    require("          path: ${{ env.MAIL_HOME }}/mail-state.sops.json\n" in source
+            and "          retention-days: 1\n" in source
+            and "uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02\n" in source
+            and recovery_step.count("if: inputs.operation == 'recover'") == 1
+            and qualification_step.count("if: inputs.operation == 'qualify'") == 1
+            and private_step.count("if: inputs.operation == 'preview' || inputs.operation == 'apply'") == 1,
+            "Recovery and projection must remain isolated; upload only the encrypted carrier")
+    require("          ref: ${{ github.sha }}\n" in source
+            and "          persist-credentials: false\n" in source,
+            "Mail candidate checkout must be source-bound without retained auth")
+    require("          repository: roccho-org/ops\n"
+            "          ref: afd831dba8f401fb37fc20c27ab8d1f176102050\n"
+            "          path: mail-ops-source\n"
+            "          persist-credentials: false\n" in source,
+            "Mail must consume the fixed Ops declaration without retained auth")
+    require("      - name: Checkout fixed Ops declaration\n"
+            "        if: inputs.operation == 'preview' || inputs.operation == 'apply'\n" in source,
+            "Qualification/recovery must not acquire or initialize the Ops root")
+    require(run_commands(source.replace(canonical, "")) == [
+        TOOLCHAIN_IDENTITY, "set -euo pipefail", "umask 077",
+        'home="$(mktemp -d "$RUNNER_TEMP/mail-m0.XXXXXX")"',
+        'if [ "$MAIL_OPERATION" = preview ] || [ "$MAIL_OPERATION" = apply ]; then',
+        'mkdir -m 700 "$home/root"',
+        'for file in main.tf .terraform.lock.hcl README.md safety.tftest.hcl; do',
+        'install -m 600 "$GITHUB_WORKSPACE/mail-ops-source/providers/mail-routing/$file" "$home/root/$file"',
+        'done', 'fi', 'echo "MAIL_HOME=$home" >>"$GITHUB_ENV"',
+        '"$ENVS_EFFECT_BIN/mail-routing-root" --operation recover',
+        '"$ENVS_EFFECT_BIN/mail-routing-root" --operation qualify',
+        "set +e", '"$ENVS_EFFECT_BIN/mail-routing-root" --operation "$MAIL_OPERATION"',
+        'result=$?', 'if [ "$MAIL_OPERATION" = preview ] && [ "$result" -eq 2 ]; then',
+        'exit 0', 'fi', 'exit "$result"',
+    ], "Mail can run only artifact identity, private root preparation and one operation")
+    require(source.count("      - name: ") == 9,
+            "Mail manual consumer must retain the bounded step set")
+    adapter_source = (root / "adapters/mail_routing_root.py").read_text(encoding="utf-8")
+    require("EXIT_INACTIVE = 78\n" in adapter_source
+            and "    return EXIT_INACTIVE\n" in adapter_source
+            and "CLOSED_RESULT =" in adapter_source,
+            "Mail root adapter must independently refuse")
+    require(adapter_source.count("import os\n") == 1
+            and adapter_source.count("import subprocess\n") == 1
+            and adapter_source.count("os.environ") == 1,
+            "Mail native private runner must use only its selected input snapshot")
+    require('def main() -> int:\n' in adapter_source
+            and 'sys.argv[2] not in MAIL_OPERATIONS' in adapter_source
+            and '        print(CLOSED_RESULT)\n        return EXIT_INACTIVE\n' in adapter_source,
+            "Mail public entry must refuse unsupported/no-argument operation before inputs")
+
 def check_workflows(root: Path, environments: dict[str, dict[str, Any]],
                     author_targets: dict[str, set[tuple[str, str]]], adapter) -> None:
     workflow_root = root / ".github/workflows"
     names = {path.name for path in workflow_root.iterdir() if path.is_file()}
     require(
-        names == {"check.yml", "jev-issue-comment.yml", *EFFECT_WORKFLOWS},
+        names == {"check.yml", "jev-issue-comment.yml", "deploy-calendar-pages.yml", "operate-dev-mail-routing.yml", *EFFECT_WORKFLOWS},
         f"workflow set differs: {sorted(names)}",
     )
     texts = {path.name: path.read_text(encoding="utf-8") for path in workflow_root.iterdir() if path.is_file()}
@@ -526,7 +666,8 @@ def check_workflows(root: Path, environments: dict[str, dict[str, Any]],
     for name, text in texts.items():
         require("pull_request_target:" not in text, f"{name}: pull_request_target is forbidden")
         require("secrets: inherit" not in text, f"{name}: secrets inheritance is forbidden")
-        require("environment: ${{" not in text, f"{name}: dynamic Environment is forbidden")
+        require("environment: ${{" not in text or name == "operate-dev-mail-routing.yml",
+                f"{name}: dynamic Environment is forbidden")
         for action, ref in ACTION_USE.findall(text):
             if not action.startswith(("./", "docker://")):
                 require(re.fullmatch(r"[0-9a-f]{40}", ref) is not None, f"{name}: mutable Action {action}@{ref}")
@@ -541,10 +682,19 @@ def check_workflows(root: Path, environments: dict[str, dict[str, Any]],
     require("run: python3 checks/test_rent_access_probe.py\n" in check, "check workflow must test the access probe adapter")
     require("run: python3 checks/test_rent_state_proof.py\n" in check, "check workflow must test the state proof adapter")
     require("run: python3 checks/test_linode_read_probe.py\n" in check, "check workflow must test the Linode read probe")
+    require("run: python3 checks/test_mail_routing_read.py\n" in check, "check must run Mail GET-only/redaction selftest")
+    require("run: python3 checks/test_mail_routing_root.py\n" in check,
+            "check must test direct Mail hard-inactive source entry")
     require(TOOLCHAIN_BUILD in check, "check workflow must reconstruct the effect toolchain")
     require(f'{TOOLCHAIN_BIN}envs-effect" toolchain' in check, "check workflow must execute the effect entry")
     require(f'{TOOLCHAIN_BIN}python3" -I checks/test_jev_api.py' in check,
             "check workflow must test the adapter on the toolchain interpreter")
+    require(f'{TOOLCHAIN_BIN}python3" -I checks/test_mail_routing_read.py' in check,
+            "check must test Mail adapter on the pinned toolchain interpreter")
+    require(f'{TOOLCHAIN_BIN}python3" -I checks/test_mail_routing_root.py' in check,
+            "check must test Mail refusal on provided Python")
+    require(f'{TOOLCHAIN_BIN}mail-routing-root' in check and 'test "$code" -eq 78' in check,
+            "check must execute and reject the actual provided Mail root wrapper")
     require('nix flake lock "$relock"' in check and 'cmp flake.lock "$relock/flake.lock"' in check,
             "check workflow must prove Nix regenerates the committed lock")
     for tool in ("python3", "sops", "git", "gh", "wrangler"):
@@ -593,6 +743,20 @@ def check_workflows(root: Path, environments: dict[str, dict[str, Any]],
     for token in ("actions/checkout", "nix ", "install-nix"):
         require(token not in clean_start, f"clean-start must not use {token.strip()}")
     canonical = consumer_run(clean_start, "check.yml clean-start")
+    check_manual_mail(root, texts["operate-dev-mail-routing.yml"], canonical)
+    mail_cipher = root / "ciphertexts/dev-mail-state.sops.json"
+    if mail_cipher.exists():
+        require(not mail_cipher.is_symlink(), "Mail state carrier must be a regular source file")
+        spec = importlib.util.spec_from_file_location("mail_cipher_contract", root / "adapters/mail_routing_root.py")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        try:
+            spec.loader.exec_module(module)
+            module.state_ciphertext(mail_cipher.read_bytes())
+        except module.NativeSourceHold:
+            raise RepositoryError("Mail state carrier structure is invalid") from None
+        finally:
+            sys.modules.pop(spec.name, None)
     require(clean_start.count(canonical) == 2, "clean-start must run the canonical consumer and its missing case")
     for marker in CONSUMER_BINDING:
         require(marker in canonical, f"consumer must bind the named commit: {marker}")
@@ -600,6 +764,21 @@ def check_workflows(root: Path, environments: dict[str, dict[str, Any]],
     source_check = CONSUMER_BINDING[-1]
     require(clean_start.count(program) == 3 and clean_start.count(source_check) == 3,
             "clean-start must run the canonical producer and SOURCE checks against mismatches")
+    # The altered-archive fixture MUST demonstrably change bytes, not just
+    # repeat a literal that may already occupy the previous fixed offset.
+    # The two cases are exercised by the existing clean-start native shell.
+    for marker in (
+        "for original_byte in x y; do",
+        """printf '%4096s%s' '' "$original_byte" >"$original" """.strip(),
+        """printf 'x' >>"$changed" """.strip(),
+        'if cmp -s "$original" "$changed"; then',
+        'echo "${ENVS_EFFECT_DIGEST#sha256:}  $ENVS_EFFECT_ZIP" | sha256sum -c -',
+        """printf 'x' >>"$altered" """.strip(),
+        'if cmp -s "$ENVS_EFFECT_ZIP" "$altered"; then',
+    ):
+        require(marker in clean_start, f"clean-start altered-artifact guarantee missing: {marker}")
+    require("""printf 'x' | dd of="$altered" bs=1 seek=4096""" not in clean_start,
+            "clean-start must not reuse the collision-prone fixed-offset overwrite")
     for marker in (
         'test "$MISSING" = failure',
         'if echo "${ENVS_EFFECT_DIGEST#sha256:}  $altered" | sha256sum -c -; then',
@@ -616,6 +795,7 @@ def check_workflows(root: Path, environments: dict[str, dict[str, Any]],
         require(marker in clean_start, f"clean-start destructive case missing: {marker}")
 
     require(consumer_run(effect_shape, "check.yml effect-shape") == canonical, "effect-shape must run the canonical consumer")
+    check_calendar_pages_workflow(texts["deploy-calendar-pages.yml"], canonical)
     for token in ("nix ", "install-nix"):
         require(token not in effect_shape, f"effect-shape must not use {token.strip()}")
     for marker in (
@@ -639,6 +819,12 @@ def check_workflows(root: Path, environments: dict[str, dict[str, Any]],
         require(re.search(r"(?m)^ {0,4}env:", text) is None, f"{name}: workflow or job env is forbidden")
         # The author Environment also carries each binding's declared inputs; its steps prove which one reads which.
         declared = set().union(*author_targets.values()) if name == "author-dev-jev-api.yml" else declared_inputs(row)
+        if name == "probe-dev-mail-routing.yml":
+            # P v2 explicitly permits this ONE existing non-secret account
+            # locator at the native vars-to-runtime boundary. It is not a
+            # credential or a claim of Cloudflare API Write permission.
+            declared = {("secrets", "CLOUDFLARE_API_TOKEN"), ("vars", "CLOUDFLARE_ACCOUNT_ID")}
+            require(declared <= declared_inputs(row), "Mail must reuse the existing dev-projection slots")
         keys = set(EFFECT_ENV.findall(rest))
         allowed = EFFECT_STEP_KEYS | {input_name for _, input_name in declared}
         require(keys <= allowed, f"{name}: step env or input not allowed: {sorted(keys - allowed)}")
@@ -655,11 +841,16 @@ def check_workflows(root: Path, environments: dict[str, dict[str, Any]],
         require("workflow_dispatch:" in text, f"{name}: manual dispatch missing")
         require("\n  push:" not in text and "\n  pull_request:" not in text, f"{name}: automatic effect trigger")
         require(f"environment: {row['github_environment']}" in text, f"{name}: static Environment differs")
-        expected_repo = "roccho-org/envs" if name in {"author-dev-jev-api.yml", "project-dev-rent-tunnel.yml"} else "roccho-dev/envs"
+        expected_repo = "roccho-org/envs" if name in {"author-dev-jev-api.yml", "probe-dev-mail-routing.yml", "project-dev-rent-tunnel.yml"} else "roccho-dev/envs"
         require(f"github.repository == '{expected_repo}'" in text, f"{name}: repository guard missing")
         require("github.ref_name == 'proposals'" in text, f"{name}: canonical ref guard missing")
         require("ref: ${{ github.sha }}" in text, f"{name}: exact checkout missing")
-        require("main" not in text, f"{name}: main must not be an effect source")
+        if name == "probe-dev-mail-routing.yml":
+            # 'domain' contains the spelling 'main'; verify the actual branch.
+            require("refs/heads/main" not in text and "github.ref_name == 'main'" not in text,
+                    "Mail read must not run on main")
+        else:
+            require("main" not in text, f"{name}: main must not be an effect source")
         require(set(INPUT_REFERENCE.findall(text)) == declared, f"{name}: Environment inputs differ from contract")
         for namespace, input_name in sorted(declared):
             mapping = "^\\s+" + re.escape(f"{input_name}: ${{{{ {namespace}.{input_name} }}}}") + "$"
@@ -711,6 +902,96 @@ def check_workflows(root: Path, environments: dict[str, dict[str, Any]],
             "Linode read workflow entry call missing")
     require("permissions:\n  actions: read\n  contents: read\n" in linode and "write" not in linode,
             "Linode read workflow must be read-only on the repository")
+    mail = texts["probe-dev-mail-routing.yml"]
+    require("permissions:\n  actions: read\n  contents: read\n" in mail and "write" not in mail,
+            "Mail read workflow must have only repository read permissions")
+    require("github.sha == inputs.expected_source_sha && github.run_attempt == 1" in mail,
+            "Mail read is limited to approved exact source and first attempt")
+    require("      domain:\n" in mail and "        required: true\n" in mail
+            and "domain_sha256" not in mail,
+            "Mail must use one exact non-secret native domain selector")
+    require('        run: \'"$ENVS_EFFECT_BIN/mail-routing-read"\'\n' in mail,
+            "Mail read must use the provided toolchain entry")
+    require("SOPS_AGE_KEY" not in mail and "AWS_" not in mail and "CLOUDFLARE_ZONE_ID" not in mail,
+            "Mail read must not borrow age/rent/state secrets or zone identifiers")
+    require("GITHUB_EVENT_PATH" not in mail or "      domain:\n" in mail,
+            "Mail selected domain must be read from the native event file")
+    require("inputs.domain" not in mail,
+            "Domain must never be interpolated into a shell/env/argv expression")
+    require("CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}" in mail,
+            "Mail must use the existing native non-secret account Variable, without a REST auth dependency")
+    # The existing artifact-consumer step must retain its own GH_TOKEN.
+    # Only the final Cloudflare read step must not request another GitHub
+    # token/REST permission to fetch an existing Environment Variable.
+    read_step = mail.split("      - name: Read selected Cloudflare zone under existing account\n", 1)
+    require(len(read_step) == 2 and "GH_TOKEN: ${{ github.token }}" not in read_step[1],
+            "Mail read step must not add a second GitHub token/REST dependency")
+    require("github.actor == 'roccho-dev'" in mail and "github.actor_id == '40359643'" in mail
+            and "github.triggering_actor == 'roccho-dev'" in mail,
+            "Mail dispatch must admit only the fixed GitHub controller, without claiming chat role identity")
+
+
+
+def check_calendar_pages_workflow(source: str, canonical_consumer: str) -> None:
+    """Strictly admit only the one controller + issue scoped Pages effect."""
+    require("on:\n  issue_comment:\n    types: [created]\n" in source,
+            "calendar deploy must require an issue comment")
+    require("\n  push:" not in source and "\n  pull_request:" not in source
+            and "workflow_dispatch:" not in source, "calendar deploy must be comment-only")
+    require("permissions:\n  actions: read\n  contents: read\n" in source,
+            "calendar deploy may only read repo/actions")
+    require("    environment: dev-projection\n" in source,
+            "calendar deploy may only use the existing Cloudflare Environment")
+    for guard in (
+        "github.event.repository.owner.type == 'Organization'",
+        "github.repository == 'roccho-org/envs'",
+        "github.event.issue.number == 69",
+        "github.event.issue.pull_request == null",
+        "github.event.comment.user.id == 40359643",
+        "github.actor == 'roccho-dev'",
+        "github.actor_id == '40359643'",
+        "github.triggering_actor == 'roccho-dev'",
+        "github.ref_name == 'proposals'",
+        "github.run_attempt == 1",
+        "startsWith(github.event.comment.body, '/deploy-calendar ')",
+    ):
+        require(guard in source, f"calendar controller guard lost: {guard}")
+    require(source.count("github.event.comment.body") == 1,
+            "calendar comment cannot enter a shell or environment expression")
+    require(consumer_run(source, "deploy-calendar-pages.yml") == canonical_consumer,
+            "calendar must consume the exact already-checked envs toolchain")
+    require(source.count("actions/checkout@") == 2
+            and source.count("persist-credentials: false") == 2,
+            "calendar checkouts must be pinned and credential-free")
+    require("          repository: roccho-dev/apps\n" in source
+            and "          ref: ${{ steps.select.outputs.app_sha }}\n" in source,
+            "calendar must fetch the accepted exact apps SHA")
+    require("ref: ${{ github.sha }}\n" in source,
+            "calendar provider code must be the canonical envs SHA")
+    require(source.count("adapters/calendar_pages.py select'") == 1
+            and source.count("adapters/calendar_pages.py verify'") == 1
+            and source.count("adapters/calendar_pages.py deploy'") == 1,
+            "calendar can use only the three bounded adapter commands")
+    stage = [source.find("adapters/calendar_pages.py select'"),
+             source.find("adapters/calendar_pages.py verify'"),
+             source.find("secrets.CLOUDFLARE_API_TOKEN"),
+             source.find("adapters/calendar_pages.py deploy'")]
+    require(stage[0] >= 0 and stage == sorted(stage),
+            "calendar proof must precede any Cloudflare secret or effect")
+    require(set(INPUT_REFERENCE.findall(source)) == {
+                ("secrets", "CLOUDFLARE_API_TOKEN"), ("vars", "CLOUDFLARE_ACCOUNT_ID")},
+            "calendar must use only the existing dev-projection Cloudflare pair")
+    require(source.count("secrets.CLOUDFLARE_API_TOKEN") == 1
+            and source.count("vars.CLOUDFLARE_ACCOUNT_ID") == 1,
+            "calendar provider inputs may be exposed only in the final step")
+    require("SOPS_AGE_KEY" not in source and "AWS_" not in source
+            and "CLOUDFLARE_ZONE_ID" not in source and "secrets: inherit" not in source,
+            "calendar may not borrow unrelated credential classes")
+    adapter = (ROOT / "adapters/calendar_pages.py").read_text(encoding="utf-8")
+    require('CONTROL_ISSUE = 69' in adapter
+            and 'PROJECT = "roccho-family-calendar-2026"' in adapter
+            and 'APPS_REPO = "roccho-dev/apps"' in adapter,
+            "calendar adapter may target only the fixed issue, Pages project, and source repo")
 
 
 def check_toolchain(root: Path, adapter) -> None:
@@ -729,6 +1010,12 @@ def check_toolchain(root: Path, adapter) -> None:
     require("export SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt" in flake,
             "the entry must carry its own CA bundle for provider retrieval")
     require('exec ${tools.python3} -I ${self}/adapters/jev_api.py "$@"' in flake, "flake entry must run only the adapter")
+    require('exec ${tools.python3} -I ${self}/adapters/mail_routing_read.py' in flake,
+            "Mail read must use the exact pinned interpreter/source")
+    require('exec ${tools.python3} -I ${self}/adapters/mail_routing_root.py' in flake,
+            "Mail root must use the same source-bound pinned Python")
+    require('paths = [ entry contract-projection mail-routing-read mail-routing-root ] ++ packages;' in flake,
+            "Mail read and inactive root must be in the same provided closure")
     require("closureInfo { rootPaths = [ effect-toolchain ]; }" in flake and "echo ${effect-toolchain}/bin/envs-effect > ENTRY" in flake,
             "flake artifact must carry the whole entry closure and its ENTRY")
     require('rev = self.rev or (throw "' in flake and "echo ${rev} > SOURCE" in flake and "ENTRY SOURCE $(cat" in flake

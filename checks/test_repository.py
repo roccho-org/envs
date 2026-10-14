@@ -79,6 +79,70 @@ def main() -> None:
     assert baseline["canonical_branch"] == "proposals"
     assert baseline["retained_compatibility_branch"] == "main"
 
+    # Structural Source checks reject plaintext/duplicate metadata before publication.
+    fixture_spec = importlib.util.spec_from_file_location("mail_carrier_fixtures", ROOT / "checks/test_mail_routing_root.py")
+    fixture = importlib.util.module_from_spec(fixture_spec)
+    fixture_spec.loader.exec_module(fixture)
+    carrier = fixture.state_envelope_fixture()
+    valid = copy_root()
+    try:
+        (valid / "ciphertexts/dev-mail-state.sops.json").write_bytes(carrier)
+        assert repository.inspect(valid)["status"] == "PASS"
+    finally:
+        shutil.rmtree(valid.parent, ignore_errors=True)
+    for bad in fixture.invalid_state_envelopes(carrier):
+        expect_red(lambda root, bad=bad: (root / "ciphertexts/dev-mail-state.sops.json").write_bytes(bad))
+
+    # Manual Mail operations retain actor/source and private-input boundaries.
+    manual = ".github/workflows/operate-dev-mail-routing.yml"
+    # All source-level triggers are denied except the one manual dispatch.
+    # Neither an added scheduled/repository event nor job-level write scope may
+    # become a future activation path without an independently reviewed GO.
+    expect_red(replace_text(manual, "on:\n  workflow_dispatch:\n",
+                            "on:\n  workflow_dispatch:\n  schedule:\n    - cron: '0 4 * * *'\n"))
+    expect_red(replace_text(manual, "on:\n  workflow_dispatch:\n",
+                            "on:\n  workflow_dispatch:\n  repository_dispatch:\n"))
+    expect_red(replace_text(manual, "    runs-on: ubuntu-24.04\n",
+                            "    permissions:\n      actions: write\n      contents: read\n    runs-on: ubuntu-24.04\n"))
+    expect_red(replace_text(manual, "    runs-on: ubuntu-24.04\n",
+                            "    permissions:\n      actions: read\n      contents: read\n    runs-on: ubuntu-24.04\n"))
+    expect_red(replace_text(manual, "  contents: read\n\nconcurrency:",
+                            "  contents: read\n  id-token: write\n\nconcurrency:"))
+    commented = copy_root()
+    try:
+        replace_text(manual, "on:\n  workflow_dispatch:\n",
+                     "on:\n  # harmless explanatory comment\n  workflow_dispatch:\n")(commented)
+        replace_text(manual, "permissions:\n  actions: read\n",
+                     "permissions:\n  # harmless explanatory comment\n  actions: read\n")(commented)
+        assert repository.inspect(commented)["status"] == "PASS"
+    finally:
+        shutil.rmtree(commented.parent, ignore_errors=True)
+    expect_red(replace_text(manual, "github.run_attempt == 1", "github.run_attempt >= 1"))
+    expect_red(replace_text(manual, "options: [qualify, recover, preview, apply]", "options: [qualify, recover, preview, apply, destroy]"))
+    expect_red(replace_text(manual, "|| 'dev-projection' }}", "|| 'dev-authoring' }}"))
+    expect_red(replace_text(manual, "MAIL_STATE_INPUTS: ${{ secrets.MAIL_STATE_INPUTS }}",
+                            "MAIL_STATE_INPUTS: ${{ secrets.SOPS_AGE_KEY }}"))
+    expect_red(replace_text(manual, "if: inputs.operation == 'preview' || inputs.operation == 'apply'",
+                            "if: inputs.operation != 'recover'"))
+    expect_red(replace_text(manual,
+                            '"$ENVS_EFFECT_BIN/mail-routing-root"',
+                            '"$ENVS_EFFECT_BIN/envs-effect"'))
+    expect_red(replace_text(manual, "    steps:\n",
+                            "    steps:\n      - name: Early mutation\n        run: echo active\n"))
+    expect_red(replace_text(manual, "    steps:\n",
+                            "    steps:\n      - name: Bad Secret\n        env:\n"
+                            "          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}\n"))
+    expect_red(replace_text("adapters/mail_routing_root.py", "return EXIT_INACTIVE", "return 0"))
+    expect_red(replace_text("adapters/mail_routing_root.py", "import sys",
+                            "import sys\nimport subprocess"))
+    expect_red(replace_text("flake.nix",
+                            "paths = [ entry contract-projection mail-routing-read mail-routing-root ] ++ packages;",
+                            "paths = [ entry contract-projection mail-routing-read ] ++ packages;"))
+    expect_red(replace_text(".github/workflows/check.yml",
+                            "run: python3 checks/test_mail_routing_root.py", "run: true"))
+    expect_red(replace_text(".github/workflows/check.yml",
+                            "test \"$code\" -eq 78", "test \"$code\" -eq 0"))
+
     expect_red(lambda root: (root / "migration").mkdir())
     expect_red(lambda root: (root / "unexpected").mkdir())
     expect_red(lambda root: (root / "adapters/legacy.sh").write_text("exit 0\n"))
@@ -101,6 +165,17 @@ def main() -> None:
     expect_red(replace_text(selected, literal, literal.replace("roccho-org/envs", "roccho-dev/envs")))
     expect_red(replace_text(selected, "rent-root-inspect'", "rent-root-other'"))
     expect_red(replace_text(selected, "rent-root-inspect'", "rent-root'"))
+    calendar =".github/workflows/deploy-calendar-pages.yml"
+    for old, new in (
+        ("github.event.issue.number == 69", "github.event.issue.number == 70"),
+        ("github.event.comment.user.id == 40359643", "github.event.comment.user.id == 44"),
+        ("github.ref_name == 'proposals'", "github.ref_name == 'main'"),
+        ("          repository: roccho-dev/apps", "          repository: other/apps"),
+        ("          ref: ${{ steps.select.outputs.app_sha }}", "          ref: proposals"),
+        ("          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}", ""),
+        ("    environment: dev-projection", "    environment: dev-rent-tunnel"),
+    ):
+        expect_red(replace_text(calendar, old, new))
 
     def add_database_path(root: Path) -> None:
         name = "duck" + "db"

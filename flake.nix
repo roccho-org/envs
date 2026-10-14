@@ -46,6 +46,21 @@
         exec ${tools.python3} -I ${self}/adapters/jev_api.py "$@"
       '';
 
+      # GET-only Mail read client lives in the SAME exact-SHA provided closure.
+      # No extra runtime, secret projection, provider plugin or host-installed CLI.
+      mail-routing-read = pkgs.writeShellScriptBin "mail-routing-read" ''
+        set -euo pipefail
+        export SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt
+        exec ${tools.python3} -I ${self}/adapters/mail_routing_read.py
+      '';
+
+      # Mail consumes the same source-bound toolchain; no argument still refuses.
+      mail-routing-root = pkgs.writeShellScriptBin "mail-routing-root" ''
+        export ENVS_EFFECT_TOOLCHAIN=${manifest}
+        export SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt
+        exec ${tools.python3} -I ${self}/adapters/mail_routing_root.py "$@"
+      '';
+
       # Public facts only. Bound source arguments come last and cannot be overridden by a caller.
       projection-entry = pkgs.writeShellScriptBin "envs-contract-projection" ''
         exec ${pkgs.python3}/bin/python3 -I ${self}/adapters/contract_projection.py "$@" --root ${self} --revision ${rev}
@@ -59,7 +74,7 @@
 
       effect-toolchain = pkgs.buildEnv {
         name = "envs-effect-toolchain";
-        paths = [ entry contract-projection ] ++ packages;
+        paths = [ entry contract-projection mail-routing-read mail-routing-root ] ++ packages;
       };
 
       # Provided artifact: the complete store closure plus ENTRY and SOURCE, deterministic so CI can hand it off by digest.

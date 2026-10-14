@@ -1,0 +1,151 @@
+name: operate-dev-mail-routing
+
+# Manual fixed-source operation. Private target/stage is supplied by the Owner
+# through the Environment; merge never starts an operation.
+on:
+  workflow_dispatch:
+    inputs:
+      expected_source_sha:
+        description: Exact canonical source SHA (never a private account, mailbox, plan or key)
+        type: string
+        required: true
+      operation:
+        description: Qualify, seal recovery, preview, or apply the approved declaration
+        type: choice
+        options: [qualify, recover, preview, apply]
+        default: qualify
+        required: true
+      recipient:
+        description: Existing owner public age recipient for recovery; never a private key
+        type: string
+        default: ''
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: operate-dev-mail-routing
+  cancel-in-progress: false
+
+jobs:
+  operate:
+    # Reject stale source, another actor and re-runs before resolving Secrets.
+    if: ${{ github.repository == 'roccho-org/envs' && github.ref_name == 'proposals' && github.sha == inputs.expected_source_sha && github.run_attempt == 1 && github.actor == 'roccho-dev' && github.actor_id == '40359643' && github.triggering_actor == 'roccho-dev' && contains(fromJSON('["qualify","recover","preview","apply"]'), inputs.operation) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: ${{ inputs.operation == 'recover' && 'dev-rent-tunnel' || 'dev-projection' }}
+    steps:
+      - name: Checkout exact canonical revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      # Consumes the artifact that check provided for this exact SHA; nothing is built or installed here.
+      - name: Obtain provided effect artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ENVS_SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          echo "platform: $ImageOS $ImageVersion"
+          api="$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions"
+          auth="Authorization: Bearer $GH_TOKEN"
+          art="$(mktemp -d)"
+          curl -fsSL -H "$auth" -o "$art/list.json" "$api/artifacts?name=envs-effect-$ENVS_SOURCE_SHA&per_page=100"
+          jq -e '[.artifacts[] | select(.expired | not)] | length == 1 and (.[0].digest | test("^sha256:[0-9a-f]{64}$"))' "$art/list.json" >/dev/null
+          jq '[.artifacts[] | select(.expired | not)][0]' "$art/list.json" >"$art/artifact.json"
+          id="$(jq -r '.id' "$art/artifact.json")"
+          digest="$(jq -r '.digest' "$art/artifact.json")"
+          run_id="$(jq -r '.workflow_run.id' "$art/artifact.json")"
+          curl -fsSL -H "$auth" -o "$art/run.json" "$api/runs/$run_id"
+          jq -e --arg sha "$ENVS_SOURCE_SHA" --arg branch "${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}" --arg repo "$GITHUB_REPOSITORY" --arg current "$GITHUB_RUN_ID" \
+            '.path == ".github/workflows/check.yml" and .head_sha == $sha and .head_branch == $branch and .repository.full_name == $repo and .head_repository.full_name == $repo and ((.id | tostring) == $current or (.event == "push" and .conclusion == "success"))' \
+            "$art/run.json" >/dev/null
+          curl -fsSL -H "$auth" -o "$art/envs-effect.zip" "$api/artifacts/$id/zip"
+          echo "${digest#sha256:}  $art/envs-effect.zip" | sha256sum -c -
+          unzip -q "$art/envs-effect.zip" -d "$art/content"
+          test "$(ls -A "$art/content")" = envs-effect.tar
+          test "$(tar -xOf "$art/content/envs-effect.tar" SOURCE)" = "$ENVS_SOURCE_SHA"
+          entry="$(tar -xOf "$art/content/envs-effect.tar" ENTRY)"
+          [[ "$entry" =~ ^/nix/store/[0-9a-z]{32}-envs-effect-toolchain/bin/envs-effect$ ]]
+          sudo mkdir -p /nix/store
+          sudo tar -x -C / -f "$art/content/envs-effect.tar" nix/store
+          test -x "$entry"
+          echo "artifact: run=$run_id id=$id digest=$digest entry=$entry"
+          echo "ENVS_EFFECT_BIN=${entry%/envs-effect}" >>"$GITHUB_ENV"
+          echo "ENVS_EFFECT_DIGEST=$digest" >>"$GITHUB_ENV"
+          echo "ENVS_EFFECT_ZIP=$art/envs-effect.zip" >>"$GITHUB_ENV"
+
+      - name: Record effect toolchain identity
+        run: '"$ENVS_EFFECT_BIN/envs-effect" --root "$GITHUB_WORKSPACE" toolchain'
+
+      - name: Checkout fixed Ops declaration
+        if: inputs.operation == 'preview' || inputs.operation == 'apply'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: roccho-org/ops
+          ref: afd831dba8f401fb37fc20c27ab8d1f176102050
+          path: mail-ops-source
+          persist-credentials: false
+
+      - name: Prepare private writable Mail root
+        env:
+          MAIL_OPERATION: ${{ inputs.operation }}
+        run: |
+          set -euo pipefail
+          umask 077
+          home="$(mktemp -d "$RUNNER_TEMP/mail-m0.XXXXXX")"
+          if [ "$MAIL_OPERATION" = preview ] || [ "$MAIL_OPERATION" = apply ]; then
+            mkdir -m 700 "$home/root"
+            for file in main.tf .terraform.lock.hcl README.md safety.tftest.hcl; do
+              install -m 600 "$GITHUB_WORKSPACE/mail-ops-source/providers/mail-routing/$file" "$home/root/$file"
+            done
+          fi
+          echo "MAIL_HOME=$home" >>"$GITHUB_ENV"
+
+      # The historical rent Environment produces only an encrypted envelope.
+      # Its token, private age identity and provider resources are untouched.
+      - name: Seal unchanged state inputs to existing owner recipient
+        if: inputs.operation == 'recover'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          RENT_STATE_PASSPHRASE: ${{ secrets.RENT_STATE_PASSPHRASE }}
+          MAIL_STATE_AGE_RECIPIENT: ${{ inputs.recipient }}
+        run: '"$ENVS_EFFECT_BIN/mail-routing-root" --operation recover'
+
+      - name: Provide encrypted recovery envelope only
+        if: inputs.operation == 'recover'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: mail-state-${{ github.sha }}-${{ github.run_id }}
+          path: ${{ env.MAIL_HOME }}/mail-state.sops.json
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Qualify projection with GET only
+        if: inputs.operation == 'qualify'
+        env:
+          MAIL_CONFIG: ${{ secrets.MAIL_CONFIG }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: '"$ENVS_EFFECT_BIN/mail-routing-root" --operation qualify'
+
+      # The state-input Secret contains only the two R2 inputs and existing
+      # state passphrase. The real age identity stays on the Owner's computer.
+      - name: Initialize backend and run one selected Mail operation
+        if: inputs.operation == 'preview' || inputs.operation == 'apply'
+        env:
+          MAIL_CONFIG: ${{ secrets.MAIL_CONFIG }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          MAIL_STATE_INPUTS: ${{ secrets.MAIL_STATE_INPUTS }}
+          MAIL_OPERATION: ${{ inputs.operation }}
+        run: |
+          set +e
+          "$ENVS_EFFECT_BIN/mail-routing-root" --operation "$MAIL_OPERATION"
+          result=$?
+          if [ "$MAIL_OPERATION" = preview ] && [ "$result" -eq 2 ]; then
+            exit 0
+          fi
+          exit "$result"

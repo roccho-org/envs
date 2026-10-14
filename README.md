@@ -342,6 +342,100 @@ Not proven here: any real R2 effect, the parent token's permission (only the fir
 
 ## Effect toolchain
 
+### Mail plan lifecycle
+
+The Owner adopted [Mail M0 without persistent plans](https://github.com/roccho-dev/adrs/issues/578#issuecomment-6143250867).
+The matching operating contract is [ops PR #535](https://github.com/roccho-org/ops/pull/535);
+the helper pins its exact candidate commit/tree and unchanged native resources.
+The manual Mail entry previews changes with native
+`plan -input=false -lock=true -detailed-exitcode`, without `-out`.
+An Owner-selected apply uses
+`apply -input=false -lock=true -auto-approve -json`; OpenTofu re-plans the approved
+fixed source and target at execution time. Approval concerns convergence to
+that declaration, not byte equality with an earlier speculative plan.
+
+There is no plan bucket/key, saved-plan show, R2 plan transfer or ETag gate.
+The strict private `MAIL_CONFIG` now contains 13 explicit fields: account,
+zone, literal alias, Gmail destination, priority, state bucket/key, verified
+destination ID and four managed/preflight flags. `plan_bucket` and `plan_key`
+are rejected. The existing four credential/passphrase slots remain separate.
+The state backend, encryption, lock and recovery still require independent
+qualification; this change does not migrate Mail state to a GitHub ref.
+
+Native outputs remain private. A public result may expose only a non-secret
+summary; an earlier CI diff never authorizes an apply or a retry. After an
+approved apply, independently read the state/provider outcome and require
+native no-op exit 0; exit 2, errors, timeout and unknown outcomes are unfinished.
+Each fresh runner initializes the selected backend, then performs exactly
+one preview or apply. Init failure prevents the operation; there is no
+preview-to-apply chain or automatic retry. A preview delta is reported as
+`DELTA`; its private native JSON capture yields only fixed resource labels,
+action names and consistent add/change/remove counts. Native messages,
+attributes, IDs and output values never enter that summary. Missing,
+unrecognized or inconsistent inventory is `PREVIEW_UNPROVEN`, not permission
+to apply. Its fixed rejection reason and finite native exit distinguish parser
+rejection from native operation failure without exposing event payloads.
+OpenTofu uses apply-style hooks for data-source reads during planning. Preview
+accepts paired `action=read` hooks only for the two fixed verification data
+sources, before the plan summary; resource mutation hooks remain rejected.
+The supplied native toolchain checks this with a local synthetic data source.
+No provider authentication, real state or mail setting is used by that fixture.
+Apply success is only `APPLIED_UNVERIFIED`. A failed apply remains
+`OPERATION_UNPROVEN`; its bounded private JSON capture may identify fixed resource
+labels and numeric HTTP/API codes. Native diagnostic text, URLs and values are
+discarded. Unsupported or malformed evidence yields `UNCLASSIFIED`, with the
+failure/timeout exit retained. Init failures expose only the fixed init stage.
+No failure summary authorizes a retry or recovers a discarded older capture.
+
+`operate-dev-mail-routing` is manual and restricted to the exact canonical
+SHA, `roccho-dev`, first attempt and serialized runs. Its closed operations
+are `qualify`, `recover`, `preview` and `apply`, defaulting to qualification.
+Target data is never a dispatch input; `recipient` is an existing public age
+recipient, never an identity. Runtime uses the existing `dev-projection`
+Environment: `MAIL_CONFIG`, its Cloudflare token and `MAIL_STATE_INPUTS`.
+The state-input Secret is one JSON object containing only `AWS_ACCESS_KEY_ID`,
+`AWS_SECRET_ACCESS_KEY` and the unchanged `RENT_STATE_PASSPHRASE`. Its exact
+field/type/ASCII/passphrase checks precede private native composition.
+The real age identity stays on the Owner's computer; Mail maps no private
+age-key Secret and does not use the unrelated existing `SOPS_AGE_KEY`.
+
+Qualification is a separate GET-only step with only target config/token.
+It does not receive state inputs or enter crypto. Preview/apply consume the
+state-input Secret in memory, copy the pinned Ops files to owner-only scratch,
+and use the same-SHA provided effect artifact. Preflight precedes backend init;
+init precedes exactly one native operation, with no saved plan or automatic
+retry. The packed Secret does not reach native child environments; only the
+selected backend/provider inputs do. Native streams remain private and are
+never uploaded. No arguments or unsupported operations still return
+`INACTIVE / NOT_RUN`, exit78 before reading protected input.
+
+Recovery selects historical `dev-rent-tunnel` solely to seal its unchanged
+three state slots to the existing owner public recipient. It receives no
+Cloudflare token or real private age key and invokes no OpenTofu. Only the
+validated encrypted carrier is uploaded for one day. The fixed
+`ciphertexts/dev-mail-state.sops.json` is a recovery copy, not a CI decryption
+dependency. Local restoration with the Owner's existing identity provides
+only the three necessary values for the projection Secret. Credential entry
+and submission in the browser belong to the Owner. Existing rent slots,
+private keys and the unrelated projection identity are not replaced.
+
+The adopted carrier came from canonical recovery run38511433848,
+artifact11869414743. Exact ZIP digest/member bytes were independently
+verified, archived under an owner-only ACL, and authenticated decryption to
+private memory passed the three-field contract. Source adopts identical
+encrypted bytes. No plaintext file or decrypted value/key hash was produced.
+Shared age-key holders can open this backup. Structural Source checks reject
+duplicate members, plaintext fields/comments, extra documents and alternative
+key mechanisms; they do not replace authenticated recovery verification.
+
+Before dispatch, establish the exact target/preflight, operation permissions
+and state/lock access. Initial destination/DNS apply keeps the rule unmanaged.
+After human Gmail verification and fresh ready/verified readback, a separate
+rule apply preserves flags of already-owned resources. A later preview must
+return no-op0, and actual delivery needs an independent test message. Input
+recovery does not prove existing-state restoration, backend/lock access or
+Mail delivery. Source merge does not register inputs or dispatch an operation.
+
 `flake.nix` and `flake.lock` define the only toolchain for authoring and projection: Python, SOPS, Wrangler, Git, GitHub CLI and curl from the locked nixpkgs input, plus the `envs-effect` entry running this source's adapter. `.#effect-artifact` is that entry's complete store closure as one tar with an `ENTRY` pointer.
 
 ```text
@@ -390,3 +484,9 @@ looking at any secret or spawning any child. CI simulates the read path with
 fixture tools; it never performs real inspection. No key/ref/backend migration,
 activation, provider apply, transport or credential change is authorized by
 this source.
+
+## Family calendar Cloudflare Pages (bounded exception)
+
+The static product bytes are owned by `roccho-dev/apps/packages/calendar/src`. This repo owns only one explicitly authorized provider upload of an exact, CI-green apps source to the fixed `roccho-family-calendar-2026` Direct Upload Pages project. `dev-projection` supplies its existing `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` to a single bounded effect step. No secret is transferred to apps, no Pages secret is projected into the browser, and this is not a generic deployment platform.
+
+On [envs Issue #69](https://github.com/roccho-org/envs/issues/69), the existing `roccho-dev` principal comments `/deploy-calendar <40-character apps SHA>`. The comment becomes data for a strict validator; envs only fetches that commit after its `calendar acceptance` and `nix-check` runs are both success. It uses the envs exact-commit Nix toolchain artifact, deploys only the two static files to Pages, and accepts completion only after public byte-for-byte readback of both. A failure never represents success. All data in `events.jsonl` is public. The provider secret scope must independently include `Pages Write` (a working zone read alone does not prove it).
