@@ -803,7 +803,7 @@ def check_native_source_and_plan() -> None:
                     )
                     assert command.argv == (
                         tofu, "-chdir=" + str(ops), "apply", "-input=false",
-                        "-lock=true", "-auto-approve",
+                        "-lock=true", "-auto-approve", "-json",
                     )
                     assert run_synthetic(command, name, code=code, pause=pause,
                                          start_failure=start_failure).returncode == expected
