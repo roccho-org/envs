@@ -156,6 +156,15 @@ def main() -> None:
                      ("      github.event.issue.pull_request == null", "      true")):
         expect_red(replace_text(caller, old, new))
     expect_red(append_branch_effect)
+    # S2 selected workflow: removing/reversing the single literal false
+    # would admit secrets and possibly the entire old apply/handoff chain.
+    selected = ".github/workflows/project-dev-rent-tunnel.yml"
+    literal = "if: ${{ false && github.repository == 'roccho-org/envs' && github.ref_name == 'proposals' }}"
+    expect_red(replace_text(selected, literal, literal.replace("false", "true")))
+    expect_red(replace_text(selected, literal, literal.replace("false && ", "")))
+    expect_red(replace_text(selected, literal, literal.replace("roccho-org/envs", "roccho-dev/envs")))
+    expect_red(replace_text(selected, "rent-root-inspect'", "rent-root-other'"))
+    expect_red(replace_text(selected, "rent-root-inspect'", "rent-root'"))
     calendar = ".github/workflows/deploy-calendar-pages.yml"
     for old, new in (
         ("github.event.issue.number == 69", "github.event.issue.number == 70"),
@@ -453,7 +462,33 @@ def main() -> None:
     expect_red(lambda root: (root / "providers/dev-rent-access-probe/terraform.tfstate").write_text("{}\n"))
     # The persistent root: native validate accepts each of these, so the oracle must refuse them.
     rent = "providers/dev-rent-cloudflare/main.tf"
-    expect_red(replace_text(rent, '  backend "s3" {\n', '  backend "local" {\n'))
+    expect_red(replace_text(rent, '  backend "http" {}\n', '  backend "local" {}\n'))
+    expect_red(replace_text(rent, '  backend "http" {}\n', '  backend "http" {\n    address = "http://127.0.0.1:1/"\n  }\n'))
+    expect_red(replace_text(rent, '  backend "http" {}\n', '  backend "http" {}\n  backend "s3" {}\n'))
+    # S2: the GitHub-ref state location is exact and unique, and every backend-capable rent-root entry is closed.
+    expect_red(mutate_plane("dev.rent-root", lambda row: row["state_backend"].update({"ref": "refs/heads/proposals"})))
+    expect_red(mutate_plane("dev.rent-root", lambda row: row["state_backend"].update({"repository_id": 1})))
+    expect_red(mutate_plane("dev.rent-root", lambda row: row["state_backend"].update(
+        {"lock_ref": "refs/heads/locks/state/other.json"})))
+    expect_red(mutate_plane("dev.rent-root", lambda row: row["state_backend"].update({"repository": "roccho-dev/envs"})))
+    expect_red(mutate_plane("dev.rent-root", lambda row: row.pop("state_backend")))
+    expect_red(mutate_plane("dev.rent-tunnel", lambda row: row.update({"state_backend": {"state_path": "x"}})))
+    adapter = "adapters/jev_api.py"
+    for gate in ("ROOT_INSPECT_SOURCE_ACTIVE", "ROOT_APPLY_SOURCE_ACTIVE", "ROOT_MIGRATE_SOURCE_ACTIVE",
+                 "ROOT_PLAN_SOURCE_ACTIVE"):
+        expect_red(replace_text(adapter, f"\n{gate} = False\n", f"\n{gate} = True\n"))
+        expect_red(replace_text(adapter, f"\n{gate} = False\n", f"\n{gate} = bool(0)\n"))
+        expect_red(replace_text(adapter, f"    require({gate}, ", f"    require(True or {gate}, "))
+    expect_red(replace_text(adapter, '    require(ROOT_PLAN_SOURCE_ACTIVE, "rent-root backend-only plan is source-hard-inactive")\n'
+                                     '    progress["stage"] = "contracts"\n    contracts = validate_contracts(root)\n',
+                            '    progress["stage"] = "contracts"\n    contracts = validate_contracts(root)\n'
+                            '    require(ROOT_PLAN_SOURCE_ACTIVE, "rent-root backend-only plan is source-hard-inactive")\n'))
+    expect_red(replace_text(adapter, '"GIT_USERNAME": ROOT_STATE_GIT_USERNAME,', ""))
+    expect_red(replace_text(adapter, '\nROOT_STATE_GIT_USERNAME = "x-access-token"\n', '\nROOT_STATE_GIT_USERNAME = ""\n'))
+    expect_red(replace_text(adapter, "clean_env(tools, {\"HOME\": str(home), \"GIT_USERNAME\"",
+                            "clean_env(tools, {\"GIT_PASSWORD\": token, \"HOME\": str(home), \"GIT_USERNAME\""))
+    expect_red(replace_text(adapter, "ROOT_LEGACY_S3_CONFIG = \"\"\"terraform {\n",
+                            "ROOT_LEGACY_S3_CONFIG = \"\"\"terraform {\n  backend \"s3\" {\n  }\n"))
     expect_red(replace_text(rent, "    plan {\n      enforced = true\n    }\n", "    plan {\n      enforced = false\n    }\n"))
     expect_red(replace_text(rent, "    state {\n      enforced = true\n    }\n", ""))
     expect_red(replace_text(rent, 'output "credentials" {\n  sensitive = true\n', 'output "credentials" {\n'))
@@ -479,6 +514,15 @@ def main() -> None:
     expect_red(replace_text("flake.nix", 'pkgs.cloudflared.version == "2026.6.1"', 'pkgs.cloudflared.version != ""'))
     expect_red(replace_text("flake.nix", "[ p.cloudflare_cloudflare ]", "[ p.cloudflare_cloudflare p.hashicorp_random ]"))
     expect_red(replace_text("flake.nix", 'tofu = "${opentofu}/bin/tofu";', 'tofu = "/usr/bin/tofu";'))
+    # GitHub-ref state transport: the pinned upstream v0.1.12 binary, in the closure, executed by its own build.
+    expect_red(replace_text("flake.nix", "/download/v0.1.12/terraform-backend-git", "/download/v0.1.11/terraform-backend-git"))
+    expect_red(replace_text("flake.nix", '"sha256-LumYYi0ryF7WaaGuZ6k+DNi564hn/IOda9bw9iLrDYA="', "lib.fakeHash"))
+    expect_red(replace_text("flake.nix", " cloudflared opentofu terraform-backend-git ];", " cloudflared opentofu ];"))
+    expect_red(replace_text("flake.nix", 'terraform_backend_git = "${terraform-backend-git}/bin/terraform-backend-git";',
+                            'terraform_backend_git = "/usr/bin/terraform-backend-git";'))
+    expect_red(replace_text("flake.nix", "          grep -qF -- --address backend.help\n", ""))
+    expect_red(replace_text("flake.nix", "grep -qF -- --address backend.help", "true"))
+    expect_red(replace_text("flake.nix", '"$target" --help >backend.help 2>&1 || true', "true >backend.help"))
     expect_red(replace_text(check, "HTTPS_PROXY=http://127.0.0.1:9 HTTP_PROXY=http://127.0.0.1:9 ", ""))
     expect_red(replace_text(check, ' --real-ssh "$tool"', ""))
     # The state proof job enters only for the dispatched expected SHA on attempt 1; the input stays required.

@@ -11,8 +11,36 @@
       # provider in its closure, so a run acquires nothing from a registry.
       cloudflared = assert pkgs.cloudflared.version == "2026.6.1"; pkgs.cloudflared;
       opentofu = pkgs.opentofu.withPlugins (p: [ p.cloudflare_cloudflare ]);
+      # GitHub-ref state transport (windows #49): the same upstream terraform-backend-git v0.1.12 release binary and
+      # hash as windows infra/git-state, executed unmodified through Nix's own glibc loader. Shipping it starts no
+      # backend and selects no state location; the selected rent-root workflow stays hard-inactive.
+      gitBackendElf = pkgs.runCommand "terraform-backend-git-0.1.12-elf" {
+        src = pkgs.fetchurl {
+          url = "https://github.com/plumber-cd/terraform-backend-git/releases/download/v0.1.12/terraform-backend-git-linux-amd64";
+          hash = "sha256-LumYYi0ryF7WaaGuZ6k+DNi564hn/IOda9bw9iLrDYA=";
+        };
+      } ''
+        install -Dm755 "$src" "$out/bin/terraform-backend-git-elf"
+      '';
+      # The toolchain cannot be built unless this exact wrapper really runs the pinned binary: its own help must
+      # offer the loopback --address flag. Nothing is served.
+      terraform-backend-git = pkgs.writeTextFile {
+        name = "terraform-backend-git";
+        destination = "/bin/terraform-backend-git";
+        executable = true;
+        text = ''
+          #!${pkgs.runtimeShell}
+          exec ${pkgs.stdenv.cc.bintools.dynamicLinker} \
+            --library-path ${pkgs.glibc}/lib \
+            ${gitBackendElf}/bin/terraform-backend-git-elf "$@"
+        '';
+        checkPhase = ''
+          "$target" --help >backend.help 2>&1 || true
+          grep -qF -- --address backend.help
+        '';
+      };
       # curl signs the state proof's scoped S3 object requests with the temporary credential (aws:amz:auto:s3).
-      packages = with pkgs; [ python3 sops wrangler git gh openssh curl ] ++ [ cloudflared opentofu ];
+      packages = with pkgs; [ python3 sops wrangler git gh openssh curl ] ++ [ cloudflared opentofu terraform-backend-git ];
       # The exact committed source this artifact is built from; a dirty tree cannot produce one.
       rev = self.rev or (throw "envs effect artifact requires a clean committed source");
 
@@ -29,6 +57,7 @@
         sshd = "${pkgs.openssh}/bin/sshd";
         ssh_keygen = "${pkgs.openssh}/bin/ssh-keygen";
         curl = "${pkgs.curl}/bin/curl";
+        terraform_backend_git = "${terraform-backend-git}/bin/terraform-backend-git";
       };
       manifest = pkgs.writeText "envs-effect-toolchain.json" (builtins.toJSON {
         kind = "envs.effectToolchain.v1";
