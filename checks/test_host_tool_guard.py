@@ -10,7 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "adapters"))
 from host_tool_selection import ProposalError, project_root  # noqa: E402
-from host_tool_guard import judge  # noqa: E402
+from host_tool_guard import judge, compose_fixture  # noqa: E402
 
 STORE0 = "/nix/store/" + "a" * 32 + "-older-tool"
 STORE1 = "/nix/store/" + "b" * 32 + "-chosen-tool"
@@ -153,6 +153,62 @@ class GuardTests(unittest.TestCase):
         o["state"], o["store_path"] = "UNKNOWN", STORE0  # impossible geometry
         with self.assertRaises(ProposalError):
             judge(p, desired=d, observed=o, authority=a, previous=e)
+
+    def test_cross_repo_exact_tree_set_is_only_synthetic_and_rejects_old_pin(self):
+        # These are in-memory claimed SOURCE facts, NOT validated GitHub evidence or a
+        # verified current composite. The real resources proposal currently pins older windows.
+        names = {
+            "roccho-dev/windows": (
+                "scope", "build", "rent / build-test-publish", "own / build-test",
+                "dev / fresh-develop-replace-continue", "windows"),
+            "roccho-org/envs": (
+                "repository", "toolchain", "placement-artifact", "placement-author",
+                "placement-windows", "placement-rent", "effect-shape", "clean-start"),
+            "roccho-dev/resources": ("source-vm",),
+        }
+        rows = []
+        for i, (repo, jobs) in enumerate(names.items()):
+            head = str(i + 1) * 40
+            rows.append({
+                "repository": repo, "head": head, "tree": chr(97 + i) * 40,
+                "ci_head": head, "jobs": {name: "SUCCESS" for name in jobs},
+                "windows_pin": None if repo != "roccho-dev/resources"
+                else "d8e980b3dcf502dd2cda3e1d81b92147aad8e0f9",
+            })
+
+        result = compose_fixture(rows)
+        self.assertEqual(result["stage"], "SOURCE_PIN_MISMATCH")
+        self.assertFalse(result["target_ready"])
+        self.assertFalse(result["merge_ready"])
+        self.assertEqual(result["effect"], "FORBIDDEN")
+        self.assertIsNone(result["accepted_q"])
+
+        compatible = copy.deepcopy(rows)
+        compatible[2]["windows_pin"] = compatible[0]["head"]
+        result = compose_fixture(compatible)
+        self.assertEqual(result["stage"], "SYNTHETIC_SOURCE_SET_CANDIDATE")
+        self.assertEqual(result["admission"], "NOT_ADMITTED")
+        self.assertFalse(result["merge_ready"])
+        self.assertFalse(result["target_ready"])
+        self.assertEqual(result["effect"], "FORBIDDEN")
+
+        def interrupted(change, expect=None):
+            altered = copy.deepcopy(compatible)
+            change(altered)
+            if expect is None:
+                with self.assertRaises(ProposalError):
+                    compose_fixture(altered)
+            else:
+                self.assertEqual(compose_fixture(altered)["stage"], expect)
+
+        interrupted(lambda r: r[2]["ci_head"] = "f" * 40, "SOURCE_CI_UNVERIFIED")
+        interrupted(lambda r: r[1]["jobs"].update(repository="SKIPPED"), "SOURCE_CI_UNVERIFIED")
+        interrupted(lambda r: r[0]["jobs"].pop("windows"))
+        interrupted(lambda r: r[0].update(head="latest"))
+        interrupted(lambda r: r[2].update(windows_pin=None))
+        interrupted(lambda r: r[1].update(repository="roccho-dev/resources"))
+        interrupted(lambda r: r[0].update(admitted=True))
+        interrupted(lambda r: r[0]["jobs"].update({"publication": "SUCCESS"}))
 
     def test_no_runtime_or_source_mutation_through_guard(self):
         paths = [ROOT / "contracts/targets.jsonl",
