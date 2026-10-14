@@ -350,7 +350,7 @@ the helper pins its exact candidate commit/tree and unchanged native resources.
 The manual Mail entry previews changes with native
 `plan -input=false -lock=true -detailed-exitcode`, without `-out`.
 An Owner-selected apply uses
-`apply -input=false -lock=true -auto-approve`; OpenTofu re-plans the approved
+`apply -input=false -lock=true -auto-approve -json`; OpenTofu re-plans the approved
 fixed source and target at execution time. Approval concerns convergence to
 that declaration, not byte equality with an earlier speculative plan.
 
@@ -373,7 +373,12 @@ preview-to-apply chain or automatic retry. A preview delta is reported as
 action names and consistent add/change/remove counts. Native messages,
 attributes, IDs and output values never enter that summary. Missing,
 unrecognized or inconsistent inventory is `PREVIEW_UNPROVEN`, not permission
-to apply. Apply success is only `APPLIED_UNVERIFIED`.
+to apply. Apply success is only `APPLIED_UNVERIFIED`. A failed apply remains
+`OPERATION_UNPROVEN`; its bounded private JSON capture may identify fixed resource
+labels and numeric HTTP/API codes. Native diagnostic text, URLs and values are
+discarded. Unsupported or malformed evidence yields `UNCLASSIFIED`, with the
+failure/timeout exit retained. Init failures expose only the fixed init stage.
+No failure summary authorizes a retry or recovers a discarded older capture.
 
 `operate-dev-mail-routing` is manual and restricted to the exact canonical
 SHA, `roccho-dev`, first attempt and serialized runs. Its closed operations
