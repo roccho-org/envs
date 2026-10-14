@@ -490,6 +490,54 @@ nix build .#check-age --no-update-lock-file                             # check-
 
 The repository oracle calculates accepted structure and state. Its tests deliberately create invalid states and require RED rather than repeating only happy-path execution.
 
+### GitHub-ref transition: S2 SOURCE only (not activated)
+
+The existing `dev.rent-root` effect workflow is **source-hard-inactive at its job
+admission guard** (`false && roccho-org/envs && proposals`), before any
+Environment secret, artifact/child, old S3/Cloudflare inspect, native apply,
+ciphertext write or Git/PR handoff. All other five effect workflows and the
+independent R2 state proof retain their prior source and ownership.
+
+The `envs-effect rent-root-inspect` entry has a bounded, read-only
+implementation for the **future** approved I/B/K/G process: old R2 S3
+state/lock HEAD observations, native encrypted state pull and Cloudflare
+GET-only finite page inventory, returning public counts but **NOT_PROVEN**
+world/state equivalence. It currently refuses at `source_guard` before
+looking at any secret or spawning any child. CI simulates the read path with
+fixture tools; it never performs real inspection. No key/ref/backend migration,
+activation, provider apply, transport or credential change is authorized by
+this source.
+
+The effect toolchain carries the same pinned upstream `terraform-backend-git`
+v0.1.12 release binary as windows `infra/git-state` (manifest tool
+`terraform_backend_git`). Building the toolchain runs only its `--help` and
+requires the loopback `--address` flag.
+
+`providers/dev-rent-cloudflare/main.tf` now declares only a partial standard
+`backend "http" {}`; resources, providers and enforced encryption are
+unchanged. Its state location is the `state_backend` of `dev.rent-root` in
+`contracts/environments.jsonl`: repository `roccho-org/envs` (stable id
+1391871347), ref `refs/heads/tofu-state`, state `state/dev-rent-cloudflare.json`
+and the upstream lock ref `refs/heads/locks/state/dev-rent-cloudflare.json`.
+For one operation a transient loopback `terraform-backend-git` child serves that
+ref; only that child receives the workflow's ref principal (`GITHUB_TOKEN`),
+with the fixed non-secret `GIT_USERNAME=x-access-token` that upstream v0.1.12
+HTTPS authentication requires beside a token.
+The rent-root flow above, with `-backend-config` bucket and key, is the
+**former R2 S3 era**: that apply (`rent-root`) is now closed in source.
+
+Two future entries are composed but closed in source, like inspect:
+`envs-effect rent-root-migrate` (standard `tofu init -migrate-state` from the
+former S3 backend, read through a source-declared legacy root, onto the empty
+GitHub ref, holding both locks; it requires the same lineage and resources and
+at most one serial step, and retains the former object) and
+`envs-effect rent-root-plan` (the unchanged root planned against the existing
+GitHub-ref state must be empty; any change refuses, nothing is applied or
+saved). `rent-root`, `rent-root-inspect`, `rent-root-migrate` and
+`rent-root-plan` each refuse at `source_guard` before any contract, tool, secret
+or child. No workflow selects migrate or plan yet; activation, real transport,
+custody and every live effect need their own later phase grants.
+
 ## Family calendar Cloudflare Pages (bounded exception)
 
 The static product bytes are owned by `roccho-dev/apps/packages/calendar/src`. This repo owns only one explicitly authorized provider upload of an exact, CI-green apps source to the fixed `roccho-family-calendar-2026` Direct Upload Pages project. `dev-projection` supplies its existing `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` to a single bounded effect step. No secret is transferred to apps, no Pages secret is projected into the browser, and this is not a generic deployment platform.

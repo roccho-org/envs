@@ -10,6 +10,7 @@ import os
 import getpass
 import re
 import secrets
+import socket
 import ssl
 import subprocess
 import sys
@@ -32,7 +33,8 @@ HANDOFF = Path("handoffs/dev-jev-api.json")
 FLAKE_LOCK = Path("flake.lock")
 RECEIPT_KIND = "envs.projectionReceipt.v1"
 TOOLCHAIN_KIND = "envs.effectToolchain.v1"
-TOOLCHAIN_TOOLS = ("python3", "sops", "wrangler", "git", "gh", "tofu", "cloudflared", "ssh", "sshd", "ssh_keygen", "curl")
+TOOLCHAIN_TOOLS = ("python3", "sops", "wrangler", "git", "gh", "tofu", "cloudflared", "ssh", "sshd", "ssh_keygen", "curl",
+                   "terraform_backend_git")
 STORE = Path("/nix/store")
 # Rent tunnel (windows #14): a provider-issued Named Tunnel token, encrypted to exactly one target age recipient.
 RENT_PLANE = "dev.rent-tunnel"
@@ -52,6 +54,62 @@ ROOT_CONFIG = Path("providers/dev-rent-cloudflare/main.tf")
 ROOT_SECRETS = ("CLOUDFLARE_API_TOKEN", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "RENT_STATE_PASSPHRASE")
 # One key provider and method name for the state's life (a rotation would add a new name with this one as fallback).
 ROOT_KEY_NAME = "k0"
+# S2 registers a real read-only inspect implementation, but makes live admission
+# impossible from this SOURCE commit. A separately reviewed readiness source
+# grant is required before any caller may read Environment secrets or spawn.
+ROOT_INSPECT_SOURCE_ACTIVE = False
+ROOT_INSPECT_RESOURCE_TYPES = frozenset({
+    "cloudflare_zero_trust_tunnel_cloudflared",
+    "cloudflare_zero_trust_tunnel_cloudflared_config",
+    "cloudflare_dns_record",
+    "cloudflare_zero_trust_access_service_token",
+    "cloudflare_zero_trust_access_policy",
+    "cloudflare_zero_trust_access_application",
+})
+ROOT_INSPECT_STATE_LIMIT = 1048576
+# S2 moves the declared root to the standard HTTP backend, served for one operation by a transient loopback
+# terraform-backend-git child that keeps the state on the GitHub ref below. No source path may plan, apply or create
+# against that backend before a separately reviewed activation grant: apply, backend migration and the backend-only
+# plan each refuse at their first line, before any contract, environment, manifest, secret or child.
+ROOT_APPLY_SOURCE_ACTIVE = False
+ROOT_MIGRATE_SOURCE_ACTIVE = False
+ROOT_PLAN_SOURCE_ACTIVE = False
+ROOT_STATE_BACKEND = {
+    "kind": "terraform-backend-git", "repository": "roccho-org/envs", "repository_id": 1391871347,
+    "ref": "refs/heads/tofu-state", "state_path": "state/dev-rent-cloudflare.json",
+    "lock_ref": "refs/heads/locks/state/dev-rent-cloudflare.json",
+}
+# The existing workflow principal for the state ref; it reaches only the backend child, never OpenTofu or argv.
+ROOT_STATE_GIT_TOKEN = "GITHUB_TOKEN"
+# Upstream v0.1.12 HTTPS basic auth refuses without GIT_USERNAME even for a token (storages/git/git.go authBasicHTTP);
+# GitHub accepts any fixed username with a token. Non-secret, so it is a source literal, not an Environment input.
+ROOT_STATE_GIT_USERNAME = "x-access-token"
+ROOT_BACKEND_READY_ATTEMPTS = 50
+# The root's former R2 S3 backend, used only to read and migrate the existing state until the retire source removes
+# it: exactly the partial S3 block and enforced encryption the root declared before S2, with nothing to plan or apply.
+ROOT_LEGACY_S3_CONFIG = """terraform {
+  backend "s3" {
+    region                      = "auto"
+    use_lockfile                = true
+    use_path_style              = true
+    skip_credentials_validation = true
+    skip_region_validation      = true
+    skip_requesting_account_id  = true
+    skip_metadata_api_check     = true
+    skip_s3_checksum            = true
+  }
+
+  encryption {
+    state {
+      enforced = true
+    }
+    plan {
+      enforced = true
+    }
+  }
+}
+"""
+
 # The format secrets.token_hex(32) produces, placed inside an HCL string: a format check, not a strength proof.
 ROOT_PASSPHRASE = re.compile(r"^[0-9a-f]{64}$")
 # The windows slot rule (Get-RentAccessProblem) for each line: 1-1024 printable ASCII characters.
@@ -618,7 +676,8 @@ def validate_contracts(root: Path = ROOT) -> dict[str, dict[str, dict[str, Any]]
         if row["kind"] != "envs.secretPlane.v1":
             continue
         declared = inputs.get(identity, {})
-        require(set(row) == SECRET_PLANE_KEYS | set(declared), f"{identity} fields differ")
+        extra = {"state_backend"} if identity == ROOT_PLANE else set()
+        require(set(row) == SECRET_PLANE_KEYS | set(declared) | extra, f"{identity} fields differ")
         require((row["github_environment"] is not None) == bool(declared), f"{identity} required inputs differ")
         for group, entries in declared.items():
             require(row[group] == entries, f"{identity} {group} differ")
@@ -679,6 +738,13 @@ def validate_contracts(root: Path = ROOT) -> dict[str, dict[str, dict[str, Any]]
     require(root_plane["github_environment"] == rent["github_environment"] and root_plane["owner"] == "envs"
             and root_plane["source_kind"] == "provider_issued" and root_plane["target_kind"] == "public_sops",
             f"{ROOT_PLANE} plane differs")
+    # The GitHub-ref state location: this repository's stable identity, a dedicated ref, a state path unique in it and
+    # the upstream backend's own lock ref for that path.
+    backend = root_plane["state_backend"]
+    require(backend == ROOT_STATE_BACKEND and backend["lock_ref"] == "refs/heads/locks/" + backend["state_path"]
+            and sum(1 for row in envs.values() if row.get("state_backend", {}).get("state_path") == backend["state_path"]
+                    and row.get("state_backend", {}).get("repository") == backend["repository"]) == 1,
+            f"{ROOT_PLANE} GitHub-ref state backend differs")
     if root_plane["migration_state"] == "ACTIVE":
         require(root_plane["active_github_environment"] == "dev-rent-tunnel" and rent_cipher.is_file()
                 and client_cipher.is_file(), f"{ROOT_PLANE} is ACTIVE only with both envelopes")
@@ -1207,6 +1273,10 @@ def rent_root(root: Path = ROOT, runner: Runner = default_runner, progress: dict
     # progress["stage"] names how far it got, so a failure is reported as a closed kind and stage only; a captured
     # non-zero init child also leaves progress["init_hint"], its closed and unverified failure facts.
     progress = {} if progress is None else progress
+    # S2: the root now declares the GitHub-ref HTTP backend, so this S3-era apply refuses before any input or child
+    # until a separately reviewed activation source re-binds it.
+    progress["stage"] = "source_guard"
+    require(ROOT_APPLY_SOURCE_ACTIVE, "rent-root apply is source-hard-inactive")
     progress["stage"] = "gate"
     contracts = validate_contracts(root)
     tools = toolchain(root)
@@ -1833,6 +1903,311 @@ def s3_object(tools: Mapping[str, str], runner: Runner, endpoint: str, credentia
             "transient": not complete, "body": result.stdout if ok else None,
             "code": "none" if parsed is None else parsed if parsed in known else "other"}
 
+
+
+def rent_inspect_head(tools: Mapping[str, str], inputs: Mapping[str, str], runner: Runner, object_key: str) -> str:
+    # The existing persistent root's exact R2 object or native .tflock.
+    # curl's SigV4 config enters through stdin only: no secret argv, file,
+    # shell, proxy, redirect, request body or retry. Never emit response bytes.
+    account = inputs["CLOUDFLARE_ACCOUNT_ID"]
+    bucket = inputs["RENT_STATE_BUCKET"]
+    require(re.fullmatch(r"[a-z0-9][a-z0-9.-]{2,62}", bucket) is not None and ".." not in bucket,
+            "rent inspect bucket is not a closed R2 object name")
+    require(object_key.startswith("state/") and ".." not in object_key and "//" not in object_key
+            and re.fullmatch(r"[a-zA-Z0-9_./-]{1,180}", object_key) is not None,
+            "rent inspect object key is not bounded")
+    endpoint = r2_endpoint(account)
+    lines = [
+        f"url = {curl_value(f'{endpoint}/{bucket}/{object_key}')}",
+        'request = "HEAD"', 'aws-sigv4 = "aws:amz:auto:s3"',
+        f"user = {curl_value(inputs['AWS_ACCESS_KEY_ID'] + ':' + inputs['AWS_SECRET_ACCESS_KEY'])}",
+        'proto = "=https"', 'noproxy = "*"', "silent",
+        'connect-timeout = "10"', 'max-time = "30"',
+        'write-out = "%{stderr}%{http_code}"',
+    ]
+    if os.environ.get("SSL_CERT_FILE"):
+        require(in_store(os.environ["SSL_CERT_FILE"]), "rent inspect CA bundle is not Nix-owned")
+        lines.append(f"cacert = {curl_value(os.environ['SSL_CERT_FILE'])}")
+    result = runner([tools["curl"], "-q", "-I", "--config", "-"],
+                    ("\n".join(lines) + "\n").encode(), clean_env(tools, {}))
+    code = result.stderr.strip()
+    require(result.returncode == 0 and code in (b"200", b"404")
+            and len(result.stdout) <= 4096, "rent inspect S3 HEAD is UNKNOWN")
+    return "PRESENT" if code == b"200" else "ABSENT"
+
+
+def root_scratch(prefix: str) -> tuple[Path, Path]:
+    # A fresh owner-only scratch (an empty HOME and the root's working copy), retained like rent-root's.
+    scratch = Path(tempfile.mkdtemp(prefix=prefix))
+    home, work = scratch / "home", scratch / "root"
+    home.mkdir(mode=0o700)
+    work.mkdir(mode=0o700)
+    return home, work
+
+
+def legacy_root_env(tools: Mapping[str, str], inputs: Mapping[str, str], home: Path) -> dict[str, str]:
+    # Only what the former S3 state needs: its R2 credential and endpoint and the state encryption. No provider token.
+    return clean_env(tools, {
+        "HOME": str(home), "AWS_ACCESS_KEY_ID": inputs["AWS_ACCESS_KEY_ID"],
+        "AWS_SECRET_ACCESS_KEY": inputs["AWS_SECRET_ACCESS_KEY"],
+        "AWS_ENDPOINT_URL_S3": r2_endpoint(inputs["CLOUDFLARE_ACCOUNT_ID"]),
+        "AWS_EC2_METADATA_DISABLED": "true",
+        "TF_ENCRYPTION": encryption_config(ROOT_KEY_NAME, inputs["RENT_STATE_PASSPHRASE"]),
+        "TF_IN_AUTOMATION": "1", "TF_INPUT": "0",
+    })
+
+
+def root_state_identity(payload: bytes) -> dict[str, Any]:
+    # The root's own state, in memory only: a lineage, a positive serial and exactly the six owned resources.
+    require(0 < len(payload) <= ROOT_INSPECT_STATE_LIMIT, "rent-root state size UNKNOWN")
+    try:
+        state = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise EnvsError("rent-root state is not valid JSON") from None
+    require(isinstance(state, dict) and isinstance(state.get("lineage"), str) and state["lineage"]
+            and type(state.get("serial")) is int and state["serial"] > 0,
+            "rent-root state identity UNKNOWN")
+    resources = state.get("resources")
+    require(isinstance(resources, list), "rent-root managed resource set UNKNOWN")
+    managed = [item for item in resources if isinstance(item, dict) and item.get("mode") == "managed"]
+    require(len(managed) == len(ROOT_INSPECT_RESOURCE_TYPES)
+            and {item.get("type") for item in managed} == ROOT_INSPECT_RESOURCE_TYPES
+            and all(item.get("name") == "rent" for item in managed),
+            "rent-root state owned-resource identity UNKNOWN")
+    return state
+
+
+def legacy_root_state(tools: Mapping[str, str], inputs: Mapping[str, str], work: Path, env: Mapping[str, str],
+                      runner: Runner) -> dict[str, Any]:
+    # The former S3 backend from source alone (the root itself now declares HTTP); state pull reads it into memory.
+    (work / "main.tf").write_text(ROOT_LEGACY_S3_CONFIG, encoding="utf-8")
+    tofu(tools, work, env, runner, "init", "-input=false", "-no-color",
+         f"-backend-config=bucket={inputs['RENT_STATE_BUCKET']}", f"-backend-config=key={inputs['RENT_STATE_KEY']}")
+    return root_state_identity(tofu(tools, work, env, runner, "state", "pull"))
+
+
+LocalGet = Callable[[str], tuple[int, bytes]]
+
+
+def default_local_get(url: str) -> tuple[int, bytes]:
+    # The loopback backend only: no proxy or retry, and the reply stays in this process.
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with opener.open(urllib.request.Request(url, method="GET"), timeout=5) as reply:
+            return reply.status, reply.read(ROOT_INSPECT_STATE_LIMIT + 1)
+    except urllib.error.HTTPError as exc:
+        return exc.code, b""
+    except (urllib.error.URLError, OSError):
+        return 0, b""
+
+
+def loopback_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+def root_backend_url(port: int) -> str:
+    query = urllib.parse.urlencode({
+        "type": "git", "repository": f"https://github.com/{ROOT_STATE_BACKEND['repository']}.git",
+        "ref": ROOT_STATE_BACKEND["ref"].removeprefix("refs/heads/"), "state": ROOT_STATE_BACKEND["state_path"],
+    })
+    return f"http://127.0.0.1:{port}/?{query}"
+
+
+def root_backend_config(url: str) -> list[str]:
+    # The standard HTTP backend's own state and lock protocol against the loopback child.
+    return [f"-backend-config=address={url}", f"-backend-config=lock_address={url}",
+            f"-backend-config=unlock_address={url}", "-backend-config=lock_method=LOCK",
+            "-backend-config=unlock_method=UNLOCK"]
+
+
+def root_ref_principal(root: Path) -> str:
+    token = os.environ.get(ROOT_STATE_GIT_TOKEN, "")
+    require(BEARER.fullmatch(token) is not None, "rent-root state ref principal is not bound")
+    reject_live_values(root, ROOT_STATE_GIT_TOKEN, [token])
+    return token
+
+
+def start_root_backend(tools: Mapping[str, str], home: Path, token: str, spawn: Spawn, local_get: LocalGet,
+                       sleep: Callable[[float], None]) -> tuple[Any, str, str]:
+    # One transient upstream child on loopback for this one operation; only it receives the ref principal. Its GET is
+    # the standard HTTP backend read: 200 with a body is PRESENT, 204 or 404 ABSENT, anything else UNKNOWN.
+    port = loopback_port()
+    url = root_backend_url(port)
+    process = spawn([tools["terraform_backend_git"], "--address", f"127.0.0.1:{port}"],
+                    clean_env(tools, {"HOME": str(home), "GIT_USERNAME": ROOT_STATE_GIT_USERNAME,
+                                      ROOT_STATE_GIT_TOKEN: token}))
+    try:
+        for _ in range(ROOT_BACKEND_READY_ATTEMPTS):
+            require(process.poll() is None, "rent-root state backend exited")
+            status, body = local_get(url)
+            if status == 200 and body.strip():
+                return process, url, "PRESENT"
+            if status in (204, 404):
+                return process, url, "ABSENT"
+            require(status == 0, "rent-root GitHub-ref state is UNKNOWN")
+            sleep(0.2)
+        raise EnvsError("rent-root state backend not ready")
+    except BaseException:
+        stop(process)
+        raise
+
+
+def root_s3_inventory(tools: Mapping[str, str], inputs: Mapping[str, str], runner: Runner) -> None:
+    key = inputs["RENT_STATE_KEY"]
+    require(key.startswith("state/") and key.endswith(".tfstate") and ".." not in key,
+            "rent-root requires the declared old-S3 state key")
+    require(rent_inspect_head(tools, inputs, runner, key) == "PRESENT", "rent-root old-S3 state missing or UNKNOWN")
+    require(rent_inspect_head(tools, inputs, runner, key + ".tflock") == "ABSENT",
+            "rent-root old-S3 lock present or UNKNOWN")
+
+
+def rent_root_migrate(root: Path = ROOT, *, runner: Runner = default_runner, spawn: Spawn = default_spawn,
+                      local_get: LocalGet = default_local_get, sleep: Callable[[float], None] = time.sleep,
+                      progress: dict[str, str] | None = None) -> dict[str, Any]:
+    # Standard OpenTofu backend migration of the existing state from the former S3 backend to the GitHub-ref HTTP
+    # backend, holding both native locks: same lineage and resources, the serial kept or advanced once by the
+    # migration write. The former object is retained; no plan, apply, import, unlock or retry.
+    progress = {} if progress is None else progress
+    progress["stage"] = "source_guard"
+    require(ROOT_MIGRATE_SOURCE_ACTIVE, "rent-root backend migration is source-hard-inactive")
+    progress["stage"] = "contracts"
+    contracts = validate_contracts(root)
+    tools = toolchain(root)
+    inputs = gate(root, contracts, ROOT_PLANE)
+    require(ROOT_PASSPHRASE.fullmatch(inputs["RENT_STATE_PASSPHRASE"]) is not None,
+            "rent-root migration encryption input invalid")
+    for name in ROOT_SECRETS:
+        reject_live_values(root, name, [inputs[name]])
+    token = root_ref_principal(root)
+    progress["stage"] = "s3_head"
+    root_s3_inventory(tools, inputs, runner)
+    progress["stage"] = "state_read"
+    home, work = root_scratch("envs-rent-migrate-")
+    env = legacy_root_env(tools, inputs, home)
+    before = legacy_root_state(tools, inputs, work, env, runner)
+    progress["stage"] = "backend"
+    process, url, target = start_root_backend(tools, home, token, spawn, local_get, sleep)
+    try:
+        require(target == "ABSENT", "rent-root GitHub-ref state already present or UNKNOWN; no overwrite")
+        progress["stage"] = "migrate"
+        (work / "main.tf").write_bytes((root / ROOT_CONFIG).read_bytes())
+        tofu(tools, work, env, runner, "init", "-input=false", "-no-color", "-migrate-state", "-force-copy",
+             "-lock=true", *root_backend_config(url))
+        progress["stage"] = "readback"
+        after = root_state_identity(tofu(tools, work, env, runner, "state", "pull"))
+    finally:
+        stop(process)
+    require(after["lineage"] == before["lineage"] and after["resources"] == before["resources"]
+            and after["serial"] in (before["serial"], before["serial"] + 1),
+            "rent-root migrated state identity differs")
+    progress["stage"] = "complete"
+    return {
+        "kind": "envs.rentRootMigrate.v1", "status": "BACKEND_MIGRATED", "lineage": "UNCHANGED",
+        "resources": "UNCHANGED", "serial": "UNCHANGED" if after["serial"] == before["serial"] else "MIGRATION_WRITE",
+        "old_state": "RETAINED", "plan": "NOT_RUN", "apply": "NOT_RUN",
+    }
+
+
+def rent_root_plan(root: Path = ROOT, *, runner: Runner = default_runner, spawn: Spawn = default_spawn,
+                   local_get: LocalGet = default_local_get, sleep: Callable[[float], None] = time.sleep,
+                   progress: dict[str, str] | None = None) -> dict[str, Any]:
+    # Backend-only proof: the unchanged root planned by standard OpenTofu against the existing GitHub-ref state must
+    # be empty. Any planned change, or a plan failure, refuses. Nothing is applied, imported or saved.
+    progress = {} if progress is None else progress
+    progress["stage"] = "source_guard"
+    require(ROOT_PLAN_SOURCE_ACTIVE, "rent-root backend-only plan is source-hard-inactive")
+    progress["stage"] = "contracts"
+    contracts = validate_contracts(root)
+    tools = toolchain(root)
+    inputs = gate(root, contracts, ROOT_PLANE)
+    require(ROOT_PASSPHRASE.fullmatch(inputs["RENT_STATE_PASSPHRASE"]) is not None,
+            "rent-root plan encryption input invalid")
+    for name in ROOT_SECRETS:
+        reject_live_values(root, name, [inputs[name]])
+    token = root_ref_principal(root)
+    home, work = root_scratch("envs-rent-plan-")
+    (work / "main.tf").write_bytes((root / ROOT_CONFIG).read_bytes())
+    env = {key: value for key, value in root_env(tools, inputs, home).items() if not key.startswith("AWS_")}
+    progress["stage"] = "backend"
+    process, url, target = start_root_backend(tools, home, token, spawn, local_get, sleep)
+    try:
+        require(target == "PRESENT", "rent-root GitHub-ref state absent or UNKNOWN; nothing to plan against")
+        progress["stage"] = "init"
+        tofu(tools, work, env, runner, "init", "-input=false", "-no-color", "-lock=true", *root_backend_config(url))
+        progress["stage"] = "plan"
+        result = runner([tools["tofu"], f"-chdir={work}", "plan", "-input=false", "-no-color", "-lock=true",
+                         "-detailed-exitcode"], None, env)
+    finally:
+        stop(process)
+    require(result.returncode == 0, "rent-root backend-only plan is not empty or failed; no apply")
+    progress["stage"] = "complete"
+    return {"kind": "envs.rentRootPlan.v1", "status": "EMPTY_PLAN", "apply": "NOT_RUN", "saved_plan": "NONE"}
+
+
+def rent_root_inspect(root: Path = ROOT, *, runner: Runner = default_runner,
+                      api: Api = default_api, progress: dict[str, str] | None = None) -> dict[str, Any]:
+    # First gate is compile-time/source-owned and cannot be flipped by env,
+    # a workflow input or CLI argument. Tests patch it only with fake children.
+    progress = {} if progress is None else progress
+    progress["stage"] = "source_guard"
+    require(ROOT_INSPECT_SOURCE_ACTIVE, "rent-root inspect is source-hard-inactive")
+    progress["stage"] = "contracts"
+    contracts = validate_contracts(root)
+    tools = toolchain(root)
+    inputs = gate(root, contracts, ROOT_PLANE)
+    require(ROOT_PASSPHRASE.fullmatch(inputs["RENT_STATE_PASSPHRASE"]) is not None,
+            "rent-root inspect encryption input invalid")
+    for name in ROOT_SECRETS:
+        reject_live_values(root, name, [inputs[name]])
+    key = inputs["RENT_STATE_KEY"]
+    require(key.startswith("state/") and key.endswith(".tfstate") and ".." not in key,
+            "rent-root inspect requires the declared old-S3 state key")
+
+    progress["stage"] = "s3_head"
+    require(rent_inspect_head(tools, inputs, runner, key) == "PRESENT",
+            "rent-root old-S3 state missing or UNKNOWN")
+    require(rent_inspect_head(tools, inputs, runner, key + ".tflock") == "ABSENT",
+            "rent-root old-S3 lock present or UNKNOWN")
+
+    # Existing RootRunner/standard OpenTofu, in an owner-only scratch: init
+    # configures ONLY old S3 and state pull reads it; no plan/apply/import/write.
+    # State plaintext remains in process memory, never a file, log or receipt.
+    progress["stage"] = "state_read"
+    home, work = root_scratch("envs-rent-inspect-")
+    state = legacy_root_state(tools, inputs, work, legacy_root_env(tools, inputs, home), runner)
+    managed = [item for item in state["resources"] if item.get("mode") == "managed"]
+
+    # Cloudflare GET-only bounded pages. Counts intentionally do not claim
+    # object identity, equality to state, complete Q or an accepted delta.
+    progress["stage"] = "cloudflare_read"
+    account, zone, token = (inputs[name] for name in
+                            ("CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_ZONE_ID", "CLOUDFLARE_API_TOKEN"))
+    routes = (
+        ("tunnels", f"/accounts/{account}/cfd_tunnel?per_page=50"),
+        ("applications", f"/accounts/{account}/access/apps?per_page=50"),
+        ("service_tokens", f"/accounts/{account}/access/service_tokens?per_page=50"),
+        ("dns", f"/zones/{zone}/dns_records?per_page=50"),
+    )
+    counts: dict[str, int] = {}
+    for label, path in routes:
+        status, reply = api("GET", path, token, None)
+        require(status == 200 and isinstance(reply, dict) and reply.get("success") is True,
+                "rent-root Cloudflare read is UNKNOWN")
+        values, page = reply.get("result"), reply.get("result_info")
+        require(isinstance(values, list) and len(values) <= 50
+                and isinstance(page, dict) and type(page.get("total_pages")) is int
+                and page["total_pages"] == 1, "rent-root Cloudflare inventory page is UNKNOWN")
+        counts[label] = len(values)
+    progress["stage"] = "complete"
+    return {
+        "kind": "envs.rentRootInspect.v1", "status": "BOUNDED_READ_ONLY",
+        "old_state": "PRESENT_ENCRYPTED_READ", "old_lock": "ABSENT",
+        "managed_root_resources": len(managed), "cloudflare_counts": counts,
+        "world_state_equivalence": "NOT_PROVEN", "provider_delta_F": "NOT_PROVEN",
+        "native_migration": "NOT_RUN", "effect": "NONE",
+    }
 
 def s3_facts(operation: Mapping[str, Any]) -> dict[str, Any]:
     if operation["ok"]:
@@ -2771,6 +3146,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     sub.add_parser("rent-client")
     # Applies the persistent root and seals both envelopes; its inputs come only from the declared environment.
     sub.add_parser("rent-root")
+    # S2 source composes the closed future read-only entry, never activates it.
+    sub.add_parser("rent-root-inspect")
+    # S2 source composes the backend-only migration and empty-plan proof onto the GitHub ref; neither is activated.
+    sub.add_parser("rent-root-migrate")
+    sub.add_parser("rent-root-plan")
     sub.add_parser("rent-access-probe")
     sub.add_parser("rent-access-locate")
     sub.add_parser("rent-state-proof")
@@ -2827,6 +3207,29 @@ def main(argv: Sequence[str] | None = None) -> int:
                     print(f"RENT_ROOT_INIT_HINT_UNVERIFIED={progress['init_hint']}", file=sys.stderr)
                 return 1
             print(json.dumps(result, indent=2, sort_keys=True))
+        elif args.command == "rent-root-inspect":
+            # Closed source/phase gate runs before any contract, env, tool,
+            # secret read or child. Never disclose traceback or secret input.
+            progress: dict[str, str] = {}
+            try:
+                result = rent_root_inspect(root, progress=progress)
+            except Exception as exc:
+                kind = failure_class(exc) if isinstance(exc, STATE_FAILURES) else "other"
+                print(f"RENT_ROOT_INSPECT=RED: {kind} at {progress.get('stage', 'source_guard')}", file=sys.stderr)
+                return 1
+            print(json.dumps(result, sort_keys=True))
+        elif args.command in {"rent-root-migrate", "rent-root-plan"}:
+            # Same closed failure surface: a kind and a stage, never a message, child output or value.
+            progress = {}
+            label = "RENT_ROOT_MIGRATE" if args.command == "rent-root-migrate" else "RENT_ROOT_PLAN"
+            try:
+                result = (rent_root_migrate if args.command == "rent-root-migrate" else rent_root_plan)(
+                    root, progress=progress)
+            except Exception as exc:
+                kind = failure_class(exc) if isinstance(exc, STATE_FAILURES) else "other"
+                print(f"{label}=RED: {kind} at {progress.get('stage', 'source_guard')}", file=sys.stderr)
+                return 1
+            print(json.dumps(result, sort_keys=True))
         elif args.command in {"rent-access-probe", "rent-access-locate"}:
             result = access_probe(root, locate_only=args.command == "rent-access-locate")
             print(json.dumps(result, indent=2, sort_keys=True))

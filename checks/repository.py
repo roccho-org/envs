@@ -213,10 +213,27 @@ OCI_ROUNDTRIP = ('"$tool/python3" -I checks/test_jev_api.py --sops "$tool/sops"'
                  ' --age-keygen "$RUNNER_TEMP/check-age/bin/age-keygen"')
 # The author dispatch names one declared binding; each has exactly one literal step carrying only its own inputs.
 AUTHOR_STEP = re.compile(r"(?ms)^      - name: [^\n]+\n        if: inputs\.target == '([a-z.-]+)'\n(.*?)(?=^      - name: |\Z)")
-EFFECT_PACKAGES = "packages = with pkgs; [ python3 sops wrangler git gh openssh curl ] ++ [ cloudflared opentofu ];"
+EFFECT_PACKAGES = ("packages = with pkgs; [ python3 sops wrangler git gh openssh curl ]"
+                   " ++ [ cloudflared opentofu terraform-backend-git ];")
 PROBE_PINS = (
     'cloudflared = assert pkgs.cloudflared.version == "2026.6.1"; pkgs.cloudflared;',
     "opentofu = pkgs.opentofu.withPlugins (p: [ p.cloudflare_cloudflare ]);",
+)
+# GitHub-ref state transport: the exact upstream v0.1.12 release binary windows infra/git-state also pins, run
+# unmodified through the Nix loader. The toolchain build itself executes it (the existing check builds the toolchain),
+# so these lines, including the build-time smoke check, must each appear exactly once.
+BACKEND_PINS = (
+    'gitBackendElf = pkgs.runCommand "terraform-backend-git-0.1.12-elf" {',
+    '          url = "https://github.com/plumber-cd/terraform-backend-git/releases/download/v0.1.12/'
+    'terraform-backend-git-linux-amd64";',
+    '          hash = "sha256-LumYYi0ryF7WaaGuZ6k+DNi564hn/IOda9bw9iLrDYA=";',
+    '      terraform-backend-git = pkgs.writeTextFile {',
+    '          exec ${pkgs.stdenv.cc.bintools.dynamicLinker} \\',
+    '            ${gitBackendElf}/bin/terraform-backend-git-elf "$@"',
+    '        checkPhase = \'\'\n'
+    '          "$target" --help >backend.help 2>&1 || true\n'
+    '          grep -qF -- --address backend.help\n'
+    "        '';",
 )
 TOOLCHAIN_BUILD = 'nix build .#effect-toolchain --no-update-lock-file'
 ARTIFACT_BUILD = 'nix build .#effect-artifact --no-update-lock-file'
@@ -359,8 +376,9 @@ def check_rent_config(source: str) -> None:
     # output printed in clear, and a service-token lifetime fixed in source rather than bound at deployment. Comments
     # never count: /* */ blocks and #, // line comments are dropped first (this root has no # or // inside a string).
     text = re.sub(r"(?m)[ \t]*(#|//).*$", "", re.sub(r"(?s)/\*.*?\*/", "", source))
-    require(text.count('backend "') == 1 and '  backend "s3" {\n' in text and "    use_lockfile                = true\n" in text,
-            "persistent root must use the locked native S3 backend")
+    # S2: the standard HTTP backend, wholly partial; its loopback address and lock endpoints arrive only at init.
+    require(text.count('backend "') == 1 and '  backend "http" {}\n' in text,
+            "persistent root must use the partial standard HTTP backend")
     require("  encryption {\n    state {\n      enforced = true\n    }\n    plan {\n      enforced = true\n    }\n  }\n" in text,
             "persistent root must enforce state and plan encryption")
     require(re.search(r'(?ms)^output "credentials" \{\n  sensitive = true\n', text) is not None,
@@ -842,7 +860,7 @@ def check_workflows(root: Path, environments: dict[str, dict[str, Any]],
         require("workflow_dispatch:" in text, f"{name}: manual dispatch missing")
         require("\n  push:" not in text and "\n  pull_request:" not in text, f"{name}: automatic effect trigger")
         require(f"environment: {row['github_environment']}" in text, f"{name}: static Environment differs")
-        expected_repo = "roccho-org/envs" if name in {"author-dev-jev-api.yml", "probe-dev-mail-routing.yml"} else "roccho-dev/envs"
+        expected_repo = "roccho-org/envs" if name in {"author-dev-jev-api.yml", "probe-dev-mail-routing.yml", "project-dev-rent-tunnel.yml"} else "roccho-dev/envs"
         require(f"github.repository == '{expected_repo}'" in text, f"{name}: repository guard missing")
         require("github.ref_name == 'proposals'" in text, f"{name}: canonical ref guard missing")
         require("ref: ${{ github.sha }}" in text, f"{name}: exact checkout missing")
@@ -861,8 +879,20 @@ def check_workflows(root: Path, environments: dict[str, dict[str, Any]],
     check_author_targets(texts["author-dev-jev-api.yml"], author_targets)
     require(f"{EFFECT_ENTRY} project" in texts["project-dev-jev-api.yml"], "project workflow entry call missing")
     rent = texts["project-dev-rent-tunnel.yml"]
-    require(f"run: '{EFFECT_ENTRY} rent-root'" in rent and rent.count(f"{EFFECT_ENTRY} rent-") == 1,
-            "rent workflow must run only the persistent root entry")
+    # S2: the selected whole-job if is literal false, before Environment
+    # resolution, consumer/artifact, inspect, apply, ciphertext or PR handoff.
+    rent_guard = ("    if: ${{ false && github.repository == 'roccho-org/envs' "
+                  "&& github.ref_name == 'proposals' }}")
+    require(rent.count(rent_guard) == 1 and
+            rent.find(rent_guard) < rent.find("    runs-on:") < rent.find("    environment:"),
+            "selected rent workflow must remain source-hard-inactive before Environment")
+    inspect_entry = f"run: '{EFFECT_ENTRY} rent-root-inspect'"
+    apply_entry = f"run: '{EFFECT_ENTRY} rent-root'"
+    require(rent.count(inspect_entry) == 1 and rent.count(apply_entry) == 1 and
+            rent.count(f"{EFFECT_ENTRY} rent-") == 2 and
+            rent.find("Record effect toolchain identity") < rent.find(inspect_entry) < rent.find(apply_entry)
+            < rent.find("Open ciphertext handoff PR"),
+            "rent must select inspect before apply/handoff, all under one hard-inactive job")
     require('"$tool/git" add ciphertexts/dev-rent-tunnel.sops.yaml ciphertexts/dev-rent-client.sops.yaml '
             'contracts/environments.jsonl\n' in rent and rent.count('"$tool/git" add ') == 1,
             "rent handoff must stage only both ciphertexts and plane state")
@@ -989,10 +1019,12 @@ def check_toolchain(root: Path, adapter) -> None:
     require(len(pinned) == 1 and "inputs." not in FLAKE_NIXPKGS.sub("", flake), "flake must have exactly one pinned nixpkgs input")
     require(adapter.locked_nixpkgs(root)["rev"] == pinned[0], "flake.lock differs from flake.nix")
     for tool in adapter.TOOLCHAIN_TOOLS:
-        require(re.search(rf'(?m)^        {tool} = "\$\{{(pkgs\.[a-z0-9]+|cloudflared|opentofu)\}}/bin/[a-z0-9-]+";$', flake)
-                is not None, f"flake does not provide {tool}")
+        require(re.search(rf'(?m)^        {tool} = "\$\{{(pkgs\.[a-z0-9]+|cloudflared|opentofu|terraform-backend-git)\}}'
+                          r'/bin/[a-z0-9-]+";$', flake) is not None, f"flake does not provide {tool}")
     for pin in PROBE_PINS:
         require(pin in flake, f"flake must pin the probe tool: {pin}")
+    for pin in BACKEND_PINS:
+        require(flake.count(pin) == 1, f"flake must pin and build-check the upstream state backend exactly once: {pin}")
     require(flake.count("packages = with pkgs; [") == 1 and EFFECT_PACKAGES in flake,
             "effect toolchain packages differ; check-only age must stay outside them")
     require(flake.count("pkgs.age") == 1 and "        check-age = pkgs.age;\n" in flake, "check-age must be a separate check-only output")
@@ -1012,6 +1044,43 @@ def check_toolchain(root: Path, adapter) -> None:
     source = (root / "adapters/jev_api.py").read_text(encoding="utf-8")
     for token in ("npx", "--yes", "SOPS_BIN", "NPX_BIN", "WRANGLER_PACKAGE"):
         require(token not in source, f"adapter selects an ambient or runtime tool: {token}")
+    check_root_source_gates(source)
+
+
+# S2: every rent-root entry that could read the root's secrets, spawn a child or act on a backend is closed in source.
+# Each gate is one literal False, and the entry's first statement after naming its stage is that gate.
+ROOT_SOURCE_GATES = {
+    "ROOT_INSPECT_SOURCE_ACTIVE": "def rent_root_inspect(",
+    "ROOT_APPLY_SOURCE_ACTIVE": "def rent_root(",
+    "ROOT_MIGRATE_SOURCE_ACTIVE": "def rent_root_migrate(",
+    "ROOT_PLAN_SOURCE_ACTIVE": "def rent_root_plan(",
+}
+
+
+def check_root_source_gates(source: str) -> None:
+    for gate, entry in ROOT_SOURCE_GATES.items():
+        require(source.count(f"\n{gate} = False\n") == 1 and source.count(f"{gate} =") == 1,
+                f"{gate} must be one literal source-hard-inactive gate")
+        require(source.count(entry) == 1, f"rent-root entry missing: {entry}")
+        body = source[source.find(entry):]
+        body = body[:body.find("\ndef ", 1)]
+        require(source.count(f"require({gate},") == 1 and body.count(f"require({gate},") == 1,
+                f"{gate} must guard only its own entry")
+        statements = [line.strip() for line in body.splitlines()[1:]
+                      if line.strip() and not line.strip().startswith("#") and line.startswith("    ")
+                      and not line.startswith("     ")]
+        first = [line for line in statements if not line.startswith(("progress = ", 'progress["stage"] = '))]
+        require(first and first[0].startswith(f"require({gate},"),
+                f"{gate} must be the first check of its entry, before any input, tool or child")
+    # Upstream v0.1.12 HTTPS basic auth requires GIT_USERNAME beside the token; the child gets exactly this literal.
+    require(source.count('\nROOT_STATE_GIT_USERNAME = "x-access-token"\n') == 1
+            and source.count('"GIT_USERNAME": ROOT_STATE_GIT_USERNAME') == 1 and source.count('"GIT_USERNAME"') == 1,
+            "the state backend child must receive the fixed non-secret GIT_USERNAME exactly once")
+    require(all(name not in source for name in ("GIT_PASSWORD", "GITHUB_TOKEN_FILE", "SSH_PRIVATE_KEY", "SSH_AUTH_SOCK")),
+            "the state backend child takes only the workflow token, never another Git credential route")
+    require(source.count("ROOT_LEGACY_S3_CONFIG") == 2 and 'backend "s3"' in source
+            and source.count('  backend "s3" {\n') == 1,
+            "the former S3 backend may exist only as the one source-declared legacy read root")
 
 
 def check_placement(root: Path) -> None:
