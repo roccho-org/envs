@@ -52,14 +52,16 @@ def invalid_state_envelopes(data: bytes) -> list[bytes]:
 
 
 def preview_journal(delta: bool, marker: str = "SYNTHETIC_PRIVATE_VALUE") -> str:
-    events = [{"type": "version", "tofu": "1.12.3", "ui": "1.0"}]
+    events = [{"type": "version", "tofu": "1.12.3", "ui": "1.0"},
+              {"type": "state_lock_acquire", "@message": marker}]
     if delta:
         for address in ("cloudflare_email_routing_address.gmail[0]", "cloudflare_email_routing_dns.zone[0]"):
             events.append({"type": "planned_change", "@message": marker,
                            "change": {"resource": {"addr": address}, "action": "create"}})
     events.extend([{"type": "change_summary", "changes": {"operation": "plan", "add": 2 if delta else 0,
                                                           "change": 0, "remove": 0}},
-                   {"type": "outputs", "outputs": {"private": {"sensitive": True, "value": marker}}}])
+                   {"type": "outputs", "outputs": {"private": {"sensitive": True, "value": marker}}},
+                   {"type": "state_lock_release", "@message": marker}])
     return "\n".join(json.dumps(event) for event in events) + "\n"
 
 
@@ -83,6 +85,10 @@ def check_preview_summary(mail) -> None:
         for bad in (journal.replace('"1.0"', '"2.0"'), journal.replace('"1.12.3"', '"1.12.2"'),
                     journal.replace('"add": 2', '"add": true'), journal.replace('"add": 2', '"add": 1'),
                     journal.replace('"create"', '"unknown"'), journal.replace('"create"', '"update"'),
+                    journal.replace('"action": "create"', '"action": "create", "importing": {"id": "private"}'),
+                    journal.replace('"action": "create"', '"action": "create", "generated_config": "private"'),
+                    journal.replace('"operation": "plan"', '"operation": "plan", "import": 2'),
+                    journal.replace('"operation": "plan"', '"operation": "plan", "forget": 1'),
                     journal.replace('"addr":', '"addr":"duplicate", "addr":'),
                     journal.replace('cloudflare_email_routing_dns.zone[0]', marker),
                     journal.replace('cloudflare_email_routing_dns.zone[0]', 'cloudflare_email_routing_address.gmail[0]'),

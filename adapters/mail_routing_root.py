@@ -837,14 +837,14 @@ def preview_summary(path: Path, code: int) -> dict:
         for event in events[1:]:
             kind = event.get("type")
             if kind not in ("planned_change", "change_summary", "resource_drift", "refresh_start", "refresh_complete",
-                            "log", "diagnostic", "outputs"):
+                            "state_lock_acquire", "state_lock_release", "log", "diagnostic", "outputs"):
                 raise ValueError("unexpected plan event")
             if kind == "planned_change":
                 change = event["change"]
                 label = labels[change["resource"]["addr"]]
                 action = change["action"]
                 if (label in actions or action not in ("noop", "create", "read", "update", "replace", "delete")
-                        or "previous_resource" in change):
+                        or any(k in change for k in ("previous_resource", "importing", "generated_config"))):
                     raise ValueError("unrecognized change")
                 actions[label] = action
                 totals["add"] += action in ("create", "replace")
@@ -865,6 +865,7 @@ def preview_summary(path: Path, code: int) -> dict:
                 raise ValueError("native diagnostic")
         if (len(summaries) != 1 or summaries[0].get("operation") != "plan"
                 or any(type(summaries[0].get(k)) is not int or summaries[0][k] != v for k, v in totals.items())
+                or any(type(summaries[0].get(k, 0)) is not int or summaries[0].get(k, 0) != 0 for k in ("import", "forget"))
                 or (code == 0 and (any(totals.values()) or any(a not in ("noop", "read") for a in actions.values())))
                 or (code == 2 and not any(totals.values()))):
             raise ValueError("inconsistent native summary")
