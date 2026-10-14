@@ -55,6 +55,9 @@ jobs:
       - name: Test temporary native Tool generation and UNKNOWN/recovery SUT
         run: python3 checks/test_host_tool_transition_sut.py
 
+      - name: Prove real resources Relation and envs Tool q bind same CI Host
+        run: python3 checks/test_host_tool_functional_binding.py
+
       - name: Test cross-repo public SOURCE provenance refusal (offline)
         run: python3 checks/test_host_tool_source_provenance.py
 
@@ -766,6 +769,9 @@ jobs:
 
       - name: Test disposable native generation SUT at exact head
         run: python3 checks/test_host_tool_transition_sut.py
+
+      - name: Prove current Host Relation / D-q integration on exact SOURCE head
+        run: python3 checks/test_host_tool_functional_binding.py
 
       - name: Test public SOURCE provenance refusal at exact source head
         run: python3 checks/test_host_tool_source_provenance.py
