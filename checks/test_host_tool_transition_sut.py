@@ -164,7 +164,6 @@ class LifecycleSUT(unittest.TestCase):
     def test_first_base_only_requires_explicit_d_and_change_guard(self):
         base = self.host.snapshot()
         self.assertEqual(self.host.observe(), ("ABSENT", None))
-        no_d = self.gate(desired=False) if False else None
         no_change = copy.deepcopy(self.authority)
         no_change["change"] = False
         synthetic, stage = self.gate(authority=no_change)
