@@ -75,6 +75,11 @@ def project(proposals: list[dict[str, Any]], targets: list[dict[str, Any]]) -> l
         require(row["kind"] == PROPOSAL_KIND and row["admission"] == "NOT_ADMITTED",
                 "proposal attempted admission")
         target = catalog[target_id]
+        # Match the actual execution OS/architecture in the accepted public target catalog to
+        # the fixed x86_64-linux material BEFORE proposing q. Target ID/owner alone is not ABI proof.
+        require(target.get("platform") == "linux"
+                and target.get("architecture") == "amd64",
+                "target OS/architecture is incompatible with rent Tool material")
         # Only the existing Windows rent consumer shape is proposed here.
         require(target.get("runtime") == "wslc_one_shot"
                 and target.get("slot_owner") == WINDOWS_PRODUCER
