@@ -132,3 +132,70 @@ def evaluate(facts: dict[str, Any]) -> dict[str, Any]:
         "target_ready": False,
         "merge_ready": False,
     }
+
+
+IDENTITY_FIELDS = ("target_ref", "unit_ref", "base", "tool", "launch",
+                   "config_binding", "state_contract")
+
+
+def target_gap(desired: dict[str, Any] | None,
+               observed: dict[str, Any] | None, *,
+               current_revision: str | None = None,
+               affected_effects_resolved: bool | None = None,
+               required_checks: bool | None = None) -> dict[str, Any]:
+    """Compare complete synthetic I(Dq) and I(O). Never classify real NOOP/success.
+
+    Distinguish only-T from B, launch, config and state-contract changes;
+    do not turn SourceNoChange or a matching material q into TargetNOOP.
+    """
+    def result(stage: str, gap: list[str] | None = None) -> dict[str, Any]:
+        return {
+            "kind": "envs.syntheticHostIdentityDiff.v0", "stage": stage,
+            "gap": gap, "admission": "NOT_ADMITTED",
+            "accepted_q": None, "target_noop": "UNPROVEN",
+            "effect": "FORBIDDEN", "target_ready": False,
+            "merge_ready": False,
+        }
+
+    if desired is None:
+        return result("D_NOT_ADMITTED")
+    d = exact_object(desired, {"kind", "selection_revision", "identity"}, "desired I")
+    require(d["kind"] == "envs.syntheticTargetDesired.v0"
+            and type(d["selection_revision"]) is str
+            and d["selection_revision"].startswith("ci-")
+            and len(d["selection_revision"]) <= 80,
+            "invalid synthetic current D revision")
+    d_i = exact_object(d["identity"], set(IDENTITY_FIELDS), "desired identity")
+    for field in IDENTITY_FIELDS:
+        require(type(d_i[field]) is str and bool(d_i[field]) and len(d_i[field]) <= 256,
+                "incomplete or ambiguous D target identity")
+    if observed is None:
+        return result("O_NOT_READ")
+    o = exact_object(observed, {"kind", "identity", "fresh", "valid"}, "observed I")
+    require(o["kind"] == "envs.syntheticTargetObserved.v0"
+            and (o["fresh"] is None or type(o["fresh"]) is bool)
+            and (o["valid"] is None or type(o["valid"]) is bool),
+            "invalid observed target fixture")
+    if o["identity"] is None:
+        return result("O_UNKNOWN_OR_STALE")
+    o_i = exact_object(o["identity"], set(IDENTITY_FIELDS), "observed identity")
+    for field in IDENTITY_FIELDS:
+        require(type(o_i[field]) is str and bool(o_i[field]) and len(o_i[field]) <= 256,
+                "ambiguous observed identity")
+    if d_i["target_ref"] != o_i["target_ref"] or d_i["unit_ref"] != o_i["unit_ref"]:
+        return result("TARGET_OR_UNIT_MISMATCH")
+    if o["fresh"] is not True or o["valid"] is not True:
+        return result("O_UNKNOWN_OR_STALE")
+    if current_revision != d["selection_revision"]:
+        return result("D_REVISION_NOT_CURRENT")
+    if affected_effects_resolved is not True:
+        return result("E_UNKNOWN")
+    if required_checks is not True:
+        return result("REQUIRED_CHECKS_UNPROVEN")
+    difference = [field for field in IDENTITY_FIELDS
+                  if d_i[field] != o_i[field]]
+    if not difference:
+        return result("MATCH_ONLY_NOT_SUCCESS", [])
+    if difference == ["tool"]:
+        return result("SYNTHETIC_TOOL_ONLY_CANDIDATE", difference)
+    return result("DIFFERENT_PLAN_REQUIRED", difference)
