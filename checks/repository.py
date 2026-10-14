@@ -202,6 +202,7 @@ CIPHERTEXTS = {
     "ciphertexts/dev-mail-state.sops.json",
     "ciphertexts/dev-jev-api.sops.yaml", "ciphertexts/dev-rent-tunnel.sops.yaml", "ciphertexts/dev-jev-api.oci-dev.sops.yaml",
     "ciphertexts/dev-rent-client.sops.yaml", "ciphertexts/dev-opencode-go.oci-dev.sops.yaml",
+    "ciphertexts/dev-opencode-go.versapro-own-oci.sops.yaml",
 }
 # The real SOPS roundtrip runs the locked sops with a check-only age that never enters the effect toolchain; the
 # closure tofu joins it so a real root output reaches the production sealing path.
@@ -449,7 +450,7 @@ def author_target_inputs(adapter, contracts: dict[str, dict[str, dict[str, Any]]
     # Each author target's Environment inputs as the adapter reads them, in (namespace, name) form.
     result = {}
     for target in adapter.AUTHOR_TARGETS:
-        plane_id = adapter.GO_PLANE if target == adapter.GO_BINDING else "dev.authoring"
+        plane_id = adapter.GO_PLANE if target in adapter.GO_CIPHERTEXTS else "dev.authoring"
         secrets = {item["name"] for item in contracts["environments"][plane_id]["required_secrets"]}
         result[target] = {("secrets" if item["name"] in secrets else "vars", item["name"])
                           for item in adapter.authoring_inputs(contracts, target)}
