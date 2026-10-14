@@ -120,6 +120,8 @@ def main() -> None:
     expect_red(replace_text(manual, "github.run_attempt == 1", "github.run_attempt >= 1"))
     expect_red(replace_text(manual, "options: [qualify, recover, preview, apply]", "options: [qualify, recover, preview, apply, destroy]"))
     expect_red(replace_text(manual, "|| 'dev-projection' }}", "|| 'dev-authoring' }}"))
+    expect_red(replace_text(manual, "MAIL_STATE_AGE_KEY: ${{ secrets.MAIL_STATE_AGE_KEY }}",
+                            "MAIL_STATE_AGE_KEY: ${{ secrets.SOPS_AGE_KEY }}"))
     expect_red(replace_text(manual,
                             '"$ENVS_EFFECT_BIN/mail-routing-root"',
                             '"$ENVS_EFFECT_BIN/envs-effect"'))

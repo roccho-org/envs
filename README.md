@@ -376,7 +376,9 @@ SHA, `roccho-dev`, first attempt and serialized runs. Its closed operations
 are `qualify`, `recover`, `preview` and `apply`, defaulting to qualification.
 Target data is never a dispatch input; `recipient` is an existing public age
 recipient, never an identity. Runtime uses the existing `dev-projection`
-Environment: `MAIL_CONFIG`, its Cloudflare token and `SOPS_AGE_KEY`.
+Environment: `MAIL_CONFIG`, its Cloudflare token and `MAIL_STATE_AGE_KEY`.
+The Mail identity slot reuses the Owner-selected existing age identity;
+the unrelated existing `SOPS_AGE_KEY` remains untouched and is not a fallback.
 It copies the pinned Ops files into owner-only scratch and consumes the
 same-SHA provided effect artifact for preview/apply. Native streams stay in private scratch
 and are never uploaded. No arguments or unsupported operations still return
@@ -392,9 +394,19 @@ not register Secrets, dispatch a workflow or establish live Mail completion.
 
 Qualification reuses the GET-only reader against the actual projection
 token and exact private zone, independently of the apply preflight flag.
-A fixed non-secret canary checks whether projection's existing SOPS key can
+A fixed non-secret canary checks whether projection's selected Mail key can
 open an envelope addressed to the selected existing recipient. Read and key
 results are separate; neither establishes Write rights or backend recovery.
+The bounded `key_check_stage` reports SEAL, OPEN, COMPARE or COMPLETE without
+exposing private errors; UNPROVEN alone does not identify a key mismatch.
+
+The fixed Mail state carrier was sealed by canonical manual recovery
+run38511433848, artifact11869414743. Exact ZIP digest/member bytes were
+verified, archived encrypted under an owner-only ACL, and authenticated
+decryption to memory with the Owner-selected existing identity passed the
+three-field contract. Source adopts those same encrypted bytes. This proves
+input recovery, not existing-state restoration, projection key compatibility,
+backend/lock access, Mail apply or delivery.
 
 Recovery selects the historical `dev-rent-tunnel` Environment solely to
 SOPS-seal its unchanged `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and

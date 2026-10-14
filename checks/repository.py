@@ -580,14 +580,14 @@ def check_manual_mail(root: Path, source: str, canonical: str) -> None:
     recovery_step = source[source.find("      - name: Seal unchanged state inputs"):source.find("      - name: Provide encrypted recovery")]
     private_step = source[source.find("      - name: Initialize backend and run one selected Mail operation\n"):]
     recovery_inputs = {("secrets", name) for name in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "RENT_STATE_PASSPHRASE")}
-    projection_inputs = {("secrets", name) for name in ("MAIL_CONFIG", "CLOUDFLARE_API_TOKEN", "SOPS_AGE_KEY")}
+    projection_inputs = {("secrets", name) for name in ("MAIL_CONFIG", "CLOUDFLARE_API_TOKEN", "MAIL_STATE_AGE_KEY")}
     expected_inputs = recovery_inputs | projection_inputs
     require(set(INPUT_REFERENCE.findall(source)) == expected_inputs
             and len(INPUT_REFERENCE.findall(source)) == len(expected_inputs)
             and set(INPUT_REFERENCE.findall(recovery_step)) == recovery_inputs
             and set(INPUT_REFERENCE.findall(private_step)) == projection_inputs
             and "R2_PARENT_" not in source and "TF_ENCRYPTION" not in source,
-            "Mail inputs must be the five existing/private slots in the operation step only")
+            "Mail inputs must remain isolated to the selected operation's slots")
     require(consumer_run(source, "operate-dev-mail-routing.yml") == canonical,
             "Mail candidate must use the existing exact-SHA artifact consumer")
     require({action for action, _ in ACTION_USE.findall(source)} ==

@@ -811,12 +811,16 @@ def qualify(environ: Mapping[str, str], tools: NativeToolset, home: Path) -> dic
                                      environ.get("CLOUDFLARE_API_TOKEN", ""),
                                      expected_zone=config["zone_id"])
     result["key_recovery"] = "UNPROVEN"
+    result["key_check_stage"] = "SEAL"
     try:
         canary = b'{"CANARY":"mail-key-qualification-v1"}'
         sealed = _sops(tools, home, canary, recipient=environ.get("MAIL_STATE_AGE_RECIPIENT", ""))
-        opened = _sops(tools, home, sealed, identity=environ.get("SOPS_AGE_KEY", ""))
+        result["key_check_stage"] = "OPEN"
+        opened = _sops(tools, home, sealed, identity=environ.get("MAIL_STATE_AGE_KEY", ""))
+        result["key_check_stage"] = "COMPARE"
         if json.loads(opened) == json.loads(canary):
             result["key_recovery"] = "RECIPIENT_MATCH"
+            result["key_check_stage"] = "COMPLETE"
     except Exception:
         pass
     return result
@@ -833,7 +837,7 @@ def manual_entry(operation: str, environ: Mapping[str, str]) -> tuple[str, int] 
         raise NativeSourceHold("MAIL_OPERATION_UNSELECTED")
     names = {"MAIL_HOME", "ENVS_EFFECT_TOOLCHAIN"}
     names |= (STATE_INPUT_KEYS | {"MAIL_STATE_AGE_RECIPIENT"} if operation == "recover" else
-              {"MAIL_CONFIG", "CLOUDFLARE_API_TOKEN", "SOPS_AGE_KEY", "MAIL_STATE_AGE_RECIPIENT"})
+              {"MAIL_CONFIG", "CLOUDFLARE_API_TOKEN", "MAIL_STATE_AGE_KEY", "MAIL_STATE_AGE_RECIPIENT"})
     selected = {name: environ.get(name, "") for name in names}
     source = Path(__file__).resolve().parents[1]
     tools = provided_native_tools(source, selected.get("ENVS_EFFECT_TOOLCHAIN", ""), sys.executable)
@@ -859,7 +863,7 @@ def manual_entry(operation: str, environ: Mapping[str, str]) -> tuple[str, int] 
         raise NativeSourceHold("MAIL_STATE_CIPHERTEXT_UNPROVEN")
     encrypted = cipher.read_bytes()
     state_ciphertext(encrypted)
-    state_inputs = _decode_state(_sops(tools, home, encrypted, identity=selected.get("SOPS_AGE_KEY", "")))
+    state_inputs = _decode_state(_sops(tools, home, encrypted, identity=selected.get("MAIL_STATE_AGE_KEY", "")))
     backend = home / "backend.hcl"
     private_output_sink(backend)
     content = ('bucket = "' + config["state_bucket"] + '"\n'

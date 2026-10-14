@@ -132,7 +132,7 @@ jobs:
         env:
           MAIL_CONFIG: ${{ secrets.MAIL_CONFIG }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          SOPS_AGE_KEY: ${{ secrets.SOPS_AGE_KEY }}
+          MAIL_STATE_AGE_KEY: ${{ secrets.MAIL_STATE_AGE_KEY }}
           MAIL_STATE_AGE_RECIPIENT: ${{ inputs.recipient }}
           MAIL_OPERATION: ${{ inputs.operation }}
         run: |
