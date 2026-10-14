@@ -36,6 +36,10 @@ jobs:
       - name: Test repository oracle
         run: python3 checks/test_repository.py
 
+      # Proposal-only: pure public SOURCE projection; no target read, secret, or effect permission.
+      - name: Test unadmitted Host Tool D/q proposal
+        run: python3 checks/test_host_tool_selection.py
+
       - name: Test Jev adapter
         run: python3 checks/test_jev_api.py
 
