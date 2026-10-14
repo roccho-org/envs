@@ -48,7 +48,7 @@ class DisposableHost:
         self.attempts: set[str] = set()
         # Ephemeral facts owned by THIS TemporaryDirectory SUT only, NOT a production
         # ledger. An external receipt dict cannot assert an imaginary preimage.
-        self._issued: dict[str, tuple[dict, dict, int]] = {}
+        self._issued: dict[str, tuple[dict, dict, int, str]] = {}
         self._last_attempt: str | None = None
         for path in (STORE0, STORE1):
             d = self.store / Path(path).name
@@ -97,7 +97,11 @@ class DisposableHost:
             return "SELECTED", STORE1
         return "UNKNOWN", None
 
-    def native_set_fixture(self, path: str, attempt: str, *, crash_after_selector=False):
+    def native_set_fixture(self, path: str, attempt: str, *,
+                           desired_revision: str, crash_after_selector=False):
+        if (type(desired_revision) is not str
+                or not re.fullmatch(r"ci-[0-9a-z-]+", desired_revision)):
+            raise ValueError("missing exact synthetic D revision")
         if not (self.root / ".source-test-only").is_file():
             raise ValueError("not a disposable SOURCE fixture")
         if attempt in self.attempts:
@@ -121,10 +125,12 @@ class DisposableHost:
             raise RuntimeError("synthetic transport of receipt interrupted")
         receipt = {"attempt": attempt, "preimage": before[1], "selected": path,
                    "effect": "SYNTHETIC_ONLY"}
-        self._issued[attempt] = (receipt, copy.deepcopy(receipt), self.number)
+        self._issued[attempt] = (receipt, copy.deepcopy(receipt), self.number,
+                                 desired_revision)
         return receipt
 
-    def rollback_fixture(self, receipt: dict, attempt: str, *, quiet: bool, writer: bool):
+    def rollback_fixture(self, receipt: dict, attempt: str, *, quiet: bool,
+                         writer: bool, current_desired: dict):
         if (type(quiet) is not bool or not quiet or type(writer) is not bool
                 or not writer or type(receipt) is not dict
                 or receipt.get("attempt") != attempt):
@@ -136,13 +142,21 @@ class DisposableHost:
         if (issued is None or receipt is not issued[0] or receipt != issued[1]
                 or self._last_attempt != attempt or self.number != issued[2]):
             raise ValueError("receipt was not issued by this active SUT attempt")
+        # Recovery is a separate effect: even a real same-attempt preimage
+        # is stale if the caller's CURRENT D was replaced after the write.
+        # This fixture cannot authenticate D; the production owner must do so.
+        if (type(current_desired) is not dict
+                or current_desired.get("revision") != issued[3]
+                or current_desired.get("store_path") != issued[1]["selected"]):
+            raise ValueError("rollback would resume a superseded synthetic D")
         if self.observe() != ("SELECTED", issued[1]["selected"]):
             raise ValueError("current selected Tool does not match this attempt")
         preimage = issued[1]["preimage"]
         if preimage is None:
             raise ValueError("cannot blindly roll back first Base-only selection")
         self.store_for(preimage)
-        self.native_set_fixture(preimage, attempt + "-rollback")
+        self.native_set_fixture(preimage, attempt + "-rollback",
+                                desired_revision=issued[3])
         del self._issued[attempt]  # consumed; cannot be replayed
         return "SYNTHETIC_ROLLBACK_NOT_NEW_D_SUCCESS"
 
@@ -185,6 +199,7 @@ class LifecycleSUT(unittest.TestCase):
                 or (desired is not None and desired != self.desired)):
             return "REFUSED"
         return self.host.native_set_fixture(path, attempt,
+                                            desired_revision=self.desired["revision"],
                                             crash_after_selector=crash)
 
     def test_first_base_only_requires_explicit_d_and_change_guard(self):
