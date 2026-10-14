@@ -131,3 +131,51 @@ def judge(proposal: dict[str, Any], *, desired: dict[str, Any] | None = None,
     result = verdict("SYNTHETIC_CHANGE_CANDIDATE", read=True)
     result["synthetic_change_preconditions"] = True
     return result
+
+
+def compose_fixture(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Offline cross-repo CI evidence *shape*; cannot attest GitHub or Target reality."""
+    require(type(rows) is list and len(rows) == 3, "three SOURCE owners required")
+    required = {
+        "roccho-dev/windows": {"scope", "build", "rent / build-test-publish",
+                               "own / build-test", "dev / fresh-develop-replace-continue", "windows"},
+        "roccho-org/envs": {"repository", "toolchain", "placement-artifact",
+                            "placement-author", "placement-windows", "placement-rent",
+                            "effect-shape", "clean-start"},
+        "roccho-dev/resources": {"source-vm"},
+    }
+    by_repo = {}
+    for value in rows:
+        row = exact_object(value, {"repository", "head", "tree", "ci_head",
+                                   "jobs", "windows_pin"}, "evidence")
+        repo = row["repository"]
+        require(type(repo) is str and repo in required and repo not in by_repo,
+                "unknown or duplicate SOURCE owner")
+        require(all(type(row[field]) is str and PIN.fullmatch(row[field]) is not None
+                    for field in ("head", "tree", "ci_head")),
+                "SOURCE evidence not exact 40-hex")
+        jobs = row["jobs"]
+        require(type(jobs) is dict and set(jobs) == required[repo]
+                and all(type(result) is str for result in jobs.values()),
+                "required job evidence missing, duplicated or malformed")
+        require(row["windows_pin"] is None if repo != "roccho-dev/resources"
+                else type(row["windows_pin"]) is str
+                and PIN.fullmatch(row["windows_pin"]) is not None,
+                "SOURCE pin not meaningful for owner")
+        by_repo[repo] = row
+
+    # A passing isolated test can never certify that these claims came from real runs.
+    result = {
+        "kind": "envs.hostToolCompositeFixture.v0", "admission": "NOT_ADMITTED",
+        "stage": "SOURCE_CI_UNVERIFIED", "merge_ready": False, "target_ready": False,
+        "effect": "FORBIDDEN", "accepted_q": None,
+    }
+    if any(row["ci_head"] != row["head"]
+           or any(status != "SUCCESS" for status in row["jobs"].values())
+           for row in by_repo.values()):
+        return result
+    if by_repo["roccho-dev/resources"]["windows_pin"] != by_repo["roccho-dev/windows"]["head"]:
+        result["stage"] = "SOURCE_PIN_MISMATCH"
+        return result
+    result["stage"] = "SYNTHETIC_SOURCE_SET_CANDIDATE"
+    return result
