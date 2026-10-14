@@ -201,7 +201,7 @@ class GuardTests(unittest.TestCase):
             else:
                 self.assertEqual(compose_fixture(altered)["stage"], expect)
 
-        interrupted(lambda r: r[2]["ci_head"] = "f" * 40, "SOURCE_CI_UNVERIFIED")
+        interrupted(lambda r: r[2].update(ci_head="f" * 40), "SOURCE_CI_UNVERIFIED")
         interrupted(lambda r: r[1]["jobs"].update(repository="SKIPPED"), "SOURCE_CI_UNVERIFIED")
         interrupted(lambda r: r[0]["jobs"].pop("windows"))
         interrupted(lambda r: r[0].update(head="latest"))
