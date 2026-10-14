@@ -1071,6 +1071,12 @@ def check_root_source_gates(source: str) -> None:
         first = [line for line in statements if not line.startswith(("progress = ", 'progress["stage"] = '))]
         require(first and first[0].startswith(f"require({gate},"),
                 f"{gate} must be the first check of its entry, before any input, tool or child")
+    # Upstream v0.1.12 HTTPS basic auth requires GIT_USERNAME beside the token; the child gets exactly this literal.
+    require(source.count('\nROOT_STATE_GIT_USERNAME = "x-access-token"\n') == 1
+            and source.count('"GIT_USERNAME": ROOT_STATE_GIT_USERNAME') == 1 and source.count('"GIT_USERNAME"') == 1,
+            "the state backend child must receive the fixed non-secret GIT_USERNAME exactly once")
+    require(all(name not in source for name in ("GIT_PASSWORD", "GITHUB_TOKEN_FILE", "SSH_PRIVATE_KEY", "SSH_AUTH_SOCK")),
+            "the state backend child takes only the workflow token, never another Git credential route")
     require(source.count("ROOT_LEGACY_S3_CONFIG") == 2 and 'backend "s3"' in source
             and source.count('  backend "s3" {\n') == 1,
             "the former S3 backend may exist only as the one source-declared legacy read root")

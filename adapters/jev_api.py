@@ -81,6 +81,9 @@ ROOT_STATE_BACKEND = {
 }
 # The existing workflow principal for the state ref; it reaches only the backend child, never OpenTofu or argv.
 ROOT_STATE_GIT_TOKEN = "GITHUB_TOKEN"
+# Upstream v0.1.12 HTTPS basic auth refuses without GIT_USERNAME even for a token (storages/git/git.go authBasicHTTP);
+# GitHub accepts any fixed username with a token. Non-secret, so it is a source literal, not an Environment input.
+ROOT_STATE_GIT_USERNAME = "x-access-token"
 ROOT_BACKEND_READY_ATTEMPTS = 50
 # The root's former R2 S3 backend, used only to read and migrate the existing state until the retire source removes
 # it: exactly the partial S3 block and enforced encryption the root declared before S2, with nothing to plan or apply.
@@ -2006,7 +2009,8 @@ def start_root_backend(tools: Mapping[str, str], home: Path, token: str, spawn: 
     port = loopback_port()
     url = root_backend_url(port)
     process = spawn([tools["terraform_backend_git"], "--address", f"127.0.0.1:{port}"],
-                    clean_env(tools, {"HOME": str(home), ROOT_STATE_GIT_TOKEN: token}))
+                    clean_env(tools, {"HOME": str(home), "GIT_USERNAME": ROOT_STATE_GIT_USERNAME,
+                                      ROOT_STATE_GIT_TOKEN: token}))
     try:
         for _ in range(ROOT_BACKEND_READY_ATTEMPTS):
             require(process.poll() is None, "rent-root state backend exited")

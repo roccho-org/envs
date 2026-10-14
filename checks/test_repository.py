@@ -483,6 +483,10 @@ def main() -> None:
                                      '    progress["stage"] = "contracts"\n    contracts = validate_contracts(root)\n',
                             '    progress["stage"] = "contracts"\n    contracts = validate_contracts(root)\n'
                             '    require(ROOT_PLAN_SOURCE_ACTIVE, "rent-root backend-only plan is source-hard-inactive")\n'))
+    expect_red(replace_text(adapter, '"GIT_USERNAME": ROOT_STATE_GIT_USERNAME,', ""))
+    expect_red(replace_text(adapter, '\nROOT_STATE_GIT_USERNAME = "x-access-token"\n', '\nROOT_STATE_GIT_USERNAME = ""\n'))
+    expect_red(replace_text(adapter, "clean_env(tools, {\"HOME\": str(home), \"GIT_USERNAME\"",
+                            "clean_env(tools, {\"GIT_PASSWORD\": token, \"HOME\": str(home), \"GIT_USERNAME\""))
     expect_red(replace_text(adapter, "ROOT_LEGACY_S3_CONFIG = \"\"\"terraform {\n",
                             "ROOT_LEGACY_S3_CONFIG = \"\"\"terraform {\n  backend \"s3\" {\n  }\n"))
     expect_red(replace_text(rent, "    plan {\n      enforced = true\n    }\n", "    plan {\n      enforced = false\n    }\n"))

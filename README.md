@@ -497,7 +497,9 @@ unchanged. Its state location is the `state_backend` of `dev.rent-root` in
 1391871347), ref `refs/heads/tofu-state`, state `state/dev-rent-cloudflare.json`
 and the upstream lock ref `refs/heads/locks/state/dev-rent-cloudflare.json`.
 For one operation a transient loopback `terraform-backend-git` child serves that
-ref; only that child receives the workflow's ref principal (`GITHUB_TOKEN`).
+ref; only that child receives the workflow's ref principal (`GITHUB_TOKEN`),
+with the fixed non-secret `GIT_USERNAME=x-access-token` that upstream v0.1.12
+HTTPS authentication requires beside a token.
 The rent-root flow above, with `-backend-config` bucket and key, is the
 **former R2 S3 era**: that apply (`rent-root`) is now closed in source.
 

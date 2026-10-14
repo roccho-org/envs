@@ -1094,6 +1094,10 @@ def backend_argv(backend: Backend) -> None:
     (argv, env), = backend.spawned
     assert argv[:2] == [fixtures.TOOLS["terraform_backend_git"], "--address"] and argv[2].startswith("127.0.0.1:")
     assert env[jev.ROOT_STATE_GIT_TOKEN] == REF_TOKEN and set(env).isdisjoint(jev.ROOT_SECRETS)
+    # Upstream v0.1.12 HTTPS auth needs a username with the token; nothing else private reaches the child.
+    assert set(env) - {"TMPDIR", "LANG", "LC_ALL", "CI"} == {"PATH", "HOME", "GIT_USERNAME", jev.ROOT_STATE_GIT_TOKEN}, \
+        sorted(env)
+    assert env["GIT_USERNAME"] == jev.ROOT_STATE_GIT_USERNAME == "x-access-token"
     url = backend.gets[0]
     assert url.startswith(f"http://{argv[2]}/?type=git&repository=https%3A%2F%2Fgithub.com%2Froccho-org%2Fenvs.git"
                           "&ref=tofu-state&state=state%2Fdev-rent-cloudflare.json"), url
