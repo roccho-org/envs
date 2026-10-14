@@ -46,6 +46,9 @@ jobs:
       - name: Test stage-local READ, SOURCE, CHANGE, RECORD and receiver-start guards
         run: python3 checks/test_host_tool_continuation.py
 
+      - name: Test v6 complete synthetic Target I(D)/I(O) gap and alternative plans
+        run: python3 checks/test_host_tool_target_gap.py
+
       - name: Prove ordinary accepted projection rejects Host Tool proposal/admission
         run: python3 checks/test_host_tool_normal_entry.py
 
@@ -754,6 +757,9 @@ jobs:
 
       - name: Test stage-local SOURCE/READ/CHANGE/RECORD/HANDOFF at exact head
         run: python3 checks/test_host_tool_continuation.py
+
+      - name: Test v6 full synthetic Target I(D)/I(O) gap at exact head
+        run: python3 checks/test_host_tool_target_gap.py
 
       - name: Prove ordinary accepted entry is hard-closed at exact SOURCE head
         run: python3 checks/test_host_tool_normal_entry.py
