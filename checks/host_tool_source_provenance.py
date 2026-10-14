@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import binascii
 import json
 import re
 import sys
@@ -97,7 +98,7 @@ def decode_source(payload: dict[str, Any], label: str) -> str:
     require(type(raw) is str and len(raw) <= 200_000, f"{label}: invalid file size")
     try:
         return base64.b64decode(raw.replace("\n", ""), validate=True).decode("utf-8")
-    except (ValueError, UnicodeDecodeError) as exc:
+    except (ValueError, UnicodeDecodeError, binascii.Error) as exc:
         raise ProvenanceError(f"{label}: malformed public file") from exc
 
 
