@@ -68,8 +68,8 @@ def check_preview_summary(mail) -> None:
         return
     marker = "SYNTHETIC_PRIVATE_PREVIEW_CANARY"
     with tempfile.TemporaryDirectory() as directory:
-        home = Path(directory)
-        home.chmod(0o700)
+        home = Path(directory) / "private"
+        home.mkdir(mode=0o700)
         capture = home / "preview.out"
         for code in (0, 2):
             journal = preview_journal(code == 2, marker)
@@ -663,7 +663,7 @@ def check_native_source_and_plan() -> None:
                     )
                     assert command.argv == (
                         tofu, "-chdir=" + str(ops), "plan", "-input=false",
-                        "-lock=true", "-detailed-exitcode",
+                        "-lock=true", "-detailed-exitcode", "-json",
                     )
                     result = run_synthetic(command, name, code=code, pause=pause,
                                            start_failure=start_failure)
@@ -1160,8 +1160,10 @@ def check_provided_native_toolchain() -> None:
                     )
                 assert native.returncode == expected, "provided automatic apply did not converge"
                 if stage in ("preview", "converged"):
-                    capture = fixture / (stage + ".out")
-                    journal = capture.read_text(encoding="utf-8")
+                    journal = (fixture / (stage + ".out")).read_text(encoding="utf-8")
+                    private_summary = fixture / (stage + "-summary")
+                    private_summary.mkdir(mode=0o700)
+                    capture = private_summary / "capture.jsonl"
                     # Test-only resource-name translation; actual native JSON
                     # and exit0/2 still drive the strict privacy boundary.
                     capture.write_text(journal.replace("terraform_data.fixture", "cloudflare_email_routing_dns.zone[0]"), encoding="utf-8")
