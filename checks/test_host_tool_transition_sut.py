@@ -46,6 +46,10 @@ class DisposableHost:
         self.number = 0
         self.effect_count = 0
         self.attempts: set[str] = set()
+        # Ephemeral facts owned by THIS TemporaryDirectory SUT only, NOT a production
+        # ledger. An external receipt dict cannot assert an imaginary preimage.
+        self._issued: dict[str, tuple[dict, dict, int]] = {}
+        self._last_attempt: str | None = None
         for path in (STORE0, STORE1):
             d = self.store / Path(path).name
             d.mkdir()
@@ -110,20 +114,36 @@ class DisposableHost:
         os.replace(temp, self.selection)
         self.effect_count += 1
         self.attempts.add(attempt)
+        self._last_attempt = attempt
         if crash_after_selector:
+            # A write happened, but no receipt was delivered; a later caller
+            # cannot manufacture it from the current geometry and roll back.
             raise RuntimeError("synthetic transport of receipt interrupted")
-        return {"attempt": attempt, "preimage": before[1], "selected": path,
-                "effect": "SYNTHETIC_ONLY"}
+        receipt = {"attempt": attempt, "preimage": before[1], "selected": path,
+                   "effect": "SYNTHETIC_ONLY"}
+        self._issued[attempt] = (receipt, copy.deepcopy(receipt), self.number)
+        return receipt
 
     def rollback_fixture(self, receipt: dict, attempt: str, *, quiet: bool, writer: bool):
-        if not quiet or not writer or receipt["attempt"] != attempt:
+        if (type(quiet) is not bool or not quiet or type(writer) is not bool
+                or not writer or type(receipt) is not dict
+                or receipt.get("attempt") != attempt):
             raise ValueError("rollback is not authorized/quiet for the exact attempt")
-        if self.observe() != ("SELECTED", receipt["selected"]):
+        issued = self._issued.get(attempt)
+        # Object identity, unchanged issued fields, exact current generation
+        # and latest actual attempt are all required BEFORE the first selector write.
+        # An arbitrary dict (even one copying a real receipt) is never evidence.
+        if (issued is None or receipt is not issued[0] or receipt != issued[1]
+                or self._last_attempt != attempt or self.number != issued[2]):
+            raise ValueError("receipt was not issued by this active SUT attempt")
+        if self.observe() != ("SELECTED", issued[1]["selected"]):
             raise ValueError("current selected Tool does not match this attempt")
-        if receipt["preimage"] is None:
+        preimage = issued[1]["preimage"]
+        if preimage is None:
             raise ValueError("cannot blindly roll back first Base-only selection")
-        self.store_for(receipt["preimage"])
-        self.native_set_fixture(receipt["preimage"], attempt + "-rollback")
+        self.store_for(preimage)
+        self.native_set_fixture(preimage, attempt + "-rollback")
+        del self._issued[attempt]  # consumed; cannot be replayed
         return "SYNTHETIC_ROLLBACK_NOT_NEW_D_SUCCESS"
 
 
@@ -157,6 +177,12 @@ class LifecycleSUT(unittest.TestCase):
         guards = self.gate(conditions=conditions, desired=desired, previous=previous)
         if (guards[0]["stage"] != "SYNTHETIC_CHANGE_CANDIDATE"
                 or not guards[1]["synthetic_mutation_ready"]):
+            return "REFUSED"
+        # R1: the executor argument MUST equal this attempt's current D target,
+        # not merely be an allowed closure. Do not trust "desired_current=True"
+        # or an arbitrary caller-supplied replacement D as a version assertion.
+        if (type(path) is not str or path != self.desired["store_path"]
+                or (desired is not None and desired != self.desired)):
             return "REFUSED"
         return self.host.native_set_fixture(path, attempt,
                                             crash_after_selector=crash)
