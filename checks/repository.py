@@ -375,8 +375,9 @@ def check_rent_config(source: str) -> None:
     # output printed in clear, and a service-token lifetime fixed in source rather than bound at deployment. Comments
     # never count: /* */ blocks and #, // line comments are dropped first (this root has no # or // inside a string).
     text = re.sub(r"(?m)[ \t]*(#|//).*$", "", re.sub(r"(?s)/\*.*?\*/", "", source))
-    require(text.count('backend "') == 1 and '  backend "s3" {\n' in text and "    use_lockfile                = true\n" in text,
-            "persistent root must use the locked native S3 backend")
+    # S2: the standard HTTP backend, wholly partial; its loopback address and lock endpoints arrive only at init.
+    require(text.count('backend "') == 1 and '  backend "http" {}\n' in text,
+            "persistent root must use the partial standard HTTP backend")
     require("  encryption {\n    state {\n      enforced = true\n    }\n    plan {\n      enforced = true\n    }\n  }\n" in text,
             "persistent root must enforce state and plan encryption")
     require(re.search(r'(?ms)^output "credentials" \{\n  sensitive = true\n', text) is not None,
@@ -1042,6 +1043,37 @@ def check_toolchain(root: Path, adapter) -> None:
     source = (root / "adapters/jev_api.py").read_text(encoding="utf-8")
     for token in ("npx", "--yes", "SOPS_BIN", "NPX_BIN", "WRANGLER_PACKAGE"):
         require(token not in source, f"adapter selects an ambient or runtime tool: {token}")
+    check_root_source_gates(source)
+
+
+# S2: every rent-root entry that could read the root's secrets, spawn a child or act on a backend is closed in source.
+# Each gate is one literal False, and the entry's first statement after naming its stage is that gate.
+ROOT_SOURCE_GATES = {
+    "ROOT_INSPECT_SOURCE_ACTIVE": "def rent_root_inspect(",
+    "ROOT_APPLY_SOURCE_ACTIVE": "def rent_root(",
+    "ROOT_MIGRATE_SOURCE_ACTIVE": "def rent_root_migrate(",
+    "ROOT_PLAN_SOURCE_ACTIVE": "def rent_root_plan(",
+}
+
+
+def check_root_source_gates(source: str) -> None:
+    for gate, entry in ROOT_SOURCE_GATES.items():
+        require(source.count(f"\n{gate} = False\n") == 1 and source.count(f"{gate} =") == 1,
+                f"{gate} must be one literal source-hard-inactive gate")
+        require(source.count(entry) == 1, f"rent-root entry missing: {entry}")
+        body = source[source.find(entry):]
+        body = body[:body.find("\ndef ", 1)]
+        require(source.count(f"require({gate},") == 1 and body.count(f"require({gate},") == 1,
+                f"{gate} must guard only its own entry")
+        statements = [line.strip() for line in body.splitlines()[1:]
+                      if line.strip() and not line.strip().startswith("#") and line.startswith("    ")
+                      and not line.startswith("     ")]
+        first = [line for line in statements if not line.startswith(("progress = ", 'progress["stage"] = '))]
+        require(first and first[0].startswith(f"require({gate},"),
+                f"{gate} must be the first check of its entry, before any input, tool or child")
+    require(source.count("ROOT_LEGACY_S3_CONFIG") == 2 and 'backend "s3"' in source
+            and source.count('  backend "s3" {\n') == 1,
+            "the former S3 backend may exist only as the one source-declared legacy read root")
 
 
 def check_placement(root: Path) -> None:

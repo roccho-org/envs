@@ -488,8 +488,30 @@ this source.
 The effect toolchain carries the same pinned upstream `terraform-backend-git`
 v0.1.12 release binary as windows `infra/git-state` (manifest tool
 `terraform_backend_git`). Building the toolchain runs only its `--help` and
-requires the loopback `--address` flag; nothing starts it as a backend or
-points any root at a GitHub ref yet.
+requires the loopback `--address` flag.
+
+`providers/dev-rent-cloudflare/main.tf` now declares only a partial standard
+`backend "http" {}`; resources, providers and enforced encryption are
+unchanged. Its state location is the `state_backend` of `dev.rent-root` in
+`contracts/environments.jsonl`: repository `roccho-org/envs` (stable id
+1391871347), ref `refs/heads/tofu-state`, state `state/dev-rent-cloudflare.json`
+and the upstream lock ref `refs/heads/locks/state/dev-rent-cloudflare.json`.
+For one operation a transient loopback `terraform-backend-git` child serves that
+ref; only that child receives the workflow's ref principal (`GITHUB_TOKEN`).
+The rent-root flow above, with `-backend-config` bucket and key, is the
+**former R2 S3 era**: that apply (`rent-root`) is now closed in source.
+
+Two future entries are composed but closed in source, like inspect:
+`envs-effect rent-root-migrate` (standard `tofu init -migrate-state` from the
+former S3 backend, read through a source-declared legacy root, onto the empty
+GitHub ref, holding both locks; it requires the same lineage and resources and
+at most one serial step, and retains the former object) and
+`envs-effect rent-root-plan` (the unchanged root planned against the existing
+GitHub-ref state must be empty; any change refuses, nothing is applied or
+saved). `rent-root`, `rent-root-inspect`, `rent-root-migrate` and
+`rent-root-plan` each refuse at `source_guard` before any contract, tool, secret
+or child. No workflow selects migrate or plan yet; activation, real transport,
+custody and every live effect need their own later phase grants.
 
 ## Family calendar Cloudflare Pages (bounded exception)
 

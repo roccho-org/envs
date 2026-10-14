@@ -462,7 +462,29 @@ def main() -> None:
     expect_red(lambda root: (root / "providers/dev-rent-access-probe/terraform.tfstate").write_text("{}\n"))
     # The persistent root: native validate accepts each of these, so the oracle must refuse them.
     rent = "providers/dev-rent-cloudflare/main.tf"
-    expect_red(replace_text(rent, '  backend "s3" {\n', '  backend "local" {\n'))
+    expect_red(replace_text(rent, '  backend "http" {}\n', '  backend "local" {}\n'))
+    expect_red(replace_text(rent, '  backend "http" {}\n', '  backend "http" {\n    address = "http://127.0.0.1:1/"\n  }\n'))
+    expect_red(replace_text(rent, '  backend "http" {}\n', '  backend "http" {}\n  backend "s3" {}\n'))
+    # S2: the GitHub-ref state location is exact and unique, and every backend-capable rent-root entry is closed.
+    expect_red(mutate_plane("dev.rent-root", lambda row: row["state_backend"].update({"ref": "refs/heads/proposals"})))
+    expect_red(mutate_plane("dev.rent-root", lambda row: row["state_backend"].update({"repository_id": 1})))
+    expect_red(mutate_plane("dev.rent-root", lambda row: row["state_backend"].update(
+        {"lock_ref": "refs/heads/locks/state/other.json"})))
+    expect_red(mutate_plane("dev.rent-root", lambda row: row["state_backend"].update({"repository": "roccho-dev/envs"})))
+    expect_red(mutate_plane("dev.rent-root", lambda row: row.pop("state_backend")))
+    expect_red(mutate_plane("dev.rent-tunnel", lambda row: row.update({"state_backend": {"state_path": "x"}})))
+    adapter = "adapters/jev_api.py"
+    for gate in ("ROOT_INSPECT_SOURCE_ACTIVE", "ROOT_APPLY_SOURCE_ACTIVE", "ROOT_MIGRATE_SOURCE_ACTIVE",
+                 "ROOT_PLAN_SOURCE_ACTIVE"):
+        expect_red(replace_text(adapter, f"\n{gate} = False\n", f"\n{gate} = True\n"))
+        expect_red(replace_text(adapter, f"\n{gate} = False\n", f"\n{gate} = bool(0)\n"))
+        expect_red(replace_text(adapter, f"    require({gate}, ", f"    require(True or {gate}, "))
+    expect_red(replace_text(adapter, '    require(ROOT_PLAN_SOURCE_ACTIVE, "rent-root backend-only plan is source-hard-inactive")\n'
+                                     '    progress["stage"] = "contracts"\n    contracts = validate_contracts(root)\n',
+                            '    progress["stage"] = "contracts"\n    contracts = validate_contracts(root)\n'
+                            '    require(ROOT_PLAN_SOURCE_ACTIVE, "rent-root backend-only plan is source-hard-inactive")\n'))
+    expect_red(replace_text(adapter, "ROOT_LEGACY_S3_CONFIG = \"\"\"terraform {\n",
+                            "ROOT_LEGACY_S3_CONFIG = \"\"\"terraform {\n  backend \"s3\" {\n  }\n"))
     expect_red(replace_text(rent, "    plan {\n      enforced = true\n    }\n", "    plan {\n      enforced = false\n    }\n"))
     expect_red(replace_text(rent, "    state {\n      enforced = true\n    }\n", ""))
     expect_red(replace_text(rent, 'output "credentials" {\n  sensitive = true\n', 'output "credentials" {\n'))

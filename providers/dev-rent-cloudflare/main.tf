@@ -14,18 +14,10 @@ terraform {
     }
   }
 
-  # Partial native S3 backend: the bucket, key and endpoint are given at init by the later state gate. Backend
-  # credentials come only from the process environment, never from this file.
-  backend "s3" {
-    region                      = "auto"
-    use_lockfile                = true
-    use_path_style              = true
-    skip_credentials_validation = true
-    skip_region_validation      = true
-    skip_requesting_account_id  = true
-    skip_metadata_api_check     = true
-    skip_s3_checksum            = true
-  }
+  # Partial standard HTTP backend: the state and lock addresses are given at init and point at a transient loopback
+  # terraform-backend-git child that keeps this state on the envs GitHub ref declared in contracts/environments.jsonl.
+  # No backend location or credential is in this file.
+  backend "http" {}
 
   # Methods and keys come only from TF_ENCRYPTION; enforced state and plan encryption refuses plaintext without it.
   encryption {
