@@ -882,6 +882,317 @@ def real_root_roundtrip(sops_bin: str, keygen_bin: str, tofu_bin: str) -> None:
     print(f"real root output to both envelopes: PASS (tofu={tofu_path}, sops={sops_path}); identities removed")
 
 
+
+# S2 SOURCE: real read-only inspector wired through the existing root tool
+# port, with every remote child replaced by finite synthetic fixture results.
+# In deployed source the first gate is permanently closed.
+def test_root_inspect_source_gate() -> None:
+    root = fresh_root()
+    runner = RootRunner()
+    before = snapshot(root)
+    out, err = io.StringIO(), io.StringIO()
+    with fixtures.environment(root_env()), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        code = jev.main(["--root", str(root), "rent-root-inspect"])
+    assert code == 1 and out.getvalue() == ""
+    assert err.getvalue() == "RENT_ROOT_INSPECT=RED: envs at source_guard\n", err.getvalue()
+    assert runner.calls == [] and snapshot(root) == before
+    assert jev.ROOT_INSPECT_SOURCE_ACTIVE is False
+
+
+def test_root_inspect_bounded_fixture() -> None:
+    root = fresh_root()
+    before = snapshot(root)
+    managed = [{"mode": "managed", "type": kind, "name": "rent"}
+               for kind in sorted(jev.ROOT_INSPECT_RESOURCE_TYPES)]
+    state = json.dumps({"lineage": "fixture-lineage", "serial": 3, "resources": managed}).encode()
+
+    class InspectRunner:
+        def __init__(self, state_reply: bytes = state, lock: str = "404") -> None:
+            self.calls: list[tuple[list[str], bytes | None, dict[str, str]]] = []
+            self.state_reply, self.lock = state_reply, lock
+
+        def __call__(self, argv, input_data, env):
+            self.calls.append((list(argv), input_data, dict(env or {})))
+            if argv[0] == fixtures.TOOLS["curl"]:
+                config = input_data.decode()
+                assert argv == [fixtures.TOOLS["curl"], "-q", "-I", "--config", "-"]
+                assert 'request = "HEAD"' in config
+                assert "aws-sigv4" in config and "data-binary" not in config
+                assert not any(value in str(argv) for value in ROOT_SECRET_VALUES)
+                assert set(env or {}).isdisjoint(jev.ROOT_SECRETS)
+                code = self.lock if ".tflock" in config else "200"
+                return subprocess.CompletedProcess(argv, 0, stdout=b"", stderr=code.encode())
+            assert argv[0] == fixtures.TOOLS["tofu"]
+            if argv[2] == "init":
+                assert "-backend-config=bucket=" + ROOT_VALUES["RENT_STATE_BUCKET"] in argv
+                assert "-backend-config=key=" + ROOT_VALUES["RENT_STATE_KEY"] in argv
+                # The former S3 backend comes only from the source-declared legacy root, never the root's main.tf.
+                work = Path(argv[1].split("=", 1)[1])
+                assert (work / "main.tf").read_text(encoding="utf-8") == jev.ROOT_LEGACY_S3_CONFIG
+                return subprocess.CompletedProcess(argv, 0, stdout=b"", stderr=b"")
+            assert argv[2:] == ["state", "pull"]
+            assert env["TF_ENCRYPTION"] == jev.encryption_config("k0", ROOT_VALUES["RENT_STATE_PASSPHRASE"])
+            assert "CLOUDFLARE_API_TOKEN" not in env
+            return subprocess.CompletedProcess(argv, 0, stdout=self.state_reply, stderr=b"")
+
+    calls: list[tuple[str, str, str, object]] = []
+
+    def world(method, path, token, body):
+        calls.append((method, path, token, body))
+        assert method == "GET" and token == ROOT_VALUES["CLOUDFLARE_API_TOKEN"] and body is None
+        return (200, {"success": True, "result": [{"id": "synthetic"}], "result_info": {"total_pages": 1}})
+
+    saved = jev.ROOT_INSPECT_SOURCE_ACTIVE
+    jev.ROOT_INSPECT_SOURCE_ACTIVE = True
+    try:
+        with fixtures.environment(root_env()):
+            positive = InspectRunner()
+            result = jev.rent_root_inspect(root, runner=positive, api=world)
+            assert result["status"] == "BOUNDED_READ_ONLY"
+            assert result["old_state"] == "PRESENT_ENCRYPTED_READ" and result["old_lock"] == "ABSENT"
+            assert result["managed_root_resources"] == 6
+            assert result["world_state_equivalence"] == "NOT_PROVEN"
+            assert result["provider_delta_F"] == "NOT_PROVEN" and result["native_migration"] == "NOT_RUN"
+            assert len(positive.calls) == 4 and len(calls) == 4
+            assert all(call[0] == "GET" for call in calls)
+            assert not any(c in {"apply", "plan", "import", "destroy"} for args, _, _ in positive.calls for c in args)
+            for wrong in (InspectRunner(lock="200"), InspectRunner(state_reply=b"{}")):
+                try:
+                    jev.rent_root_inspect(root, runner=wrong, api=world)
+                except jev.EnvsError:
+                    pass
+                else:
+                    raise AssertionError("unsafe inspect fixture passed")
+    finally:
+        jev.ROOT_INSPECT_SOURCE_ACTIVE = saved
+    assert snapshot(root) == before and jev.ROOT_INSPECT_SOURCE_ACTIVE is False
+
+
+@contextlib.contextmanager
+def source_active(name: str):
+    # Tests alone open a closed entry, only around fake children; the deployed source keeps it False.
+    saved = getattr(jev, name)
+    assert saved is False, f"{name} is not source-hard-inactive"
+    setattr(jev, name, True)
+    try:
+        yield
+    finally:
+        setattr(jev, name, saved)
+
+
+# S2: the root declares the GitHub-ref HTTP backend. Apply, backend migration and the backend-only plan are closed in
+# source: with every input present they refuse at their first line, before any contract, tool, secret or child.
+REF_TOKEN = "ref-principal-" + secrets.token_urlsafe(24)
+GATED_ENTRIES = (("rent-root", "RENT_ROOT", "ROOT_APPLY_SOURCE_ACTIVE"),
+                 ("rent-root-migrate", "RENT_ROOT_MIGRATE", "ROOT_MIGRATE_SOURCE_ACTIVE"),
+                 ("rent-root-plan", "RENT_ROOT_PLAN", "ROOT_PLAN_SOURCE_ACTIVE"),
+                 ("rent-root-inspect", "RENT_ROOT_INSPECT", "ROOT_INSPECT_SOURCE_ACTIVE"))
+
+
+def test_root_source_gates() -> None:
+    root = fresh_root()
+    before = snapshot(root)
+    for command, label, gate in GATED_ENTRIES:
+        assert getattr(jev, gate) is False
+        out, err = io.StringIO(), io.StringIO()
+        with fixtures.environment(root_env(**{jev.ROOT_STATE_GIT_TOKEN: REF_TOKEN})), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = jev.main(["--root", str(root), command])
+        assert code == 1 and out.getvalue() == "", (command, out.getvalue())
+        assert err.getvalue() == f"{label}=RED: envs at source_guard\n", err.getvalue()
+    assert snapshot(root) == before
+    assert (ROOT / jev.ROOT_CONFIG).read_text(encoding="utf-8").count('backend "http" {}') == 1
+
+
+OLD_STATE = {"lineage": "fixture-lineage", "serial": 7,
+             "resources": [{"mode": "managed", "type": kind, "name": "rent", "instances": [{"attributes": {"id": kind}}]}
+                           for kind in sorted(jev.ROOT_INSPECT_RESOURCE_TYPES)]}
+
+
+class Backend:
+    # A fake loopback upstream child: its GET reply decides PRESENT/ABSENT/UNKNOWN; stop is recorded.
+    def __init__(self, reply: tuple[int, bytes] = (204, b"")) -> None:
+        self.reply, self.spawned, self.gets, self.stopped = reply, [], [], False
+
+    def spawn(self, argv, env):
+        self.spawned.append((list(argv), dict(env)))
+        backend = self
+
+        class Process:
+            def poll(self):
+                return None
+
+            def terminate(self):
+                backend.stopped = True
+
+            def wait(self, timeout=None):
+                return 0
+
+            def kill(self):
+                backend.stopped = True
+
+        return Process()
+
+    def get(self, url):
+        self.gets.append(url)
+        return self.reply
+
+
+class StateRunner:
+    # Fake curl HEAD and OpenTofu for migrate/plan. fail names a step to return non-zero; heads sets the HEAD codes.
+    def __init__(self, *, heads: tuple[str, str] = ("200", "404"), after: dict | None = None, fail: str | None = None,
+                 plan_code: int = 0) -> None:
+        self.heads, self.after, self.fail, self.plan_code = heads, after or OLD_STATE, fail, plan_code
+        self.calls: list[tuple[list[str], bytes | None, dict[str, str]]] = []
+        self.migrated = False
+
+    def step(self, argv) -> str:
+        if argv[0] == fixtures.TOOLS["curl"]:
+            return "head"
+        if argv[2] == "init":
+            return "migrate" if "-migrate-state" in argv else "init"
+        return argv[2] if argv[2] != "state" else "pull"
+
+    def __call__(self, argv, input_data, env):
+        self.calls.append((list(argv), input_data, dict(env or {})))
+        step = self.step(argv)
+        assert not any(value in item for value in [*ROOT_SECRET_VALUES, REF_TOKEN] for item in argv), argv
+        assert jev.ROOT_STATE_GIT_TOKEN not in (env or {}), "the ref principal reached a non-backend child"
+        if step == "head":
+            code = self.heads[1] if ".tflock" in input_data.decode() else self.heads[0]
+            return subprocess.CompletedProcess(argv, 0, stdout=b"", stderr=code.encode())
+        if step == self.fail:
+            return subprocess.CompletedProcess(argv, 1, stdout=b"", stderr=b"synthetic failure")
+        work = Path(argv[1].split("=", 1)[1])
+        text = (work / "main.tf").read_text(encoding="utf-8")
+        if step == "init":
+            if "-backend-config=bucket=" + ROOT_VALUES["RENT_STATE_BUCKET"] in argv:
+                assert text == jev.ROOT_LEGACY_S3_CONFIG
+            else:
+                assert text == (ROOT / jev.ROOT_CONFIG).read_text(encoding="utf-8") and "-lock=true" in argv
+        elif step == "migrate":
+            assert text == (ROOT / jev.ROOT_CONFIG).read_text(encoding="utf-8")
+            assert argv[3:9] == ["-input=false", "-no-color", "-migrate-state", "-force-copy", "-lock=true",
+                                 argv[8]] and len(argv) == 13, argv
+            self.migrated = True
+        elif step == "pull":
+            body = self.after if self.migrated else OLD_STATE
+            return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(body).encode(), stderr=b"")
+        elif step == "plan":
+            assert argv[3:] == ["-input=false", "-no-color", "-lock=true", "-detailed-exitcode"], argv
+            return subprocess.CompletedProcess(argv, self.plan_code, stdout=b"", stderr=b"")
+        else:
+            raise AssertionError(f"unexpected child {argv}")
+        return subprocess.CompletedProcess(argv, 0, stdout=b"", stderr=b"")
+
+    def steps(self) -> list[str]:
+        return [self.step(argv) for argv, _, _ in self.calls]
+
+
+def backend_argv(backend: Backend) -> None:
+    # The upstream child: the pinned closure binary on loopback only, holding the ref principal and nothing else.
+    (argv, env), = backend.spawned
+    assert argv[:2] == [fixtures.TOOLS["terraform_backend_git"], "--address"] and argv[2].startswith("127.0.0.1:")
+    assert env[jev.ROOT_STATE_GIT_TOKEN] == REF_TOKEN and set(env).isdisjoint(jev.ROOT_SECRETS)
+    # Upstream v0.1.12 HTTPS auth needs a username with the token; nothing else private reaches the child.
+    assert set(env) - {"TMPDIR", "LANG", "LC_ALL", "CI"} == {"PATH", "HOME", "GIT_USERNAME", jev.ROOT_STATE_GIT_TOKEN}, \
+        sorted(env)
+    assert env["GIT_USERNAME"] == jev.ROOT_STATE_GIT_USERNAME == "x-access-token"
+    url = backend.gets[0]
+    assert url.startswith(f"http://{argv[2]}/?type=git&repository=https%3A%2F%2Fgithub.com%2Froccho-org%2Fenvs.git"
+                          "&ref=tofu-state&state=state%2Fdev-rent-cloudflare.json"), url
+
+
+def root_operation(entry, runner: StateRunner, backend: Backend, values: dict[str, str]) -> tuple[dict | None, dict]:
+    root = fresh_root()
+    before = snapshot(root)
+    progress: dict[str, str] = {}
+    result = None
+    with fixtures.environment(values):
+        try:
+            result = entry(root, runner=runner, spawn=backend.spawn, local_get=backend.get, sleep=lambda _: None,
+                           progress=progress)
+        except jev.EnvsError as exc:
+            assert not any(value in str(exc) for value in [*ROOT_SECRET_VALUES, REF_TOKEN]), str(exc)
+    assert snapshot(root) == before, "a backend operation changed a data file"
+    assert not {"apply", "import", "destroy", "force-unlock"} & set(runner.steps()), runner.steps()
+    assert not backend.spawned or backend.stopped, "the loopback backend outlived its operation"
+    return result, progress
+
+
+def test_root_migrate_fixture() -> None:
+    values = root_env(**{jev.ROOT_STATE_GIT_TOKEN: REF_TOKEN})
+    with source_active("ROOT_MIGRATE_SOURCE_ACTIVE"):
+        runner, backend = StateRunner(), Backend()
+        result, progress = root_operation(jev.rent_root_migrate, runner, backend, values)
+        assert result == {"kind": "envs.rentRootMigrate.v1", "status": "BACKEND_MIGRATED", "lineage": "UNCHANGED",
+                          "resources": "UNCHANGED", "serial": "UNCHANGED", "old_state": "RETAINED",
+                          "plan": "NOT_RUN", "apply": "NOT_RUN"}, result
+        assert runner.steps() == ["head", "head", "init", "pull", "migrate", "pull"], runner.steps()
+        backend_argv(backend)
+        migrate = runner.calls[4][0]
+        assert migrate[8:] == jev.root_backend_config(backend.gets[0]), migrate
+        assert "CLOUDFLARE_API_TOKEN" not in runner.calls[4][2]
+        # A migration write may advance the serial once; the lineage and resources never change.
+        advanced = StateRunner(after={**OLD_STATE, "serial": OLD_STATE["serial"] + 1})
+        assert root_operation(jev.rent_root_migrate, advanced, Backend(), values)[0]["serial"] == "MIGRATION_WRITE"
+        reds = (
+            # Missing or malformed key, unbound ref principal: refused before any child.
+            (root_env(RENT_STATE_PASSPHRASE="", **{jev.ROOT_STATE_GIT_TOKEN: REF_TOKEN}), StateRunner(), Backend(), "contracts", []),
+            (root_env(RENT_STATE_PASSPHRASE="z" * 64, **{jev.ROOT_STATE_GIT_TOKEN: REF_TOKEN}), StateRunner(), Backend(), "contracts", []),
+            (root_env(**{jev.ROOT_STATE_GIT_TOKEN: ""}), StateRunner(), Backend(), "contracts", []),
+            # Old state missing or UNKNOWN, old lock held: refused at inventory.
+            (values, StateRunner(heads=("404", "404")), Backend(), "s3_head", ["head"]),
+            (values, StateRunner(heads=("500", "404")), Backend(), "s3_head", ["head"]),
+            (values, StateRunner(heads=("200", "200")), Backend(), "s3_head", ["head", "head"]),
+            # Wrong key: the former state cannot be read, so nothing is migrated.
+            (values, StateRunner(fail="pull"), Backend(), "state_read", ["head", "head", "init", "pull"]),
+            # The ref already holds a state, or its state is UNKNOWN: never overwritten.
+            (values, StateRunner(), Backend((200, b'{"lineage":"other"}')), "backend", ["head", "head", "init", "pull"]),
+            (values, StateRunner(), Backend((500, b"")), "backend", ["head", "head", "init", "pull"]),
+            # A held lock (or any migration failure) and a changed identity after migration refuse.
+            (values, StateRunner(fail="migrate"), Backend(), "migrate", ["head", "head", "init", "pull", "migrate"]),
+            (values, StateRunner(after={**OLD_STATE, "lineage": "other"}), Backend(), "readback",
+             ["head", "head", "init", "pull", "migrate", "pull"]),
+            (values, StateRunner(after={**OLD_STATE, "serial": OLD_STATE["serial"] + 2}), Backend(), "readback",
+             ["head", "head", "init", "pull", "migrate", "pull"]),
+            (values, StateRunner(after={**OLD_STATE, "resources": OLD_STATE["resources"][1:]}), Backend(), "readback",
+             ["head", "head", "init", "pull", "migrate", "pull"]),
+        )
+        for case_values, runner, backend, stage, steps in reds:
+            result, progress = root_operation(jev.rent_root_migrate, runner, backend, case_values)
+            assert result is None and progress["stage"] == stage and runner.steps() == steps, (stage, progress,
+                                                                                               runner.steps())
+    assert jev.ROOT_MIGRATE_SOURCE_ACTIVE is False
+
+
+def test_root_plan_fixture() -> None:
+    values = root_env(**{jev.ROOT_STATE_GIT_TOKEN: REF_TOKEN})
+    present = (200, json.dumps(OLD_STATE).encode())
+    with source_active("ROOT_PLAN_SOURCE_ACTIVE"):
+        runner, backend = StateRunner(), Backend(present)
+        result, _ = root_operation(jev.rent_root_plan, runner, backend, values)
+        assert result == {"kind": "envs.rentRootPlan.v1", "status": "EMPTY_PLAN", "apply": "NOT_RUN",
+                          "saved_plan": "NONE"}, result
+        assert runner.steps() == ["init", "plan"], runner.steps()
+        backend_argv(backend)
+        assert runner.calls[0][0][3:] == ["-input=false", "-no-color", "-lock=true",
+                                          *jev.root_backend_config(backend.gets[0])]
+        for _, _, env in runner.calls:
+            assert not any(name.startswith("AWS_") for name in env) and env["CLOUDFLARE_API_TOKEN"] == API_TOKEN
+        reds = (
+            (StateRunner(plan_code=2), Backend(present), "plan", ["init", "plan"]),
+            (StateRunner(plan_code=1), Backend(present), "plan", ["init", "plan"]),
+            (StateRunner(fail="init"), Backend(present), "init", ["init"]),
+            (StateRunner(), Backend((204, b"")), "backend", []),
+            (StateRunner(), Backend((500, b"")), "backend", []),
+        )
+        for runner, backend, stage, steps in reds:
+            result, progress = root_operation(jev.rent_root_plan, runner, backend, values)
+            assert result is None and progress["stage"] == stage and runner.steps() == steps, (stage, progress)
+    assert jev.ROOT_PLAN_SOURCE_ACTIVE is False
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--sops")
@@ -900,11 +1211,18 @@ def main() -> None:
         test_fetch_boundary()
         test_client_author()
         test_client_red()
-        test_root_author()
-        test_root_red()
-        test_root_after_write()
-        test_root_main()
-        test_root_init_hint()
+        # The S3-era apply is closed in source; its existing behavior stays covered behind fake children.
+        with source_active("ROOT_APPLY_SOURCE_ACTIVE"):
+            test_root_author()
+            test_root_red()
+            test_root_after_write()
+            test_root_main()
+            test_root_init_hint()
+        test_root_inspect_source_gate()
+        test_root_inspect_bounded_fixture()
+        test_root_source_gates()
+        test_root_migrate_fixture()
+        test_root_plan_fixture()
         if args.sops is None:
             print("real SOPS roundtrip: NOT RUN (the check workflow runs it with --sops, --age-keygen and --tofu)")
         else:
