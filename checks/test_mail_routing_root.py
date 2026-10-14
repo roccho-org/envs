@@ -17,6 +17,62 @@ WORKFLOW = ROOT / ".github/workflows/operate-dev-mail-routing.yml"
 CLOSED = {"kind": "envs.mailM0.manual.v1", "status": "INACTIVE", "effect": "NOT_RUN"}
 
 
+def state_envelope_fixture() -> bytes:
+    """Structural fixture only; real SOPS authentication is tested in CI."""
+    enc = "ENC[AES256_GCM,data:Zml4dHVyZQ==,iv:" + "a" * 43 + "=,tag:" + "b" * 22 + "==,type:str]"
+    return json.dumps({
+        **{name: enc for name in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "RENT_STATE_PASSPHRASE")},
+        "sops": {"age": [{"recipient": "age1" + "q" * 58,
+                          "enc": "-----BEGIN AGE ENCRYPTED FILE-----\nZml4dHVyZQ==\n-----END AGE ENCRYPTED FILE-----\n"}],
+                 "lastmodified": "2026-10-14T00:00:00Z", "mac": enc,
+                 "unencrypted_suffix": "_unencrypted", "version": "3.13.2"},
+    }).encode()
+
+
+def invalid_state_envelopes(data: bytes) -> list[bytes]:
+    bad = [data + b'\n# SYNTHETIC_PLAINTEXT_CANARY', data + data,
+           data[:-1] + b',"AWS_SECRET_ACCESS_KEY":"SYNTHETIC_PLAINTEXT_CANARY"}',
+           data.replace(b'"version": "3.13.2"', b'"version": "3.13.2","version": "3.13.2"'),
+           b'AWS_SECRET_ACCESS_KEY: ENC[AES256_GCM,fixture]\nAWS_SECRET_ACCESS_KEY: SYNTHETIC_PLAINTEXT_CANARY\n']
+    for mechanism in ("kms", "gcp_kms", "azure_kv", "hc_vault", "hckms", "pgp", "key_groups"):
+        envelope = json.loads(data)
+        envelope["sops"][mechanism] = []
+        bad.append(json.dumps(envelope).encode())
+    for section, name, value in ((None, "UNKNOWN", "SYNTHETIC_PLAINTEXT_CANARY"),
+                                 (None, "AWS_ACCESS_KEY_ID", "SYNTHETIC_PLAINTEXT_CANARY"),
+                                 ("sops", "mac", "SYNTHETIC_PLAINTEXT_CANARY"),
+                                 ("sops", "unencrypted_suffix", "SYNTHETIC_PLAINTEXT_CANARY")):
+        envelope = json.loads(data)
+        (envelope if section is None else envelope[section])[name] = value
+        bad.append(json.dumps(envelope).encode())
+    envelope = json.loads(data)
+    envelope["sops"]["age"].append(envelope["sops"]["age"][0])
+    bad.append(json.dumps(envelope).encode())
+    return bad
+
+
+def check_state_contract(mail) -> None:
+    data = state_envelope_fixture()
+    assert mail.state_ciphertext(data) == "age1" + "q" * 58
+    for bad in invalid_state_envelopes(data):
+        try:
+            mail.state_ciphertext(bad)
+            raise AssertionError("invalid source carrier accepted")
+        except mail.NativeSourceHold:
+            pass
+    values = {"AWS_ACCESS_KEY_ID": "SYNTHETIC_ID", "AWS_SECRET_ACCESS_KEY": "SYNTHETIC_SECRET",
+              "RENT_STATE_PASSPHRASE": "c" * 64}
+    assert mail._decode_state(json.dumps(values).encode()) == values
+    for bad in (json.dumps(list(values.items())).encode(), json.dumps({**values, "UNKNOWN": "x"}).encode(),
+                json.dumps({**values, "AWS_ACCESS_KEY_ID": 7}).encode(), b"{}", b"[]",
+                b'{"AWS_ACCESS_KEY_ID":"x","AWS_ACCESS_KEY_ID":"y"}'):
+        try:
+            mail._decode_state(bad)
+            raise AssertionError("invalid recovered payload accepted")
+        except mail.NativeSourceHold:
+            pass
+
+
 def check_source() -> None:
     """Only the closed operation selector can reach protected input handling."""
     tree = ast.parse(ADAPTER.read_text(encoding="utf-8"))
@@ -31,7 +87,7 @@ def check_source() -> None:
     gate = main_functions[0].body[0]
     assert isinstance(gate, ast.If)
     assert [ast.unparse(node) for node in gate.body] == ["print(CLOSED_RESULT)", "return EXIT_INACTIVE"]
-    assert "sys.argv[2] not in ('preview', 'apply')" in ast.unparse(gate.test)
+    assert "sys.argv[2] not in MAIL_OPERATIONS" in ast.unparse(gate.test)
     # There must be no import-time function calls other than the normal
     # guarded __main__ exit. Named native helpers are inert definitions.
     for node in tree.body:
@@ -87,7 +143,7 @@ def check_native_entry() -> None:
             assert done.stdout == json.dumps(CLOSED, separators=(",", ":")) + "\n"
             assert marker not in done.stdout
             assert not child.exists(), "a child ran before the independent source refusal"
-        for operation in ("preview", "apply"):
+        for operation in ("qualify", "recover", "preview", "apply"):
             done = subprocess.run(
                 [sys.executable, "-I", str(ADAPTER), "--operation", operation],
                 cwd=home, env=env, capture_output=True, text=True, timeout=6, check=False,
@@ -102,21 +158,23 @@ def check_manual_job() -> None:
     content = WORKFLOW.read_text(encoding="utf-8")
     gate = "    if: ${{ github.repository == 'roccho-org/envs'"
     assert content.count(gate) == 1
-    assert content.index(gate) < content.index("    environment: dev-rent-tunnel") < content.index("    steps:")
-    assert content.count("    if:") == 1
+    assert content.index(gate) < content.index("    environment:") < content.index("    steps:")
+    assert content.count("\n    if:") == 1
     assert "on:\n  workflow_dispatch:" in content
     assert "      expected_source_sha:" in content
     for name in ("MAIL_CONFIG", "CLOUDFLARE_API_TOKEN", "AWS_ACCESS_KEY_ID",
-                 "AWS_SECRET_ACCESS_KEY", "RENT_STATE_PASSPHRASE"):
+                 "AWS_SECRET_ACCESS_KEY", "RENT_STATE_PASSPHRASE", "SOPS_AGE_KEY"):
         assert content.count("${{ secrets." + name + " }}") == 1
     for clause in ("github.sha == inputs.expected_source_sha", "github.run_attempt == 1",
                    "github.actor == 'roccho-dev'", "github.actor_id == '40359643'",
                    "github.triggering_actor == 'roccho-dev'"):
         assert clause in content
     assert "${{ vars." not in content
-    assert "options: [preview, apply]" in content and "default: preview" in content
+    assert "options: [qualify, recover, preview, apply]" in content and "default: qualify" in content
     assert "ref: e0c208356d0e2908224cbbd356c69256cb0e4528" in content
-    assert "upload-artifact" not in content and "cancel-in-progress: false" in content
+    assert "path: ${{ env.MAIL_HOME }}/mail-state.sops.json" in content and "cancel-in-progress: false" in content
+    assert "contains(fromJSON('[\"qualify\",\"recover\",\"preview\",\"apply\"]'), inputs.operation)" in content
+    assert "environment: ${{ inputs.operation == 'recover' && 'dev-rent-tunnel' || 'dev-projection' }}" in content
     assert "    needs:" not in content
     assert content.count('"$ENVS_EFFECT_BIN/mail-routing-root" --operation "$MAIL_OPERATION"') == 1
 
@@ -131,6 +189,7 @@ def check_native_source_and_plan() -> None:
     sys.modules[spec.name] = mail
     try:
         spec.loader.exec_module(mail)
+        check_state_contract(mail)
         with tempfile.TemporaryDirectory(prefix="mail-m0-native-fixture-") as directory:
             home = Path(directory)
             ops = home / "ops-mail-root"
@@ -262,7 +321,7 @@ def check_native_source_and_plan() -> None:
                     "CLOUDFLARE_API_TOKEN": marker + "-cf", "AWS_ACCESS_KEY_ID": marker + "-id",
                     "AWS_SECRET_ACCESS_KEY": marker + "-secret", "RENT_STATE_PASSPHRASE": "c" * 64,
                 }
-                context = dict(environment_name="dev-rent-tunnel", home=private,
+                context = dict(environment_name="dev-projection", home=private,
                                ops_root=ops, backend=backend)
                 def compose(data=after_config, selected=after_slots, **changed):
                     encoded = json.dumps(data).encode("utf-8") if isinstance(data, dict) else data
@@ -389,7 +448,7 @@ def check_native_source_and_plan() -> None:
                                      {**after_slots, "AWS_ACCESS_KEY_ID": marker + "\x7f"},
                                      {**after_slots, "AWS_ACCESS_KEY_ID": None}):
                         refused_composition(lambda selected=selected: compose(selected=selected))
-                    for changed in (dict(environment_name="dev-projection"), dict(home=None),
+                    for changed in (dict(environment_name="dev-rent-tunnel"), dict(home=None),
                                     dict(ops_root=home), dict(backend=home / "absent"),
                                     dict(backend=Path("/dev/stdout"))):
                         refused_composition(lambda changed=changed: compose(**changed))
@@ -691,12 +750,13 @@ def check_native_source_and_plan() -> None:
         sys.modules.pop(spec.name, None)
 
 
-def check_manual_integration(mail, manifest: str) -> None:
+def check_manual_integration(mail, manifest: str, identity: str, recipient: str) -> None:
     """Actual input/file/runner consumer; only process spawn is synthetic.
 
     Runs under the supplied Linux interpreter and real manifest. Fixture
     Ops blobs are deliberately synthetic; no provider/state call is made.
     """
+    import importlib.util
     fixtures = {
         "main.tf": ("OPS_MAIN_BLOB", b"synthetic accepted mail source\n"),
         ".terraform.lock.hcl": ("OPS_LOCK_BLOB", b"synthetic accepted provider lock\n"),
@@ -704,12 +764,91 @@ def check_manual_integration(mail, manifest: str) -> None:
         "safety.tftest.hcl": ("OPS_TEST_BLOB", b"synthetic source test\n"),
     }
     old_blobs = {attr: getattr(mail, attr) for attr, _ in fixtures.values()}
+    old_cipher = mail.STATE_CIPHERTEXT
     real_popen = mail.subprocess.Popen
     marker = "PRIVATE_MANUAL_INTEGRATION_CANARY"
     try:
         for attr, data in fixtures.values():
             setattr(mail, attr, mail.git_blob(data))
         with tempfile.TemporaryDirectory(prefix="mail-entry-provided-") as directory:
+            cipher_home = Path(directory) / "cipher"
+            cipher_home.mkdir(mode=0o700)
+            tools = mail.provided_native_tools(ROOT, manifest, sys.executable)
+            values = {"AWS_ACCESS_KEY_ID": marker, "AWS_SECRET_ACCESS_KEY": marker,
+                      "RENT_STATE_PASSPHRASE": "c" * 64}
+            encrypted = mail._sops(tools, cipher_home, json.dumps(values).encode(), recipient=recipient)
+            mail.state_ciphertext(encrypted, recipient, values)
+            for bad in invalid_state_envelopes(encrypted):
+                try:
+                    mail.state_ciphertext(bad)
+                    raise AssertionError("malformed real SOPS carrier accepted")
+                except mail.NativeSourceHold:
+                    pass
+            assert mail._decode_state(mail._sops(tools, cipher_home, encrypted, identity=identity)) == values
+            mail.STATE_CIPHERTEXT = cipher_home / "mail-state.sops.json"
+            mail.STATE_CIPHERTEXT.write_bytes(encrypted)
+            recovery = Path(directory) / "recovery"
+            recovery.mkdir(mode=0o700)
+            sealed_env = {**values, "MAIL_STATE_AGE_RECIPIENT": recipient,
+                          "MAIL_HOME": str(recovery), "ENVS_EFFECT_TOOLCHAIN": manifest,
+                          "CLOUDFLARE_API_TOKEN": "UNUSED_CF_INPUT", "SOPS_AGE_KEY": "UNUSED_AGE_INPUT"}
+            assert mail.manual_entry("recover", sealed_env) == ("STATE_INPUTS_SEALED", 0)
+            recovered_cipher = (recovery / "mail-state.sops.json").read_bytes()
+            mail.state_ciphertext(recovered_cipher, recipient, values)
+            assert mail._decode_state(mail._sops(tools, recovery, recovered_cipher, identity=identity)) == values
+            assert stat.S_IMODE((recovery / "mail-state.sops.json").stat().st_mode) == 0o600
+            assert all(value.encode() not in recovered_cipher for value in values.values())
+            for bad in (b"{}", b"[]", json.dumps(list(values.items())).encode(),
+                        b'{"RENT_STATE_PASSPHRASE":"x","RENT_STATE_PASSPHRASE":"y"}',
+                        json.dumps({**values, "UNKNOWN": "private"}).encode()):
+                try:
+                    mail._decode_state(bad)
+                    raise AssertionError("invalid recovered input accepted")
+                except mail.NativeSourceHold:
+                    pass
+            try:
+                mail._sops(tools, recovery, recovered_cipher, identity="AGE-SECRET-KEY-INVALID")
+                raise AssertionError("wrong identity decrypted recovery")
+            except mail.NativeSourceHold:
+                pass
+
+            # Real GET observer with only its socket boundary replaced; real
+            # supplied SOPS proves the projection-key canary independently.
+            read_spec = importlib.util.spec_from_file_location("mail_read_fixtures", ROOT / "checks/test_mail_routing_read.py")
+            read_tests = importlib.util.module_from_spec(read_spec)
+            read_spec.loader.exec_module(read_tests)
+            reader = mail._source_module("mail_routing_read")
+            source_module = mail._source_module
+            requests = read_tests.Fake()
+            reader.safe_opener = lambda: requests
+            mail._source_module = lambda name: reader if name == "mail_routing_read" else source_module(name)
+            qualification_config = {
+                "account_id": read_tests.ACCOUNT, "zone_id": read_tests.ZONE,
+                "zone_name": read_tests.DOMAIN, "alias_address": "fixture@" + read_tests.DOMAIN,
+                "destination_address": "fixture@gmail.com", "rule_priority": 0,
+                "state_bucket": "mail-state-fixture", "state_key": "mail-m0/state/fixture.tfstate",
+                "verified_destination_id": None, "manage_dns": True,
+                "manage_destination": True, "manage_rule": False, "preflight_approved": False,
+            }
+            qualification_env = {"MAIL_CONFIG": json.dumps(qualification_config),
+                                 "MAIL_HOME": str(recovery), "ENVS_EFFECT_TOOLCHAIN": manifest,
+                                 "CLOUDFLARE_API_TOKEN": read_tests.TOKEN,
+                                 "SOPS_AGE_KEY": identity, "MAIL_STATE_AGE_RECIPIENT": recipient}
+            try:
+                qualified = mail.manual_entry("qualify", qualification_env)
+                assert qualified["status"] == "READ_OBSERVED"
+                assert qualified["key_recovery"] == "RECIPIENT_MATCH"
+                assert qualified["write_authority"] == "NOT_PROVEN"
+                assert all(private not in json.dumps(qualified) for private in
+                           (read_tests.TOKEN, read_tests.DOMAIN, identity))
+                wrong_key = mail.manual_entry("qualify", {**qualification_env, "SOPS_AGE_KEY": "AGE-SECRET-KEY-INVALID"})
+                assert wrong_key["status"] == "READ_OBSERVED" and wrong_key["key_recovery"] == "UNPROVEN"
+                denied = read_tests.Fake(deny="/user/tokens/verify")
+                reader.safe_opener = lambda: denied
+                failed_read = mail.manual_entry("qualify", qualification_env)
+                assert failed_read["status"] != "READ_OBSERVED" and failed_read["key_recovery"] == "RECIPIENT_MATCH"
+            finally:
+                mail._source_module = source_module
             for index, (operation, init_code, operation_code, expected) in enumerate((
                 ("preview", 0, 0, ("NO_OP", 0)),
                 ("preview", 0, 2, ("DELTA", 2)),
@@ -737,10 +876,16 @@ def check_manual_integration(mail, manifest: str) -> None:
                     "ENVS_EFFECT_TOOLCHAIN": manifest, "CLOUDFLARE_API_TOKEN": marker,
                     "AWS_ACCESS_KEY_ID": marker, "AWS_SECRET_ACCESS_KEY": marker,
                     "RENT_STATE_PASSPHRASE": "c" * 64,
+                    "SOPS_AGE_KEY": identity, "MAIL_STATE_AGE_RECIPIENT": recipient,
                     "TF_LOG": "TRACE", "AWS_PROFILE": marker, "HTTPS_PROXY": marker,
                 }
                 starts = []
                 def spawn(argv, **kwargs):
+                    if argv[0] == tools.sops:
+                        assert "SOPS_AGE_KEY" in kwargs["env"]
+                        assert not {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "CLOUDFLARE_API_TOKEN"} & set(kwargs["env"])
+                        assert identity not in repr(argv)
+                        return real_popen(argv, **kwargs)
                     starts.append(tuple(argv))
                     assert argv[1] == "-chdir=" + str(root)
                     assert argv[2] == ("init" if len(starts) == 1 else
@@ -785,7 +930,7 @@ def check_manual_integration(mail, manifest: str) -> None:
                 if failure == "config":
                     bad["MAIL_CONFIG"] = '{"private":' + marker
                 elif failure == "slots":
-                    bad["AWS_SECRET_ACCESS_KEY"] = marker + "\n"
+                    bad["CLOUDFLARE_API_TOKEN"] = marker + "\n"
                 elif failure == "preflight":
                     bad["MAIL_CONFIG"] = json.dumps({**config, "preflight_approved": False})
                 else:
@@ -800,6 +945,7 @@ def check_manual_integration(mail, manifest: str) -> None:
                     assert marker not in str(error) and "\n" not in str(error)
     finally:
         mail.subprocess.Popen = real_popen
+        mail.STATE_CIPHERTEXT = old_cipher
         for attr, value in old_blobs.items():
             setattr(mail, attr, value)
 
@@ -831,7 +977,15 @@ def check_provided_native_toolchain() -> None:
         )
         assert selection.tofu == from_existing["tools"]["tofu"]
         assert mail.native_bin(selection.tofu, "tofu", selection) == selection.tofu
-        check_manual_integration(mail, from_existing["manifest"])
+        with tempfile.TemporaryDirectory(prefix="mail-check-age-") as directory:
+            key = Path(directory) / "synthetic.key"
+            age = os.environ.get("MAIL_TEST_AGE_KEYGEN")
+            assert age and age.startswith("/")
+            generated = subprocess.run([age, "-o", str(key)], capture_output=True, check=False, timeout=15)
+            assert generated.returncode == 0
+            public = subprocess.run([age, "-y", str(key)], capture_output=True, text=True, check=False, timeout=15)
+            assert public.returncode == 0
+            check_manual_integration(mail, from_existing["manifest"], key.read_text(), public.stdout.strip())
         wrapper = str(Path(entry).with_name("mail-routing-root"))
         for operation in ("preview", "apply"):
             refused = subprocess.run(

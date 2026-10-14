@@ -79,6 +79,20 @@ def main() -> None:
     assert baseline["canonical_branch"] == "proposals"
     assert baseline["retained_compatibility_branch"] == "main"
 
+    # Structural Source checks reject plaintext/duplicate metadata before publication.
+    fixture_spec = importlib.util.spec_from_file_location("mail_carrier_fixtures", ROOT / "checks/test_mail_routing_root.py")
+    fixture = importlib.util.module_from_spec(fixture_spec)
+    fixture_spec.loader.exec_module(fixture)
+    carrier = fixture.state_envelope_fixture()
+    valid = copy_root()
+    try:
+        (valid / "ciphertexts/dev-mail-state.sops.json").write_bytes(carrier)
+        assert repository.inspect(valid)["status"] == "PASS"
+    finally:
+        shutil.rmtree(valid.parent, ignore_errors=True)
+    for bad in fixture.invalid_state_envelopes(carrier):
+        expect_red(lambda root, bad=bad: (root / "ciphertexts/dev-mail-state.sops.json").write_bytes(bad))
+
     # Manual Mail operations retain actor/source and private-input boundaries.
     manual = ".github/workflows/operate-dev-mail-routing.yml"
     # All source-level triggers are denied except the one manual dispatch.
@@ -104,8 +118,8 @@ def main() -> None:
     finally:
         shutil.rmtree(commented.parent, ignore_errors=True)
     expect_red(replace_text(manual, "github.run_attempt == 1", "github.run_attempt >= 1"))
-    expect_red(replace_text(manual, "options: [preview, apply]", "options: [preview, apply, destroy]"))
-    expect_red(replace_text(manual, "environment: dev-rent-tunnel", "environment: dev-projection"))
+    expect_red(replace_text(manual, "options: [qualify, recover, preview, apply]", "options: [qualify, recover, preview, apply, destroy]"))
+    expect_red(replace_text(manual, "|| 'dev-projection' }}", "|| 'dev-authoring' }}"))
     expect_red(replace_text(manual,
                             '"$ENVS_EFFECT_BIN/mail-routing-root"',
                             '"$ENVS_EFFECT_BIN/envs-effect"'))

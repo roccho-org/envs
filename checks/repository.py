@@ -199,6 +199,7 @@ PROBE_TOOL_CHECKS = (
     '"$tool/python3" -I checks/test_rent_access_probe.py --real-ssh "$tool"',
 )
 CIPHERTEXTS = {
+    "ciphertexts/dev-mail-state.sops.json",
     "ciphertexts/dev-jev-api.sops.yaml", "ciphertexts/dev-rent-tunnel.sops.yaml", "ciphertexts/dev-jev-api.oci-dev.sops.yaml",
     "ciphertexts/dev-rent-client.sops.yaml", "ciphertexts/dev-opencode-go.oci-dev.sops.yaml",
 }
@@ -539,23 +540,28 @@ def check_manual_mail(root: Path, source: str, canonical: str) -> None:
         "        type: string",
         "        required: true",
         "      operation:",
-        "        description: Preview only, or apply the approved private declaration",
+        "        description: Qualify, seal recovery, preview, or apply the approved declaration",
         "        type: choice",
-        "        options: [preview, apply]",
-        "        default: preview",
+        "        options: [qualify, recover, preview, apply]",
+        "        default: qualify",
         "        required: true",
+        "      recipient:",
+        "        description: Existing owner public age recipient for qualification or recovery; never a private key",
+        "        type: string",
+        "        default: ''",
     ], "Mail candidate must admit only the one manual event and its source input")
     job = source[source.find("\njobs:\n"):]
     require(re.findall(r"(?m)^  ([a-z0-9-]+):\s*$", job) == ["operate"],
             "Mail candidate must have one and only one job")
-    gate = "    if: ${{ github.repository == 'roccho-org/envs' && github.ref_name == 'proposals' && github.sha == inputs.expected_source_sha && github.run_attempt == 1 && github.actor == 'roccho-dev' && github.actor_id == '40359643' && github.triggering_actor == 'roccho-dev' }}"
+    gate = "    if: ${{ github.repository == 'roccho-org/envs' && github.ref_name == 'proposals' && github.sha == inputs.expected_source_sha && github.run_attempt == 1 && github.actor == 'roccho-dev' && github.actor_id == '40359643' && github.triggering_actor == 'roccho-dev' && contains(fromJSON('[\"qualify\",\"recover\",\"preview\",\"apply\"]'), inputs.operation) }}"
     require(source.count(gate) == 1 and source.count("\n    if:") == 1,
             "Mail job must be source/controller-bound without re-runs")
-    require(-1 < source.find(gate) < source.find("    environment: dev-rent-tunnel\n")
+    environment = "    environment: ${{ inputs.operation == 'recover' && 'dev-rent-tunnel' || 'dev-projection' }}\n"
+    require(-1 < source.find(gate) < source.find(environment)
             < source.find("    steps:\n"),
             "Mail job must fail before Environment resolution or child execution")
-    require(source.count("    environment:") == 1 and "environment: ${{" not in source,
-            "Mail Environment must remain the one existing rent slot")
+    require(source.count("    environment:") == 1 and source.count(environment) == 1,
+            "Only recovery reads the historical rent slots; runtime uses projection")
     require(source.count("    runs-on: ubuntu-24.04\n") == 1
             and "    timeout-minutes: 10\n" in source,
             "Mail candidate job must be finite and fixed")
@@ -571,20 +577,28 @@ def check_manual_mail(root: Path, source: str, canonical: str) -> None:
             ], "Mail candidate may only grant effective actions/contents read")
     require("  cancel-in-progress: false\n" in source,
             "Mail candidate must not auto-cancel and replay")
+    recovery_step = source[source.find("      - name: Seal unchanged state inputs"):source.find("      - name: Provide encrypted recovery")]
     private_step = source[source.find("      - name: Initialize backend and run one selected Mail operation\n"):]
-    expected_inputs = {("secrets", name) for name in (
-        "MAIL_CONFIG", "CLOUDFLARE_API_TOKEN", "AWS_ACCESS_KEY_ID",
-        "AWS_SECRET_ACCESS_KEY", "RENT_STATE_PASSPHRASE",
-    )}
+    recovery_inputs = {("secrets", name) for name in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "RENT_STATE_PASSPHRASE")}
+    projection_inputs = {("secrets", name) for name in ("MAIL_CONFIG", "CLOUDFLARE_API_TOKEN", "SOPS_AGE_KEY")}
+    expected_inputs = recovery_inputs | projection_inputs
     require(set(INPUT_REFERENCE.findall(source)) == expected_inputs
             and len(INPUT_REFERENCE.findall(source)) == len(expected_inputs)
-            and set(INPUT_REFERENCE.findall(private_step)) == expected_inputs
+            and set(INPUT_REFERENCE.findall(recovery_step)) == recovery_inputs
+            and set(INPUT_REFERENCE.findall(private_step)) == projection_inputs
             and "R2_PARENT_" not in source and "TF_ENCRYPTION" not in source,
             "Mail inputs must be the five existing/private slots in the operation step only")
     require(consumer_run(source, "operate-dev-mail-routing.yml") == canonical,
             "Mail candidate must use the existing exact-SHA artifact consumer")
-    require({action for action, _ in ACTION_USE.findall(source)} == EFFECT_ACTIONS,
-            "Mail candidate must use only pinned checkout")
+    require({action for action, _ in ACTION_USE.findall(source)} ==
+            EFFECT_ACTIONS | {"actions/upload-artifact"},
+            "Mail uses pinned checkout and ciphertext-only upload")
+    require("          path: ${{ env.MAIL_HOME }}/mail-state.sops.json\n" in source
+            and "          retention-days: 1\n" in source
+            and "uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02\n" in source
+            and recovery_step.count("if: inputs.operation == 'recover'") == 1
+            and private_step.count("if: inputs.operation != 'recover'") == 1,
+            "Recovery and projection must remain isolated; upload only the encrypted carrier")
     require("          ref: ${{ github.sha }}\n" in source
             and "          persist-credentials: false\n" in source,
             "Mail candidate checkout must be source-bound without retained auth")
@@ -593,18 +607,23 @@ def check_manual_mail(root: Path, source: str, canonical: str) -> None:
             "          path: mail-ops-source\n"
             "          persist-credentials: false\n" in source,
             "Mail must consume the fixed Ops declaration without retained auth")
+    require("      - name: Checkout fixed Ops declaration\n"
+            "        if: inputs.operation == 'preview' || inputs.operation == 'apply'\n" in source,
+            "Qualification/recovery must not acquire or initialize the Ops root")
     require(run_commands(source.replace(canonical, "")) == [
         TOOLCHAIN_IDENTITY, "set -euo pipefail", "umask 077",
         'home="$(mktemp -d "$RUNNER_TEMP/mail-m0.XXXXXX")"',
+        'if [ "$MAIL_OPERATION" = preview ] || [ "$MAIL_OPERATION" = apply ]; then',
         'mkdir -m 700 "$home/root"',
         'for file in main.tf .terraform.lock.hcl README.md safety.tftest.hcl; do',
         'install -m 600 "$GITHUB_WORKSPACE/mail-ops-source/providers/mail-routing/$file" "$home/root/$file"',
-        'done', 'echo "MAIL_HOME=$home" >>"$GITHUB_ENV"',
+        'done', 'fi', 'echo "MAIL_HOME=$home" >>"$GITHUB_ENV"',
+        '"$ENVS_EFFECT_BIN/mail-routing-root" --operation recover',
         "set +e", '"$ENVS_EFFECT_BIN/mail-routing-root" --operation "$MAIL_OPERATION"',
         'result=$?', 'if [ "$MAIL_OPERATION" = preview ] && [ "$result" -eq 2 ]; then',
         'exit 0', 'fi', 'exit "$result"',
     ], "Mail can run only artifact identity, private root preparation and one operation")
-    require(source.count("      - name: ") == 6,
+    require(source.count("      - name: ") == 8,
             "Mail manual consumer must retain the bounded step set")
     adapter_source = (root / "adapters/mail_routing_root.py").read_text(encoding="utf-8")
     require("EXIT_INACTIVE = 78\n" in adapter_source
@@ -616,7 +635,7 @@ def check_manual_mail(root: Path, source: str, canonical: str) -> None:
             and adapter_source.count("os.environ") == 1,
             "Mail native private runner must use only its selected input snapshot")
     require('def main() -> int:\n' in adapter_source
-            and 'sys.argv[2] not in ("preview", "apply")' in adapter_source
+            and 'sys.argv[2] not in MAIL_OPERATIONS' in adapter_source
             and '        print(CLOSED_RESULT)\n        return EXIT_INACTIVE\n' in adapter_source,
             "Mail public entry must refuse unsupported/no-argument operation before inputs")
 
@@ -642,7 +661,8 @@ def check_workflows(root: Path, environments: dict[str, dict[str, Any]],
     for name, text in texts.items():
         require("pull_request_target:" not in text, f"{name}: pull_request_target is forbidden")
         require("secrets: inherit" not in text, f"{name}: secrets inheritance is forbidden")
-        require("environment: ${{" not in text, f"{name}: dynamic Environment is forbidden")
+        require("environment: ${{" not in text or name == "operate-dev-mail-routing.yml",
+                f"{name}: dynamic Environment is forbidden")
         for action, ref in ACTION_USE.findall(text):
             if not action.startswith(("./", "docker://")):
                 require(re.fullmatch(r"[0-9a-f]{40}", ref) is not None, f"{name}: mutable Action {action}@{ref}")
@@ -719,6 +739,19 @@ def check_workflows(root: Path, environments: dict[str, dict[str, Any]],
         require(token not in clean_start, f"clean-start must not use {token.strip()}")
     canonical = consumer_run(clean_start, "check.yml clean-start")
     check_manual_mail(root, texts["operate-dev-mail-routing.yml"], canonical)
+    mail_cipher = root / "ciphertexts/dev-mail-state.sops.json"
+    if mail_cipher.exists():
+        require(not mail_cipher.is_symlink(), "Mail state carrier must be a regular source file")
+        spec = importlib.util.spec_from_file_location("mail_cipher_contract", root / "adapters/mail_routing_root.py")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        try:
+            spec.loader.exec_module(module)
+            module.state_ciphertext(mail_cipher.read_bytes())
+        except module.NativeSourceHold:
+            raise RepositoryError("Mail state carrier structure is invalid") from None
+        finally:
+            sys.modules.pop(spec.name, None)
     require(clean_start.count(canonical) == 2, "clean-start must run the canonical consumer and its missing case")
     for marker in CONSUMER_BINDING:
         require(marker in canonical, f"consumer must bind the named commit: {marker}")

@@ -208,6 +208,16 @@ def test_transport_no_redirect_no_proxy() -> None:
 
 
 def main() -> None:
+    direct = mail.observe_selected(DOMAIN, ACCOUNT, TOKEN, Fake(), expected_zone=ZONE)
+    assert direct["status"] == "READ_OBSERVED"
+    mismatch = Fake()
+    refused = mail.observe_selected(DOMAIN, ACCOUNT, TOKEN, mismatch, expected_zone="c" * 32)
+    assert refused["read"]["zone"] == "UNKNOWN" and len(mismatch.calls) == 2
+    assert refused["zone_unknown_reason"] == "owner_or_id_mismatch"
+    for domain, account, token in (("bad..invalid", ACCOUNT, TOKEN), (DOMAIN, "invalid", TOKEN), (DOMAIN, ACCOUNT, "")):
+        unopened = Fake()
+        assert mail.observe_selected(domain, account, token, unopened)["status"] == "INCOMPLETE"
+        assert unopened.calls == []
     with tempfile.TemporaryDirectory() as directory:
         path = Path(directory) / "event.json"
         selected = event(path)

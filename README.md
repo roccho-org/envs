@@ -372,11 +372,13 @@ preview-to-apply chain or automatic retry. A preview delta is reported as
 `DELTA`; apply success is only `APPLIED_UNVERIFIED`.
 
 `operate-dev-mail-routing` is manual and restricted to the exact canonical
-SHA, `roccho-dev`, first attempt and serialized runs. Its operation defaults
-to preview; target data is never a dispatch input. Only the operation step
-receives the private `MAIL_CONFIG` and the four existing Environment slots.
+SHA, `roccho-dev`, first attempt and serialized runs. Its closed operations
+are `qualify`, `recover`, `preview` and `apply`, defaulting to qualification.
+Target data is never a dispatch input; `recipient` is an existing public age
+recipient, never an identity. Runtime uses the existing `dev-projection`
+Environment: `MAIL_CONFIG`, its Cloudflare token and `SOPS_AGE_KEY`.
 It copies the pinned Ops files into owner-only scratch and consumes the
-same-SHA provided effect artifact. Native streams stay in private scratch
+same-SHA provided effect artifact for preview/apply. Native streams stay in private scratch
 and are never uploaded. No arguments or unsupported operations still return
 `INACTIVE / NOT_RUN`, exit 78, before reading protected input.
 
@@ -387,6 +389,35 @@ verification and fresh ready/verified readback, a separate rule apply retains
 the flags of already-owned resources. A later preview must return no-op 0,
 and actual delivery needs an independent test message. Source merge does
 not register Secrets, dispatch a workflow or establish live Mail completion.
+
+Qualification reuses the GET-only reader against the actual projection
+token and exact private zone, independently of the apply preflight flag.
+A fixed non-secret canary checks whether projection's existing SOPS key can
+open an envelope addressed to the selected existing recipient. Read and key
+results are separate; neither establishes Write rights or backend recovery.
+
+Recovery selects the historical `dev-rent-tunnel` Environment solely to
+SOPS-seal its unchanged `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and
+`RENT_STATE_PASSPHRASE`. It reads no Cloudflare token or private age key and
+invokes no OpenTofu. Only the validated ciphertext is uploaded, with one-day
+retention. The Owner acquires exact producer/head/digest bytes, archives an
+encrypted copy and verifies authenticated decryption privately with the
+existing identity before adopting the same bytes at
+`ciphertexts/dev-mail-state.sops.json`. An expiring artifact alone is not a
+recovery copy. All authorized holders of the shared age identity can open
+this carrier; it is not an exclusive Mail key.
+
+Source checks require exactly three encrypted JSON scalars and the pinned
+single-recipient age metadata, rejecting duplicate members, comments,
+additional documents and other key mechanisms. This is structural validation;
+private authenticated decryption remains a separate recovery check.
+
+Preview/apply consume only that fixed source carrier. SOPS opens it into
+memory; strict duplicate/key/type/format checks precede composition. The
+age identity reaches only SOPS, while backend credentials/passphrase reach
+only OpenTofu. No plaintext file/log/argv/artifact, new key, rent Secret
+replacement, cross-Environment GitHub Secret copy or backend migration is
+introduced. The existing state passphrase and method names are preserved.
 
 `flake.nix` and `flake.lock` define the only toolchain for authoring and projection: Python, SOPS, Wrangler, Git, GitHub CLI and curl from the locked nixpkgs input, plus the `envs-effect` entry running this source's adapter. `.#effect-artifact` is that entry's complete store closure as one tar with an `ENTRY` pointer.
 

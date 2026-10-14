@@ -825,7 +825,11 @@ jobs:
         run: '"$RUNNER_TEMP/envs-effect/bin/python3" -I checks/test_mail_routing_read.py'
 
       - name: Test hard-inactive Mail root and actual source-bound native tools
-        run: 'MAIL_TEST_TOOLCHAIN_ENTRY="$RUNNER_TEMP/envs-effect/bin/envs-effect" "$RUNNER_TEMP/envs-effect/bin/python3" -I checks/test_mail_routing_root.py'
+        run: |
+          set -euo pipefail
+          nix build .#check-age --no-update-lock-file --out-link "$RUNNER_TEMP/check-age"
+          export MAIL_TEST_AGE_KEYGEN="$RUNNER_TEMP/check-age/bin/age-keygen"
+          MAIL_TEST_TOOLCHAIN_ENTRY="$RUNNER_TEMP/envs-effect/bin/envs-effect" "$RUNNER_TEMP/envs-effect/bin/python3" -I checks/test_mail_routing_root.py
 
       - name: Prove the actual source-bound Mail root wrapper refuses
         run: |
@@ -845,7 +849,6 @@ jobs:
       - name: Real locked SOPS roundtrip for the rent tunnel token
         run: |
           set -euo pipefail
-          nix build .#check-age --no-update-lock-file --out-link "$RUNNER_TEMP/check-age"
           tool="$RUNNER_TEMP/envs-effect/bin"
           "$tool/python3" -I checks/test_rent_tunnel.py --sops "$tool/sops" --age-keygen "$RUNNER_TEMP/check-age/bin/age-keygen" --tofu "$tool/tofu"
 
