@@ -8,6 +8,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("host_tool_selection_proposal",
@@ -56,6 +57,7 @@ class HostToolProposalTests(unittest.TestCase):
         self.assertNotEqual(module.project(changed, targets)[0]["proposed_q"], q1)
         # A second target is an in-memory fixture, not a new accepted Host ID or catalog row.
         another = copy.deepcopy(targets[1])
+        self.assertEqual((another["platform"], another["architecture"]), ("linux", "amd64"))
         another["id"] = "fixture-rent-b"
         other_proposal = copy.deepcopy(p[0])
         other_proposal["id"] = "fixture-rent-b.host-tool-selection"
@@ -66,6 +68,44 @@ class HostToolProposalTests(unittest.TestCase):
         self.assertNotEqual(projected[0]["proposed_q"], projected[1]["proposed_q"])
         self.assertEqual(projected[1]["proposed_q"], q1)
         self.assertEqual(projected[0]["effect"], "FORBIDDEN")
+
+    def test_target_execution_os_and_architecture_must_match_linux_amd64(self):
+        # R1 counterexamples: the consumer identity and Tool output remain identical, but an
+        # incompatible or unknown execution platform must not even compute a proposed revision.
+        proposals, targets = fixture()
+        current = module.project(proposals, targets)
+        self.assertEqual(len(current), 1)
+        self.assertRegex(current[0]["proposed_q"], r"^sha256:[0-9a-f]{64}$")
+        self.assertEqual((targets[1]["platform"], targets[1]["architecture"]),
+                         ("linux", "amd64"))
+        bad_shapes = (
+            ("architecture", "arm64"),
+            ("platform", "windows"),
+            ("architecture", "x86_64"),
+            ("platform", "Linux"),
+            ("architecture", None),
+            ("platform", None),
+            ("architecture", 64),
+            ("platform", ["linux"]),
+        )
+        for field, value in bad_shapes:
+            with self.subTest(field=field, value=value):
+                altered = copy.deepcopy(targets)
+                altered[1][field] = value
+                with patch.object(module.hashlib, "sha256") as compute_q:
+                    with self.assertRaisesRegex(
+                        module.ProposalError, "target OS/architecture is incompatible"
+                    ):
+                        module.project(proposals, altered)
+                    compute_q.assert_not_called()
+        for field in ("platform", "architecture"):
+            with self.subTest(missing=field):
+                altered = copy.deepcopy(targets)
+                del altered[1][field]
+                with patch.object(module.hashlib, "sha256") as compute_q:
+                    with self.assertRaises(module.ProposalError):
+                        module.project(proposals, altered)
+                    compute_q.assert_not_called()
 
     def test_unauthorized_status_fields_and_foreign_material_refused(self):
         p, targets = fixture()
