@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import copy
 import json
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -213,6 +214,27 @@ class SourceProvenanceTests(unittest.TestCase):
             self.records[url] = value
             self.refuse()
             self.records = old
+
+    def test_v6_coverage_has_all_64_distinct_obligations_with_exact_sources(self):
+        cover = (ROOT / "checks/host_tool_source_coverage.md").read_text(encoding="utf-8")
+        ids = re.findall(r"^\\| (V\\d{2}|[SBGHA]\\d|L\\d{2}) \\|", cover, re.MULTILINE)
+        expected = (
+            {f"V{i:02}" for i in range(1, 15)}
+            | {f"S{i}" for i in range(1, 5)}
+            | {f"B{i}" for i in range(1, 6)}
+            | {f"G{i}" for i in range(1, 7)}
+            | {f"H{i}" for i in range(1, 5)}
+            | {f"A{i}" for i in range(1, 4)}
+            | {f"L{i:02}" for i in range(1, 29)}
+        )
+        self.assertEqual(len(ids), 64)
+        self.assertEqual(set(ids), expected)
+        for row in self.snapshot["entries"]:
+            self.assertIn(row["head"], cover)
+            self.assertIn(row["tree"], cover)
+        self.assertIn("S4_REAL_COMPOSITE_GREEN=false", cover)
+        self.assertIn("D_ADMITTED=false", cover)
+        self.assertIn("TARGET_READY=false", cover)
 
     def test_missing_public_api_evidence_fails_closed(self):
         del self.records[next(iter(self.records))]
