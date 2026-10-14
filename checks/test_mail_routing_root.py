@@ -145,6 +145,9 @@ def check_apply_failure_summary(mail) -> None:
                     journal.replace("422 Unprocessable Entity", marker),
                     journal.replace('2007', 'true'), journal.replace('2007', '100000'),
                     journal.replace('2007', '-1'), journal.replace('2007', '0'),
+                    journal + json.dumps({"type": "unsupported", "@message": marker}),
+                    journal.replace('"severity": "error"', '"severity": "invalid"') + json.dumps(diagnostic),
+                    journal + json.dumps({"type": "diagnostic", "diagnostic": {"severity": "warning"}}),
                     journal + json.dumps(version), journal + "malformed", "", " " * 8388609):
             capture.write_text(bad, encoding="utf-8")
             assert mail.apply_failure_summary(capture) == {"classification": "UNCLASSIFIED"}

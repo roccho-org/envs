@@ -894,13 +894,20 @@ def apply_failure_summary(path: Path) -> dict:
             return unknown
         resources, statuses, codes = set(), set(), set()
         for event in events[1:]:
-            if event.get("type") == "version":
+            if event.get("type") not in (
+                    "planned_change", "change_summary", "resource_drift", "refresh_start", "refresh_complete",
+                    "apply_start", "apply_progress", "apply_complete", "apply_errored", "diagnostic", "log",
+                    "outputs", "state_lock_acquire", "state_lock_release"):
                 return unknown
             if event.get("type") == "apply_errored":
                 resources.add(labels[event["hook"]["resource"]["addr"]])
             if event.get("type") != "diagnostic":
                 continue
             diagnostic = event["diagnostic"]
+            if (not isinstance(diagnostic, dict) or diagnostic.get("severity") not in ("warning", "error")
+                    or not isinstance(diagnostic.get("summary"), str)
+                    or not isinstance(diagnostic.get("detail"), str)):
+                return unknown
             if diagnostic.get("severity") != "error":
                 continue
             if diagnostic.get("summary") != "failed to make http request":
