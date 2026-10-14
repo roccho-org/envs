@@ -25,17 +25,17 @@ from pathlib import Path
 from typing import Mapping
 from types import MappingProxyType
 
-OPS_MAIL_COMMIT = "e0c208356d0e2908224cbbd356c69256cb0e4528"
-OPS_MAIL_TREE = "a62b0ccbebda639783341c1e59372977ed0a7299"
-OPS_MAIN_BLOB = "bf7d90ddd1c2a2b63e47ece40b5409e24ca9b125"
+OPS_MAIL_COMMIT = "afd831dba8f401fb37fc20c27ab8d1f176102050"
+OPS_MAIL_TREE = "e6152ee455f1bb699cfb12e1ed84b4885afcd618"
+OPS_MAIN_BLOB = "00a40c802d603e0acea5db85694ba183a4c02084"
 OPS_LOCK_BLOB = "4994a1a2967771935c94bcca83752ffebe78e2ff"
-OPS_README_BLOB = "cf5fa3931eed554eaf8bf75f87888118a16cf238"
-OPS_TEST_BLOB = "04db81a38059da98bb07a397727cf0fb291e5b29"
+OPS_README_BLOB = "f28978495df2d9ea4b58975292f6b82e43087762"
+OPS_TEST_BLOB = "21841324720f170282d6690bb3a5d78925e8c211"
 NATIVE_PROVIDER_H1 = "h1:HiX8Q7db7YrAYCuOBOMsvcmyX1RmvFqALtgJDvtYRhc="
 NIX_BIN = re.compile(r"^/nix/store/[a-z0-9]{32}-[^/]+/bin/tofu$")
 BUCKET = re.compile(r"^[a-z0-9][a-z0-9.-]{2,62}$")
 NOOP_PLAN_ARGS = ("plan", "-input=false", "-lock=true", "-detailed-exitcode", "-json")
-APPLY_ARGS = ("apply", "-input=false", "-lock=true", "-auto-approve")
+APPLY_ARGS = ("apply", "-input=false", "-lock=true", "-auto-approve", "-json")
 
 
 class NativeSourceHold(Exception):
@@ -875,6 +875,56 @@ def preview_summary(path: Path, code: int) -> dict:
         raise NativeSourceHold("MAIL_PREVIEW_UNPROVEN") from None
 
 
+def apply_failure_summary(path: Path) -> dict:
+    """Reduce private JSON diagnostics to fixed labels and numeric codes only.
+
+    This observes a failed operation; it never changes UNPROVEN into success
+    or authorizes a retry. Unsupported/truncated streams reveal no detail.
+    """
+    unknown = {"classification": "UNCLASSIFIED"}
+    labels = {"cloudflare_email_routing_address.gmail[0]": "destination",
+              "cloudflare_email_routing_dns.zone[0]": "dns",
+              "cloudflare_email_routing_rule.literal[0]": "rule"}
+    try:
+        _owner_home(path.parent)
+        rows = _owner_file(path, path.parent, 8388608).decode("utf-8").splitlines()
+        events = [_json_object(row.encode("utf-8")) for row in rows]
+        if (events[0].get("type") != "version" or events[0].get("tofu") != "1.12.3"
+                or re.fullmatch(r"1\.[0-9]+", events[0].get("ui", "")) is None):
+            return unknown
+        resources, statuses, codes = set(), set(), set()
+        for event in events[1:]:
+            if event.get("type") == "version":
+                return unknown
+            if event.get("type") == "apply_errored":
+                resources.add(labels[event["hook"]["resource"]["addr"]])
+            if event.get("type") != "diagnostic":
+                continue
+            diagnostic = event["diagnostic"]
+            if diagnostic.get("severity") != "error":
+                continue
+            if diagnostic.get("summary") != "failed to make http request":
+                return unknown
+            match = re.search(r": ([45][0-9]{2}) [A-Za-z ]+ (\{.*\})\s*$", diagnostic["detail"], re.DOTALL)
+            if match is None:
+                return unknown
+            envelope = _json_object(match[2].encode("utf-8"))
+            errors = envelope.get("errors")
+            if (envelope.get("success") is not False or not isinstance(errors, list)
+                    or not 0 < len(errors) <= 5
+                    or any(not isinstance(error, dict) or type(error.get("code")) is not int
+                           or not 0 < error["code"] < 100000 for error in errors)):
+                return unknown
+            statuses.add(int(match[1]))
+            codes.update(error["code"] for error in errors)
+        if not statuses or len(statuses) > 5 or len(codes) > 5:
+            return unknown
+        return {"classification": "PROVIDER_HTTP_ERROR", "resources": sorted(resources),
+                "http_status": sorted(statuses), "api_codes": sorted(codes)}
+    except Exception:
+        return unknown
+
+
 def manual_entry(operation: str, environ: Mapping[str, str]) -> tuple[str, int] | dict:
     """Consume the selected Environment slots without credential discovery.
 
@@ -930,6 +980,11 @@ def manual_entry(operation: str, environ: Mapping[str, str]) -> tuple[str, int] 
             return preview_summary(home / "preview.out", result[1])
         except NativeSourceHold:
             return "PREVIEW_UNPROVEN", 1
+    if operation == "apply" and result[1] != 0:
+        return {"kind": "envs.mailM0.manual.v1", "status": result[0],
+                "stage": "init" if result[0] == "INIT_UNPROVEN" else "apply",
+                "failure": ({"classification": "UNCLASSIFIED"} if result[0] == "INIT_UNPROVEN"
+                            else apply_failure_summary(home / "apply.out")), "_code": result[1]}
     return result
 
 
@@ -941,8 +996,9 @@ def main() -> int:
     try:
         result = manual_entry(sys.argv[2], os.environ)
         if isinstance(result, dict):
+            code = result.pop("_code", {"READ_OBSERVED": 0, "NO_OP": 0, "DELTA": 2}.get(result["status"], 1))
             print(json.dumps(result, separators=(",", ":"), sort_keys=True))
-            return {"READ_OBSERVED": 0, "NO_OP": 0, "DELTA": 2}.get(result["status"], 1)
+            return code
         status, code = result
     except Exception:
         # No exception text, traceback, path, target or child output escapes.

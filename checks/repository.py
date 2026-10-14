@@ -607,7 +607,7 @@ def check_manual_mail(root: Path, source: str, canonical: str) -> None:
             and "          persist-credentials: false\n" in source,
             "Mail candidate checkout must be source-bound without retained auth")
     require("          repository: roccho-org/ops\n"
-            "          ref: e0c208356d0e2908224cbbd356c69256cb0e4528\n"
+            "          ref: afd831dba8f401fb37fc20c27ab8d1f176102050\n"
             "          path: mail-ops-source\n"
             "          persist-credentials: false\n" in source,
             "Mail must consume the fixed Ops declaration without retained auth")

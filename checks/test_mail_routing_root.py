@@ -118,6 +118,41 @@ def check_preview_summary(mail) -> None:
             pass
 
 
+def check_apply_failure_summary(mail) -> None:
+    if os.name != "posix":
+        return
+    marker = "SYNTHETIC_PRIVATE_ERROR_CANARY"
+    version = {"type": "version", "tofu": "1.12.3", "ui": "1.0"}
+    envelope = {"success": False, "errors": [{"code": 2007, "message": marker}], "result": marker}
+    diagnostic = {"type": "diagnostic", "@message": marker,
+                  "diagnostic": {"severity": "error", "summary": "failed to make http request",
+                                 "detail": 'POST "https://' + marker + '": 422 Unprocessable Entity ' + json.dumps(envelope)}}
+    hook = {"type": "apply_errored", "hook": {"resource": {"addr": "cloudflare_email_routing_dns.zone[0]"}}}
+    journal = "\n".join(json.dumps(e) for e in (version, hook, diagnostic)) + "\n"
+    expected = {"classification": "PROVIDER_HTTP_ERROR", "resources": ["dns"],
+                "http_status": [422], "api_codes": [2007]}
+    with tempfile.TemporaryDirectory() as directory:
+        home = Path(directory) / "private"
+        home.mkdir(mode=0o700)
+        capture = home / "apply.out"
+        capture.write_text(journal, encoding="utf-8")
+        capture.chmod(0o600)
+        assert mail.apply_failure_summary(capture) == expected
+        assert marker not in repr(expected)
+        for bad in (journal.replace('"1.12.3"', '"1.12.2"'), journal.replace('"1.0"', '"2.0"'),
+                    journal.replace("cloudflare_email_routing_dns.zone[0]", marker),
+                    journal.replace("failed to make http request", marker),
+                    journal.replace("422 Unprocessable Entity", marker),
+                    journal.replace('2007', 'true'), journal.replace('2007', '100000'),
+                    journal.replace('2007', '-1'), journal.replace('2007', '0'),
+                    journal + json.dumps(version), journal + "malformed", "", " " * 8388609):
+            capture.write_text(bad, encoding="utf-8")
+            assert mail.apply_failure_summary(capture) == {"classification": "UNCLASSIFIED"}
+        capture.write_text(journal, encoding="utf-8")
+        capture.chmod(0o644)
+        assert mail.apply_failure_summary(capture) == {"classification": "UNCLASSIFIED"}
+
+
 def check_state_contract(mail) -> None:
     data = state_envelope_fixture()
     assert mail.state_ciphertext(data) == "age1" + "q" * 58
@@ -240,7 +275,7 @@ def check_manual_job() -> None:
         assert clause in content
     assert "${{ vars." not in content
     assert "options: [qualify, recover, preview, apply]" in content and "default: qualify" in content
-    assert "ref: e0c208356d0e2908224cbbd356c69256cb0e4528" in content
+    assert "ref: afd831dba8f401fb37fc20c27ab8d1f176102050" in content
     assert "path: ${{ env.MAIL_HOME }}/mail-state.sops.json" in content and "cancel-in-progress: false" in content
     assert "contains(fromJSON('[\"qualify\",\"recover\",\"preview\",\"apply\"]'), inputs.operation)" in content
     assert "environment: ${{ inputs.operation == 'recover' && 'dev-rent-tunnel' || 'dev-projection' }}" in content
@@ -260,6 +295,7 @@ def check_native_source_and_plan() -> None:
         spec.loader.exec_module(mail)
         check_state_contract(mail)
         check_preview_summary(mail)
+        check_apply_failure_summary(mail)
         with tempfile.TemporaryDirectory(prefix="mail-m0-native-fixture-") as directory:
             home = Path(directory)
             ops = home / "ops-mail-root"
@@ -276,8 +312,8 @@ def check_native_source_and_plan() -> None:
             }
             original_blobs = {attr: getattr(mail, attr) for attr, _ in fixtures.values()}
             try:
-                assert mail.OPS_MAIL_COMMIT == "e0c208356d0e2908224cbbd356c69256cb0e4528"
-                assert mail.OPS_MAIL_TREE == "a62b0ccbebda639783341c1e59372977ed0a7299"
+                assert mail.OPS_MAIL_COMMIT == "afd831dba8f401fb37fc20c27ab8d1f176102050"
+                assert mail.OPS_MAIL_TREE == "e6152ee455f1bb699cfb12e1ed84b4885afcd618"
                 for name, (attr, data) in fixtures.items():
                     (ops / name).write_bytes(data)
                     setattr(mail, attr, mail.git_blob(data))
@@ -979,6 +1015,10 @@ def check_manual_integration(mail, manifest: str, identity: str, recipient: str)
                     assert actual == {"kind": "envs.mailM0.preview.v1", "status": expected[0],
                                       "changes": {"destination": "create", "dns": "create"} if operation_code == 2 else {},
                                       "drift": {}, "totals": {"add": 2 if operation_code == 2 else 0, "change": 0, "remove": 0}}
+                elif operation == "apply" and expected[1] != 0:
+                    assert actual == {"kind": "envs.mailM0.manual.v1", "status": expected[0],
+                                      "stage": "init" if init_code else "apply",
+                                      "failure": {"classification": "UNCLASSIFIED"}, "_code": expected[1]}
                 else:
                     assert actual == expected
                 assert len(starts) == (1 if init_code else 2)
