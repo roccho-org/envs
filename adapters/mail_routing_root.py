@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Explicit Mail qualification, encrypted recovery and projection.
 
-No arguments refuse before protected inputs. Qualification uses GET and a
-key canary; recovery seals unchanged state inputs. Projection opens the
-adopted envelope, initializes, then performs one preview/apply without a
+No arguments refuse before protected inputs. Qualification uses GET only;
+recovery seals unchanged state inputs for local restoration. Projection
+consumes only its state-input Secret, then performs one preview/apply without a
 saved plan or retry. These operations never activate one another.
 """
 from __future__ import annotations
@@ -799,6 +799,8 @@ def recover_state(environ: Mapping[str, str], tools: NativeToolset, home: Path) 
 
 def _decode_state(data: bytes) -> dict[str, str]:
     try:
+        if not isinstance(data, bytes) or not 0 < len(data) <= 65536:
+            raise ValueError("invalid state input size")
         return _state_values(_json_object(data))
     except Exception:
         raise NativeSourceHold("MAIL_STATE_INPUT_UNPROVEN") from None
@@ -807,33 +809,25 @@ def _decode_state(data: bytes) -> dict[str, str]:
 def qualify(environ: Mapping[str, str], tools: NativeToolset, home: Path) -> dict:
     config = _selected_config(environ.get("MAIL_CONFIG", "").encode("utf-8"))
     reader = _source_module("mail_routing_read")
-    result = reader.observe_selected(config["zone_name"].lower(), config["account_id"],
-                                     environ.get("CLOUDFLARE_API_TOKEN", ""),
-                                     expected_zone=config["zone_id"])
-    result["key_recovery"] = "UNPROVEN"
-    try:
-        canary = b'{"CANARY":"mail-key-qualification-v1"}'
-        sealed = _sops(tools, home, canary, recipient=environ.get("MAIL_STATE_AGE_RECIPIENT", ""))
-        opened = _sops(tools, home, sealed, identity=environ.get("SOPS_AGE_KEY", ""))
-        if json.loads(opened) == json.loads(canary):
-            result["key_recovery"] = "RECIPIENT_MATCH"
-    except Exception:
-        pass
-    return result
+    return reader.observe_selected(config["zone_name"].lower(), config["account_id"],
+                                   environ.get("CLOUDFLARE_API_TOKEN", ""),
+                                   expected_zone=config["zone_id"])
 
 
 def manual_entry(operation: str, environ: Mapping[str, str]) -> tuple[str, int] | dict:
     """Consume the selected Environment slots without credential discovery.
 
     The workflow prepares an absent owner-only home. Recovery seals unchanged
-    input slots; projection opens the adopted source envelope in memory.
+    input slots for local restoration; projection parses its state-input Secret.
     No persistent key is generated or rotated, and no plaintext file is made.
     """
     if operation not in MAIL_OPERATIONS:
         raise NativeSourceHold("MAIL_OPERATION_UNSELECTED")
     names = {"MAIL_HOME", "ENVS_EFFECT_TOOLCHAIN"}
     names |= (STATE_INPUT_KEYS | {"MAIL_STATE_AGE_RECIPIENT"} if operation == "recover" else
-              {"MAIL_CONFIG", "CLOUDFLARE_API_TOKEN", "SOPS_AGE_KEY", "MAIL_STATE_AGE_RECIPIENT"})
+              {"MAIL_CONFIG", "CLOUDFLARE_API_TOKEN"})
+    if operation in ("preview", "apply"):
+        names.add("MAIL_STATE_INPUTS")
     selected = {name: environ.get(name, "") for name in names}
     source = Path(__file__).resolve().parents[1]
     tools = provided_native_tools(source, selected.get("ENVS_EFFECT_TOOLCHAIN", ""), sys.executable)
@@ -854,12 +848,7 @@ def manual_entry(operation: str, environ: Mapping[str, str]) -> tuple[str, int] 
     token = selected.get("CLOUDFLARE_API_TOKEN", "")
     if not 0 < len(token) <= 4096 or any(not 33 <= ord(char) <= 126 for char in token):
         raise NativeSourceHold("MAIL_AFTER_SLOTS_UNSELECTED")
-    cipher = source / STATE_CIPHERTEXT
-    if cipher.is_symlink() or not cipher.is_file():
-        raise NativeSourceHold("MAIL_STATE_CIPHERTEXT_UNPROVEN")
-    encrypted = cipher.read_bytes()
-    state_ciphertext(encrypted)
-    state_inputs = _decode_state(_sops(tools, home, encrypted, identity=selected.get("SOPS_AGE_KEY", "")))
+    state_inputs = _decode_state(selected.get("MAIL_STATE_INPUTS", "").encode("utf-8"))
     backend = home / "backend.hcl"
     private_output_sink(backend)
     content = ('bucket = "' + config["state_bucket"] + '"\n'
@@ -886,7 +875,7 @@ def main() -> int:
         result = manual_entry(sys.argv[2], os.environ)
         if isinstance(result, dict):
             print(json.dumps(result, separators=(",", ":"), sort_keys=True))
-            return 0 if result["status"] == "READ_OBSERVED" and result["key_recovery"] == "RECIPIENT_MATCH" else 1
+            return 0 if result["status"] == "READ_OBSERVED" else 1
         status, code = result
     except Exception:
         # No exception text, traceback, path, target or child output escapes.
