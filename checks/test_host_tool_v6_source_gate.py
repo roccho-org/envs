@@ -118,22 +118,38 @@ def check_v6_coverage(document: str, snapshot: dict) -> dict:
     evidence = {row["repository"]: row for row in snapshot["entries"]}
     need(set(evidence) == {"roccho-org/envs", "roccho-dev/windows",
                           "roccho-dev/resources"}, "v6 source owners differ")
+    # Bind each exact SHA/tree to its OWN evidence registry row. Repeating an R
+    # review ID elsewhere (e.g. A1) must not mask a corrupted registry entry.
+    registry = {}
+    for line in document.splitlines():
+        match = re.match(r"^\\| (F1|F2|X|R) \\|", line)
+        if not match:
+            continue
+        label = match.group(1)
+        columns = line.split("|")
+        need(len(columns) == 6 and label not in registry,
+             f"{label}: duplicated or malformed SOURCE registry")
+        registry[label] = (columns[2], columns[3])
+    need(set(registry) == {"F1", "F2", "X", "R"},
+         "v6 exact SOURCE evidence registry incomplete")
     for repo, label, rev in (
         ("roccho-org/envs", "F1", V6_REVIEWED["F1_R"]),
         ("roccho-dev/windows", "F2", V6_REVIEWED["F2_R"]),
         ("roccho-dev/resources", "R", V6_REVIEWED["R_R"]),
     ):
         row = evidence[repo]
-        # Enforce exact R-reviewed PR, commit tree and CI reference, not just
-        # an unrelated identifier or the earlier #91/#86/#17 trio.
-        need((f"{label} |" in document or f"| {label} |" in document)
-             and row["head"] in document and row["tree"] in document
-             and str(row["run_id"]) in document and rev in document
-             and f"#{row['pr']}" in document,
-             f"{label}: current frozen SOURCE/CI/R reference missing")
-    for name, value in V6_REVIEWED.items():
-        if name.startswith("X_"):
-            need(value in document, f"v6 X: frozen reviewed provenance {name} missing")
+        src, ci = registry[label]
+        need(row["head"] in src and row["tree"] in src
+             and f"#{row['pr']}" in src and str(row["run_id"]) in ci
+             and rev in ci,
+             f"{label}: wrong head/tree/run/R inside its own registry row")
+    x_source, x_ci = registry["X"]
+    need(V6_REVIEWED["X_head"] in x_source
+         and V6_REVIEWED["X_tree"] in x_source
+         and V6_REVIEWED["X_run"] in x_ci
+         and V6_REVIEWED["X_R"] in x_ci
+         and "#92" in x_source,
+         "X: frozen independently R-reviewed v6 SOURCE differs")
     need("凍結済みのR受容head" in document,
          "v6 X must be historical frozen head, never this PR's own new CI")
     need("SOURCE-proven は行全体の本番保証ではない" in document,
@@ -383,7 +399,8 @@ class FrozenV6Source(unittest.TestCase):
              "SOURCE-proven:F1 ; SOURCE-proven:X"),
             ("SYNTHETIC ; SOURCE-proven:F1 ; SOURCE-proven:R",
              "SOURCE-proven:F1 ; SOURCE-proven:R"),
-            ("REAL_TARGET_UNPROVEN", "REAL_TARGET_SUCCESS"),
+            ("SYNTHETIC ; SOURCE-proven:F2 ; REAL_TARGET_UNPROVEN",
+             "SYNTHETIC ; SOURCE-proven:F2 ; REAL_TARGET_SUCCESS"),
             ("SOURCE-proven:F2", "SOURCE-proven:unreviewed"),
             ("Test synthetic Host contains/manages/optional wrap (NOT_ADMITTED)",
              "Test fake Target ID only"),
