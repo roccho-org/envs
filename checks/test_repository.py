@@ -79,6 +79,20 @@ def main() -> None:
     assert baseline["canonical_branch"] == "proposals"
     assert baseline["retained_compatibility_branch"] == "main"
 
+    # Structural Source checks reject plaintext/duplicate metadata before publication.
+    fixture_spec = importlib.util.spec_from_file_location("mail_carrier_fixtures", ROOT / "checks/test_mail_routing_root.py")
+    fixture = importlib.util.module_from_spec(fixture_spec)
+    fixture_spec.loader.exec_module(fixture)
+    carrier = fixture.state_envelope_fixture()
+    valid = copy_root()
+    try:
+        (valid / "ciphertexts/dev-mail-state.sops.json").write_bytes(carrier)
+        assert repository.inspect(valid)["status"] == "PASS"
+    finally:
+        shutil.rmtree(valid.parent, ignore_errors=True)
+    for bad in fixture.invalid_state_envelopes(carrier):
+        expect_red(lambda root, bad=bad: (root / "ciphertexts/dev-mail-state.sops.json").write_bytes(bad))
+
     # Manual Mail operations retain actor/source and private-input boundaries.
     manual = ".github/workflows/operate-dev-mail-routing.yml"
     # All source-level triggers are denied except the one manual dispatch.

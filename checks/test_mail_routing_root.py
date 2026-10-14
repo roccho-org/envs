@@ -17,6 +17,62 @@ WORKFLOW = ROOT / ".github/workflows/operate-dev-mail-routing.yml"
 CLOSED = {"kind": "envs.mailM0.manual.v1", "status": "INACTIVE", "effect": "NOT_RUN"}
 
 
+def state_envelope_fixture() -> bytes:
+    """Structural fixture only; real SOPS authentication is tested in CI."""
+    enc = "ENC[AES256_GCM,data:Zml4dHVyZQ==,iv:" + "a" * 43 + "=,tag:" + "b" * 22 + "==,type:str]"
+    return json.dumps({
+        **{name: enc for name in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "RENT_STATE_PASSPHRASE")},
+        "sops": {"age": [{"recipient": "age1" + "q" * 58,
+                          "enc": "-----BEGIN AGE ENCRYPTED FILE-----\nZml4dHVyZQ==\n-----END AGE ENCRYPTED FILE-----\n"}],
+                 "lastmodified": "2026-10-14T00:00:00Z", "mac": enc,
+                 "unencrypted_suffix": "_unencrypted", "version": "3.13.2"},
+    }).encode()
+
+
+def invalid_state_envelopes(data: bytes) -> list[bytes]:
+    bad = [data + b'\n# SYNTHETIC_PLAINTEXT_CANARY', data + data,
+           data[:-1] + b',"AWS_SECRET_ACCESS_KEY":"SYNTHETIC_PLAINTEXT_CANARY"}',
+           data.replace(b'"version": "3.13.2"', b'"version": "3.13.2","version": "3.13.2"'),
+           b'AWS_SECRET_ACCESS_KEY: ENC[AES256_GCM,fixture]\nAWS_SECRET_ACCESS_KEY: SYNTHETIC_PLAINTEXT_CANARY\n']
+    for mechanism in ("kms", "gcp_kms", "azure_kv", "hc_vault", "hckms", "pgp", "key_groups"):
+        envelope = json.loads(data)
+        envelope["sops"][mechanism] = []
+        bad.append(json.dumps(envelope).encode())
+    for section, name, value in ((None, "UNKNOWN", "SYNTHETIC_PLAINTEXT_CANARY"),
+                                 (None, "AWS_ACCESS_KEY_ID", "SYNTHETIC_PLAINTEXT_CANARY"),
+                                 ("sops", "mac", "SYNTHETIC_PLAINTEXT_CANARY"),
+                                 ("sops", "unencrypted_suffix", "SYNTHETIC_PLAINTEXT_CANARY")):
+        envelope = json.loads(data)
+        (envelope if section is None else envelope[section])[name] = value
+        bad.append(json.dumps(envelope).encode())
+    envelope = json.loads(data)
+    envelope["sops"]["age"].append(envelope["sops"]["age"][0])
+    bad.append(json.dumps(envelope).encode())
+    return bad
+
+
+def check_state_contract(mail) -> None:
+    data = state_envelope_fixture()
+    assert mail.state_ciphertext(data) == "age1" + "q" * 58
+    for bad in invalid_state_envelopes(data):
+        try:
+            mail.state_ciphertext(bad)
+            raise AssertionError("invalid source carrier accepted")
+        except mail.NativeSourceHold:
+            pass
+    values = {"AWS_ACCESS_KEY_ID": "SYNTHETIC_ID", "AWS_SECRET_ACCESS_KEY": "SYNTHETIC_SECRET",
+              "RENT_STATE_PASSPHRASE": "c" * 64}
+    assert mail._decode_state(json.dumps(values).encode()) == values
+    for bad in (json.dumps(list(values.items())).encode(), json.dumps({**values, "UNKNOWN": "x"}).encode(),
+                json.dumps({**values, "AWS_ACCESS_KEY_ID": 7}).encode(), b"{}", b"[]",
+                b'{"AWS_ACCESS_KEY_ID":"x","AWS_ACCESS_KEY_ID":"y"}'):
+        try:
+            mail._decode_state(bad)
+            raise AssertionError("invalid recovered payload accepted")
+        except mail.NativeSourceHold:
+            pass
+
+
 def check_source() -> None:
     """Only the closed operation selector can reach protected input handling."""
     tree = ast.parse(ADAPTER.read_text(encoding="utf-8"))
@@ -116,7 +172,7 @@ def check_manual_job() -> None:
     assert "${{ vars." not in content
     assert "options: [qualify, recover, preview, apply]" in content and "default: qualify" in content
     assert "ref: e0c208356d0e2908224cbbd356c69256cb0e4528" in content
-    assert "path: ${{ env.MAIL_HOME }}/mail-state.sops.yaml" in content and "cancel-in-progress: false" in content
+    assert "path: ${{ env.MAIL_HOME }}/mail-state.sops.json" in content and "cancel-in-progress: false" in content
     assert "contains(fromJSON('[\"qualify\",\"recover\",\"preview\",\"apply\"]'), inputs.operation)" in content
     assert "environment: ${{ inputs.operation == 'recover' && 'dev-rent-tunnel' || 'dev-projection' }}" in content
     assert "    needs:" not in content
@@ -133,6 +189,7 @@ def check_native_source_and_plan() -> None:
     sys.modules[spec.name] = mail
     try:
         spec.loader.exec_module(mail)
+        check_state_contract(mail)
         with tempfile.TemporaryDirectory(prefix="mail-m0-native-fixture-") as directory:
             home = Path(directory)
             ops = home / "ops-mail-root"
@@ -721,8 +778,14 @@ def check_manual_integration(mail, manifest: str, identity: str, recipient: str)
                       "RENT_STATE_PASSPHRASE": "c" * 64}
             encrypted = mail._sops(tools, cipher_home, json.dumps(values).encode(), recipient=recipient)
             mail.state_ciphertext(encrypted, recipient, values)
+            for bad in invalid_state_envelopes(encrypted):
+                try:
+                    mail.state_ciphertext(bad)
+                    raise AssertionError("malformed real SOPS carrier accepted")
+                except mail.NativeSourceHold:
+                    pass
             assert mail._decode_state(mail._sops(tools, cipher_home, encrypted, identity=identity)) == values
-            mail.STATE_CIPHERTEXT = cipher_home / "mail-state.sops.yaml"
+            mail.STATE_CIPHERTEXT = cipher_home / "mail-state.sops.json"
             mail.STATE_CIPHERTEXT.write_bytes(encrypted)
             recovery = Path(directory) / "recovery"
             recovery.mkdir(mode=0o700)
@@ -730,12 +793,13 @@ def check_manual_integration(mail, manifest: str, identity: str, recipient: str)
                           "MAIL_HOME": str(recovery), "ENVS_EFFECT_TOOLCHAIN": manifest,
                           "CLOUDFLARE_API_TOKEN": "UNUSED_CF_INPUT", "SOPS_AGE_KEY": "UNUSED_AGE_INPUT"}
             assert mail.manual_entry("recover", sealed_env) == ("STATE_INPUTS_SEALED", 0)
-            recovered_cipher = (recovery / "mail-state.sops.yaml").read_bytes()
+            recovered_cipher = (recovery / "mail-state.sops.json").read_bytes()
             mail.state_ciphertext(recovered_cipher, recipient, values)
             assert mail._decode_state(mail._sops(tools, recovery, recovered_cipher, identity=identity)) == values
-            assert stat.S_IMODE((recovery / "mail-state.sops.yaml").stat().st_mode) == 0o600
+            assert stat.S_IMODE((recovery / "mail-state.sops.json").stat().st_mode) == 0o600
             assert all(value.encode() not in recovered_cipher for value in values.values())
-            for bad in (b"{}", b"[]", b'{"RENT_STATE_PASSPHRASE":"x","RENT_STATE_PASSPHRASE":"y"}',
+            for bad in (b"{}", b"[]", json.dumps(list(values.items())).encode(),
+                        b'{"RENT_STATE_PASSPHRASE":"x","RENT_STATE_PASSPHRASE":"y"}',
                         json.dumps({**values, "UNKNOWN": "private"}).encode()):
                 try:
                     mail._decode_state(bad)

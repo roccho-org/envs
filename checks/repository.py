@@ -199,7 +199,7 @@ PROBE_TOOL_CHECKS = (
     '"$tool/python3" -I checks/test_rent_access_probe.py --real-ssh "$tool"',
 )
 CIPHERTEXTS = {
-    "ciphertexts/dev-mail-state.sops.yaml",
+    "ciphertexts/dev-mail-state.sops.json",
     "ciphertexts/dev-jev-api.sops.yaml", "ciphertexts/dev-rent-tunnel.sops.yaml", "ciphertexts/dev-jev-api.oci-dev.sops.yaml",
     "ciphertexts/dev-rent-client.sops.yaml", "ciphertexts/dev-opencode-go.oci-dev.sops.yaml",
 }
@@ -540,7 +540,7 @@ def check_manual_mail(root: Path, source: str, canonical: str) -> None:
         "        type: string",
         "        required: true",
         "      operation:",
-        "        description: Preview only, or apply the approved private declaration",
+        "        description: Qualify, seal recovery, preview, or apply the approved declaration",
         "        type: choice",
         "        options: [qualify, recover, preview, apply]",
         "        default: qualify",
@@ -593,7 +593,7 @@ def check_manual_mail(root: Path, source: str, canonical: str) -> None:
     require({action for action, _ in ACTION_USE.findall(source)} ==
             EFFECT_ACTIONS | {"actions/upload-artifact"},
             "Mail uses pinned checkout and ciphertext-only upload")
-    require("          path: ${{ env.MAIL_HOME }}/mail-state.sops.yaml\n" in source
+    require("          path: ${{ env.MAIL_HOME }}/mail-state.sops.json\n" in source
             and "          retention-days: 1\n" in source
             and "uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02\n" in source
             and recovery_step.count("if: inputs.operation == 'recover'") == 1
@@ -739,7 +739,7 @@ def check_workflows(root: Path, environments: dict[str, dict[str, Any]],
         require(token not in clean_start, f"clean-start must not use {token.strip()}")
     canonical = consumer_run(clean_start, "check.yml clean-start")
     check_manual_mail(root, texts["operate-dev-mail-routing.yml"], canonical)
-    mail_cipher = root / "ciphertexts/dev-mail-state.sops.yaml"
+    mail_cipher = root / "ciphertexts/dev-mail-state.sops.json"
     if mail_cipher.exists():
         require(not mail_cipher.is_symlink(), "Mail state carrier must be a regular source file")
         spec = importlib.util.spec_from_file_location("mail_cipher_contract", root / "adapters/mail_routing_root.py")
@@ -748,6 +748,8 @@ def check_workflows(root: Path, environments: dict[str, dict[str, Any]],
         try:
             spec.loader.exec_module(module)
             module.state_ciphertext(mail_cipher.read_bytes())
+        except module.NativeSourceHold:
+            raise RepositoryError("Mail state carrier structure is invalid") from None
         finally:
             sys.modules.pop(spec.name, None)
     require(clean_start.count(canonical) == 2, "clean-start must run the canonical consumer and its missing case")

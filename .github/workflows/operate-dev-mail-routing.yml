@@ -10,7 +10,7 @@ on:
         type: string
         required: true
       operation:
-        description: Preview only, or apply the approved private declaration
+        description: Qualify, seal recovery, preview, or apply the approved declaration
         type: choice
         options: [qualify, recover, preview, apply]
         default: qualify
@@ -121,7 +121,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: mail-state-${{ github.sha }}-${{ github.run_id }}
-          path: ${{ env.MAIL_HOME }}/mail-state.sops.yaml
+          path: ${{ env.MAIL_HOME }}/mail-state.sops.json
           if-no-files-found: error
           retention-days: 1
 

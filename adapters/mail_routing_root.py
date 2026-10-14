@@ -406,7 +406,7 @@ MAIL_CONFIG_KEYS = frozenset({
 MAIL_FLAGS = ("manage_dns", "manage_destination", "manage_rule", "preflight_approved")
 MAIL_METHOD_NAME = "mail_m0"
 STATE_INPUT_KEYS = MAIL_AFTER_SLOTS - {"CLOUDFLARE_API_TOKEN"}
-STATE_CIPHERTEXT = Path("ciphertexts/dev-mail-state.sops.yaml")
+STATE_CIPHERTEXT = Path("ciphertexts/dev-mail-state.sops.json")
 AGE_RECIPIENT = re.compile(r"^age1[023456789acdefghjklmnpqrstuvwxyz]{58}$")
 MAIL_OPERATIONS = ("qualify", "recover", "preview", "apply")
 MAIL_ZONE_NAME = re.compile(
@@ -675,6 +675,8 @@ def run_after(operation: str, inputs: MailPrivateInputs, tools: NativeToolset,
 
 
 def _state_values(values: Mapping[str, str]) -> dict[str, str]:
+    if not isinstance(values, Mapping):
+        raise NativeSourceHold("MAIL_STATE_INPUT_UNPROVEN")
     snapshot = dict(values)
     if (set(snapshot) != STATE_INPUT_KEYS
             or any(not isinstance(value, str) or not 0 < len(value) <= 4096
@@ -699,25 +701,53 @@ def _source_module(name: str):
     return module
 
 
+def _json_object(data: bytes) -> dict:
+    def unique(pairs):
+        result = {}
+        for name, value in pairs:
+            if name in result:
+                raise ValueError("duplicate object member")
+            result[name] = value
+        return result
+    result = json.loads(data, object_pairs_hook=unique)
+    if not isinstance(result, dict):
+        raise ValueError("object required")
+    return result
+
+
 def state_ciphertext(data: bytes, recipient: str | None = None,
                      values: Mapping[str, str] | None = None) -> str:
-    """One authenticated age envelope shape; plaintext is never Source."""
-    if not isinstance(data, bytes) or not 0 < len(data) <= 65536:
-        raise NativeSourceHold("MAIL_STATE_CIPHERTEXT_UNPROVEN")
+    """Exact pinned SOPS JSON structure; decryption authenticates separately."""
     try:
-        existing = _source_module("jev_api")
-        for name in STATE_INPUT_KEYS:
-            existing.validate_ciphertext(data, None if values is None else values[name].encode(),
-                                         None if recipient is None else [recipient], key=name)
-        text = data.decode("utf-8")
-        if (set(re.findall(r"(?m)^([^\s#][^:]*):", text)) != {*STATE_INPUT_KEYS, "sops"}
-                or len(existing.RECIPIENT_METADATA.findall(text)) != 1):
-            raise NativeSourceHold("MAIL_STATE_CIPHERTEXT_UNPROVEN")
-        metadata = text.split("\nsops:", 1)[1]
-        for mechanism in ("kms", "gcp_kms", "azure_kv", "hc_vault", "pgp", "key_groups"):
-            if re.search(r"(?m)^    " + mechanism + r":(?![ \t]*\[\][ \t]*$)", metadata):
-                raise NativeSourceHold("MAIL_STATE_CIPHERTEXT_UNPROVEN")
-        return existing.RECIPIENT_METADATA.findall(text)[0]
+        if not isinstance(data, bytes) or not 0 < len(data) <= 65536:
+            raise ValueError("invalid carrier size")
+        envelope = _json_object(data)
+        encrypted = re.compile(r"ENC\[AES256_GCM,data:[A-Za-z0-9+/]+={0,2},"
+                               r"iv:[A-Za-z0-9+/]{43}=,tag:[A-Za-z0-9+/]{22}==,type:str\]")
+        if (set(envelope) != {*STATE_INPUT_KEYS, "sops"}
+                or any(not isinstance(envelope[name], str)
+                       or not encrypted.fullmatch(envelope[name]) for name in STATE_INPUT_KEYS)):
+            raise ValueError("encrypted fields required")
+        metadata = envelope["sops"]
+        if (not isinstance(metadata, dict)
+                or set(metadata) != {"age", "lastmodified", "mac", "unencrypted_suffix", "version"}
+                or metadata["version"] != "3.13.2" or metadata["unencrypted_suffix"] != "_unencrypted"
+                or not isinstance(metadata["lastmodified"], str)
+                or not re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", metadata["lastmodified"])
+                or not isinstance(metadata["mac"], str) or not encrypted.fullmatch(metadata["mac"])
+                or not isinstance(metadata["age"], list) or len(metadata["age"]) != 1):
+            raise ValueError("pinned age metadata required")
+        age = metadata["age"][0]
+        if (not isinstance(age, dict) or set(age) != {"recipient", "enc"}
+                or not isinstance(age["recipient"], str) or not AGE_RECIPIENT.fullmatch(age["recipient"])
+                or (recipient is not None and age["recipient"] != recipient)
+                or not isinstance(age["enc"], str)
+                or not re.fullmatch(r"-----BEGIN AGE ENCRYPTED FILE-----\n"
+                                    r"(?:[A-Za-z0-9+/]{1,64}={0,2}\n)+"
+                                    r"-----END AGE ENCRYPTED FILE-----\n?", age["enc"])
+                or (values is not None and any(value.encode() in data for value in values.values()))):
+            raise ValueError("single recipient required")
+        return age["recipient"]
     except Exception:
         raise NativeSourceHold("MAIL_STATE_CIPHERTEXT_UNPROVEN") from None
 
@@ -734,12 +764,12 @@ def _sops(tools: NativeToolset, home: Path, data: bytes, *,
     if recipient is not None:
         if not AGE_RECIPIENT.fullmatch(recipient):
             raise NativeSourceHold("MAIL_RECIPIENT_UNPROVEN")
-        args = ("--encrypt", "--input-type", "json", "--output-type", "yaml")
+        args = ("--encrypt", "--input-type", "json", "--output-type", "json")
         env["SOPS_AGE_RECIPIENTS"] = recipient
     else:
         if (not isinstance(identity, str) or not 0 < len(identity) <= 16384 or "\0" in identity):
             raise NativeSourceHold("MAIL_IDENTITY_UNPROVEN")
-        args = ("--decrypt", "--input-type", "yaml", "--output-type", "json")
+        args = ("--decrypt", "--input-type", "json", "--output-type", "json")
         env["SOPS_AGE_KEY"] = identity
     try:
         result = subprocess.run((tools.sops, "--config", "/dev/null", *args, "/dev/stdin"),
@@ -758,7 +788,7 @@ def recover_state(environ: Mapping[str, str], tools: NativeToolset, home: Path) 
     payload = json.dumps(values, separators=(",", ":")).encode("utf-8")
     encrypted = _sops(tools, home, payload, recipient=recipient)
     state_ciphertext(encrypted, recipient, values)
-    target = home / "mail-state.sops.yaml"
+    target = home / "mail-state.sops.json"
     private_output_sink(target)
     fd = os.open(str(target), os.O_WRONLY | os.O_CREAT | os.O_EXCL |
                  os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
@@ -768,15 +798,8 @@ def recover_state(environ: Mapping[str, str], tools: NativeToolset, home: Path) 
 
 
 def _decode_state(data: bytes) -> dict[str, str]:
-    def unique(pairs):
-        result = {}
-        for name, value in pairs:
-            if name in result:
-                raise NativeSourceHold("MAIL_STATE_INPUT_UNPROVEN")
-            result[name] = value
-        return result
     try:
-        return _state_values(json.loads(data, object_pairs_hook=unique))
+        return _state_values(_json_object(data))
     except Exception:
         raise NativeSourceHold("MAIL_STATE_INPUT_UNPROVEN") from None
 

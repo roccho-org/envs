@@ -403,9 +403,14 @@ invokes no OpenTofu. Only the validated ciphertext is uploaded, with one-day
 retention. The Owner acquires exact producer/head/digest bytes, archives an
 encrypted copy and verifies authenticated decryption privately with the
 existing identity before adopting the same bytes at
-`ciphertexts/dev-mail-state.sops.yaml`. An expiring artifact alone is not a
+`ciphertexts/dev-mail-state.sops.json`. An expiring artifact alone is not a
 recovery copy. All authorized holders of the shared age identity can open
 this carrier; it is not an exclusive Mail key.
+
+Source checks require exactly three encrypted JSON scalars and the pinned
+single-recipient age metadata, rejecting duplicate members, comments,
+additional documents and other key mechanisms. This is structural validation;
+private authenticated decryption remains a separate recovery check.
 
 Preview/apply consume only that fixed source carrier. SOPS opens it into
 memory; strict duplicate/key/type/format checks precede composition. The
