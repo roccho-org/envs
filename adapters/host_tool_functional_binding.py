@@ -5,6 +5,7 @@ selection. Explicit Host/Target/Unit, not repo/path-derived Host identity.
 """
 from __future__ import annotations
 
+import json
 from typing import Any, Callable
 
 from host_tool_selection import ProposalError, exact_object, project, require
@@ -88,21 +89,34 @@ def bind(
 
 def plan(
     binding: dict[str, Any], observed_identity: dict[str, Any] | None, *,
+    binding_source: dict[str, Any],
+    proposals: list[dict[str, Any]], targets: list[dict[str, Any]],
+    relation_project: Callable[[list[dict[str, Any]], list[dict[str, Any]]], dict[str, Any]],
     revision: str | None, effect_resolved: bool | None,
     checks_ok: bool | None,
 ) -> dict[str, Any]:
-    """Pure I(Dq)/I(O) gap on the SAME already-validated relation binding.
+    """Pure I(Dq)/I(O) gap on the SAME independently recomputed SOURCE binding.
 
-    This is only a SOURCE-side test candidate, not admission or change GO.
+    A plain dict returned by bind() is mutable. Require its exact canonical
+    equality to a NEW bind() of the explicit PROPOSED source, actual public
+    target catalog and reviewed Relation projector before any candidate stage.
+    This is NOT an authenticated Target D, an admission or an update authority.
     """
-    require(binding.get("kind") == "envs.syntheticHostToolFunctionalBinding.v0"
-            and binding.get("admission") == "NOT_ADMITTED"
-            and binding.get("effect") == "FORBIDDEN",
-            "unvalidated or promoted functional binding")
-    expected = "ci-" + binding["proposed_q"][7:23]
+    require(type(binding) is dict, "unvalidated functional binding")
+    verified = bind(binding_source, proposals, targets, relation_project)
+    try:
+        canonical = lambda obj: json.dumps(
+            obj, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+            allow_nan=False,
+        )
+        require(canonical(binding) == canonical(verified),
+                "unvalidated or modified functional binding")
+    except (ValueError, TypeError) as exc:
+        raise ProposalError("unvalidated or modified functional binding") from exc
+    expected = "ci-" + verified["proposed_q"][7:23]
     d = {
         "kind": "envs.syntheticTargetDesired.v0",
-        "selection_revision": expected, "identity": binding["identity"],
+        "selection_revision": expected, "identity": verified["identity"],
     }
     o = (None if observed_identity is None else {
         "kind": "envs.syntheticTargetObserved.v0",
@@ -113,9 +127,9 @@ def plan(
                         required_checks=checks_ok)
     return {
         "kind": "envs.syntheticHostToolPlan.v0",
-        "target_ref": binding["target_ref"], "host_ref": binding["host_ref"],
-        "unit_ref": binding["unit_ref"], "scope": binding["scope"],
-        "proposed_q": binding["proposed_q"],
+        "target_ref": verified["target_ref"], "host_ref": verified["host_ref"],
+        "unit_ref": verified["unit_ref"], "scope": verified["scope"],
+        "proposed_q": verified["proposed_q"],
         "stage": status["stage"], "gap": status["gap"],
         "admission": "NOT_ADMITTED", "accepted_q": None,
         "target_noop": "UNPROVEN", "effect": "FORBIDDEN",
