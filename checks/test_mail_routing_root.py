@@ -1173,7 +1173,15 @@ def check_provided_native_toolchain() -> None:
                     # and exit0/2 still drive the strict privacy boundary.
                     capture.write_text(journal.replace("terraform_data.fixture", "cloudflare_email_routing_dns.zone[0]"), encoding="utf-8")
                     capture.chmod(0o600)
-                    summary = mail.preview_summary(capture, native.returncode)
+                    try:
+                        summary = mail.preview_summary(capture, native.returncode)
+                    except mail.NativeSourceHold:
+                        # Synthetic fixture only: expose schema metadata to
+                        # diagnose a version/event compatibility failure.
+                        events = [json.loads(row) for row in capture.read_text(encoding="utf-8").splitlines()]
+                        print("SYNTHETIC_NATIVE_SCHEMA", [(event.get("type"), event.get("ui"),
+                              event.get("tofu"), event.get("terraform"), event.get("changes")) for event in events])
+                        raise
                     assert summary["totals"] == {"add": 1 if stage == "preview" else 0, "change": 0, "remove": 0}
                     assert canary not in repr(summary)
             state = (fixture / "terraform.tfstate").read_bytes()
