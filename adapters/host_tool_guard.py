@@ -6,10 +6,13 @@ authorize execution: they are finite candidate classifications for CI/R review.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from typing import Any
 
-from host_tool_selection import FIXTURE_KIND, ProposalError, exact_object, require
+from host_tool_selection import (FIXTURE_KIND, WINDOWS_PRODUCER, RENT_OUTPUT, PIN,
+                                 ProposalError, exact_object, require)
 
 STORE = re.compile(r"/nix/store/[0-9a-z]{32}-[^/\s]+\Z")
 FIXTURE = "envs.hostToolGuardFixture.v0"
@@ -33,6 +36,15 @@ def judge(proposal: dict[str, Any], *, desired: dict[str, Any] | None = None,
             and type(p["proposed_q"]) is str
             and re.fullmatch(r"sha256:[0-9a-f]{64}", p["proposed_q"]) is not None,
             "fixture proposal is not strictly unadmitted")
+    material = exact_object(p["material"], {"repository", "source_commit", "flake_output"}, "material")
+    require(material["repository"] == WINDOWS_PRODUCER and material["flake_output"] == RENT_OUTPUT
+            and type(material["source_commit"]) is str
+            and PIN.fullmatch(material["source_commit"]) is not None,
+            "proposal material is not exact pinned producer output")
+    canonical = json.dumps({"target_ref": p["target_ref"], "material": material},
+                           sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    expected_q = "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    require(p["proposed_q"] == expected_q, "proposal candidate digest differs")
     target = p["target_ref"]
 
     def verdict(reason: str, *, read=False) -> dict[str, Any]:
