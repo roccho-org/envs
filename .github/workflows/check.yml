@@ -40,6 +40,9 @@ jobs:
       - name: Test unadmitted Host Tool D/q proposal
         run: python3 checks/test_host_tool_selection.py
 
+      - name: Test synthetic D/O/authority guard (always effect forbidden)
+        run: python3 checks/test_host_tool_guard.py
+
       - name: Test Jev adapter
         run: python3 checks/test_jev_api.py
 
@@ -733,6 +736,9 @@ jobs:
       # PR merge checkout is separately tested by repository; prove this exact SOURCE head too.
       - name: Test Host Tool proposal at exact source head
         run: python3 checks/test_host_tool_selection.py
+
+      - name: Test synthetic Host Tool guard at exact source head
+        run: python3 checks/test_host_tool_guard.py
 
       - name: Install pinned Nix
         uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24
