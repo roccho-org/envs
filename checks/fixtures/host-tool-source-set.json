@@ -1,0 +1,56 @@
+{
+  "kind": "envs.hostToolSourceProvenanceCandidate.v0",
+  "admission": "NOT_ADMITTED",
+  "entries": [
+    {
+      "repository": "roccho-dev/windows",
+      "pr": 91,
+      "head": "355b038bcbe2b24a8ad0121f79b7cc4c72b76b3f",
+      "tree": "8406cd25827891066eb3d3ec4eeaab4abfabfe07",
+      "run_id": 38529430362,
+      "required_jobs": [
+        "scope",
+        "build",
+        "rent / build-test-publish",
+        "own / build-test",
+        "dev / fresh-develop-replace-continue",
+        "windows"
+      ],
+      "skipped_jobs": [
+        "publish",
+        "own / publish"
+      ]
+    },
+    {
+      "repository": "roccho-org/envs",
+      "pr": 86,
+      "head": "b3afeb156c2fca9eb93256c9b66b0a8b96bd1068",
+      "tree": "a0a94e6ff490126279a5fa7cafa5ae30328cf110",
+      "run_id": 38551552641,
+      "required_jobs": [
+        "repository",
+        "toolchain",
+        "placement-artifact",
+        "placement-author",
+        "placement-windows",
+        "placement-rent",
+        "effect-shape",
+        "clean-start"
+      ],
+      "skipped_jobs": [
+        "placement-publish"
+      ]
+    },
+    {
+      "repository": "roccho-dev/resources",
+      "pr": 17,
+      "head": "d5cfc205ef718473a615b2606b61eb35402c9d59",
+      "tree": "2f61a46ea05ba990486790bcbdb9b6af6811b758",
+      "run_id": 38560548295,
+      "required_jobs": [
+        "source-vm"
+      ],
+      "skipped_jobs": []
+    }
+  ]
+}
