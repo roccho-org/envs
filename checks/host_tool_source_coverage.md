@@ -17,7 +17,7 @@
 以下は**旧head上で独立Rが技術受容したSOURCE証拠**であり、このファイルを編集した新headの自己証明でも、正式D／Relationの採択でもない。表中の`SOURCE-proven:F1/F2/X/R`は該当する公開CI実行・材料結合の証拠参照であり、各V/S/L条件が実Targetで成立したという意味ではない。
 
 | 証拠ID | 固定SOURCE head / tree | exact CI・固定R | 技術的に証明した上限 |
-|---|---|---|---|---|
+|---|---|---|---|
 | F1 | [envs #90](https://github.com/roccho-org/envs/pull/90) `dda51699ff6b6892f11b8f1a46153047e5ffb74f` / `810501fafe4771d94440718c5cc0ef6c2371b999` | [CI 38634669573](https://github.com/roccho-org/envs/actions/runs/38634669573) 8/8 SUCCESS / [R 5524498474](https://github.com/roccho-org/envs/pull/90#pullrequestreview-5524498474) | 未採択Relation ↔ Host/Target/Unit ↔ proposed q の**合成**functional bindingと偽bindingの拒否。真正D/admissionではない |
 | F2 | [windows #93](https://github.com/roccho-dev/windows/pull/93) `4fc9548d81d6a724ffbf1e8a24c5936e48a70f10` / `10fb840d4c412670ab78a94da672d02e3937e057` | [CI 38637482002](https://github.com/roccho-dev/windows/actions/runs/38637482002) **attempt 2** 6/6 SUCCESS / [R 5525335505](https://github.com/roccho-dev/windows/pull/93#pullrequestreview-5525335505) | 同一F1 blob/qを用いた**使い捨て本物Nix/OCI** Tool選択・読取・拒否試験。attempt 1のdev 403失敗は履歴保持。実PC7337/WSLCではない |
 | X | [envs #92](https://github.com/roccho-org/envs/pull/92) **凍結済みのR受容head** `b82713b02c06fe65082f557fce9bcf710c6e723f` / `a04756a35341f794620ccbc48140044610e7b73e` | [CI 38646956225](https://github.com/roccho-org/envs/actions/runs/38646956225) 8/8 SUCCESS / [R 5525631594](https://github.com/roccho-org/envs/pull/92#pullrequestreview-5525631594) | F1/F2/Rの凍結SOURCE・attempt・q/blobとProducer pinを**公開GitHub GET**で突合。新headによる追加修正は別途CI/Rが必要 |
