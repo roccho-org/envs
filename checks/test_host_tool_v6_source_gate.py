@@ -125,6 +125,15 @@ def check_v6_coverage(document: str, snapshot: dict) -> dict:
          "v6 exact R-reviewed source registry section absent or duplicated")
     section = document.split(registry_heading, 1)[1].split("## V01–V14", 1)[0]
     need("## V01–V14" in document, "missing v6 obligation section boundary")
+    # A row-only checker can pass when a five-column Markdown delimiter makes
+    # this four-column evidence registry render as plain text. Reject that.
+    registry_lines = [line for line in section.splitlines()
+                      if line.startswith("|")]
+    need(registry_lines[:2] == [
+             "| 証拠ID | 固定SOURCE head / tree | exact CI・固定R | 技術的に証明した上限 |",
+             "|---|---|---|---|",
+         ] and all(len(line.split("|")) == 6 for line in registry_lines),
+         "v6 SOURCE registry header/column delimiter mismatch")
     registry = {}
     for line in section.splitlines():
         match = re.match(r"^\| (F1|F2|X|R) \|", line)
@@ -406,6 +415,7 @@ class FrozenV6Source(unittest.TestCase):
     def test_false_coverage_or_missing_v6_source_mapping_cannot_pass(self):
         original = COVERAGE.read_text(encoding="utf-8")
         for before, after in (
+            ("|---|---|---|---|", "|---|---|---|---|---|"),
             ("| S4 |", "| S3 |"),
             ("| V01 |", "| V02 |"),
             ("SOURCE-proven:F1 ; SOURCE-proven:F2 ; SOURCE-proven:X",
