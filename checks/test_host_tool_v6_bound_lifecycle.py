@@ -74,6 +74,37 @@ class BoundLifecycle(unittest.TestCase):
     def tearDown(self):
         self.host.close()
 
+    def _read_ready(self, auth, verified, *, attempt):
+        """Pure pre-READ check: never access the disposable Target selector.
+
+        Reuse F1 and the exact READ-only D-independent judge/stage. This is
+        synthetic authority, NOT authentication of an actual Host principal.
+        """
+        if (type(auth) is not dict or type(verified) is not dict
+                or self.bound != verified
+                or verified.get("target_ref") != EXPECTED_TARGET
+                or auth.get("target_ref") != verified["target_ref"]):
+            return False
+        operation = {
+            "step": "READ", "target_ref": verified["target_ref"],
+            "actor_ref": SOURCE_ACTOR, "work_ref": SOURCE_WORK,
+            "attempt_ref": attempt,
+        }
+        stage_facts = facts("READ")
+        stage_facts.update(operation)
+        try:
+            gate = judge(self.p, desired=None, authority=auth)
+            stage = evaluate(stage_facts)
+        except (ValueError, TypeError, KeyError):
+            return False
+        return (
+            gate["synthetic_read_preconditions"] is True
+            and stage["synthetic_read_ready"] is True
+            and stage["step"] == "READ"
+            and stage["target_ref"] == verified["target_ref"]
+            and all(stage_facts[k] == operation[k] for k in STAGE_SUBJECT)
+        )
+
     def observed(self):
         state, store = self.host.observe()
         o = copy.deepcopy(self.o)
@@ -87,20 +118,15 @@ class BoundLifecycle(unittest.TestCase):
         return o, identity
 
     def read(self, authority=None):
-        # Rebind the immutable PROPOSED source: READ authority MUST match its
-        # Target, but never requires admitted D or resolving a prior UNKNOWN E.
+        # Rebind the immutable PROPOSED source; neither admitted D nor an old
+        # UNKNOWN E is a prerequisite for a separately authorized READ.
         auth = self.a if authority is None else authority
-        if type(auth) is not dict:
-            return "READ_AUTH_REQUIRED"
         try:
             verified = bind(copy.deepcopy(self.f1_source), self.proposals, self.targets,
                             self.relation_project)
-            read_gate = judge(self.p, desired=None, authority=auth)
         except (ValueError, TypeError, KeyError):
             return "READ_AUTH_REQUIRED"
-        if (self.bound != verified or verified["target_ref"] != EXPECTED_TARGET
-                or auth.get("target_ref") != verified["target_ref"]
-                or read_gate["synthetic_read_preconditions"] is not True):
+        if not self._read_ready(auth, verified, attempt="ci-bound-read-1"):
             return "READ_AUTH_REQUIRED"
         before = self.host.effect_count, self.host.snapshot()
         value = self.host.observe()
@@ -132,6 +158,11 @@ class BoundLifecycle(unittest.TestCase):
         auth = self.a if authority is None else authority
         effect = self.e if previous is None else previous
         desired_q = self.rev if revision is None else revision
+        # READ is a separate effect boundary from CHANGE. A matching F1 and
+        # synthetic TOOL_CHANGE flags do NOT authorize reading this selector.
+        # Refuse before observed()/host.observe() for wrong/missing READ scope.
+        if not self._read_ready(auth, verified, attempt=attempt):
+            return "REFUSED_READ_AUTHORITY"
         o, observed_identity = self.observed()
         # Fresh actual O and identical F1 plan; matching q alone is insufficient.
         try:
