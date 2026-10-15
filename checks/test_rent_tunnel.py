@@ -205,9 +205,9 @@ def test_rent_red_inputs() -> None:
     expect_rent_red(rent_env(RENT_AGE_RECIPIENT=f" {RECIPIENT}"))
     expect_rent_red(rent_env(RENT_TUNNEL_ID=TUNNEL_ID.upper()))
     expect_rent_red(rent_env(RENT_TUNNEL_ID=TUNNEL_ID.replace("-", "")))
-    expect_rent_red(rent_env(CLOUDFLARE_ACCOUNT_ID=ACCOUNT_ID[:31]))
-    expect_rent_red(rent_env(CLOUDFLARE_API_TOKEN="two words"))
-    expect_rent_red(rent_env(CLOUDFLARE_API_TOKEN=API_TOKEN + "\n"))
+    expect_rent_red(rent_env(RENT_CLOUDFLARE_ACCOUNT_ID=ACCOUNT_ID[:31]))
+    expect_rent_red(rent_env(RENT_CLOUDFLARE_API_TOKEN="two words"))
+    expect_rent_red(rent_env(RENT_CLOUDFLARE_API_TOKEN=API_TOKEN + "\n"))
     # Live Variable values must not be stored in Git.
     for value in (RECIPIENT, TUNNEL_ID, ACCOUNT_ID):
         expect_rent_red(rent_env(), mutate=lambda root, value=value: fixtures.append(root / "README.md", f"\n{value}\n"))
