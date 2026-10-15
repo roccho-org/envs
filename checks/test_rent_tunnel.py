@@ -36,8 +36,8 @@ SOPS_ENV_KEYS = {"HOME", "TMPDIR", "LANG", "LC_ALL", "CI", "PATH", "SOPS_AGE_REC
 def rent_env(**overrides: str) -> dict[str, str]:
     values = {
         "ENVS_EFFECT_TOOLCHAIN": fixtures.MANIFEST,
-        "CLOUDFLARE_API_TOKEN": API_TOKEN,
-        "CLOUDFLARE_ACCOUNT_ID": ACCOUNT_ID,
+        "RENT_CLOUDFLARE_API_TOKEN": API_TOKEN,
+        "RENT_CLOUDFLARE_ACCOUNT_ID": ACCOUNT_ID,
         "RENT_TUNNEL_ID": TUNNEL_ID,
         "RENT_AGE_RECIPIENT": RECIPIENT,
     }
@@ -193,8 +193,11 @@ def rent_red_case(root: Path, values: dict[str, str], mutate, body: bytes | Exce
 
 
 def test_rent_red_inputs() -> None:
-    for name in ("CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID", "RENT_TUNNEL_ID", "RENT_AGE_RECIPIENT"):
+    for name in ("RENT_CLOUDFLARE_API_TOKEN", "RENT_CLOUDFLARE_ACCOUNT_ID", "RENT_TUNNEL_ID", "RENT_AGE_RECIPIENT"):
         expect_rent_red(rent_env(**{name: ""}))
+    # The shared dev-projection Pages/Mail slots are never a fallback for the distinct rent slots.
+    pages_only = {key: value for key, value in rent_env().items() if not key.startswith("RENT_CLOUDFLARE_")}
+    expect_rent_red({**pages_only, "CLOUDFLARE_API_TOKEN": API_TOKEN, "CLOUDFLARE_ACCOUNT_ID": ACCOUNT_ID})
     # Exactly one target recipient: lists, duplicates and malformed recipients are RED before any effect.
     expect_rent_red(rent_env(RENT_AGE_RECIPIENT=f"{RECIPIENT},{OTHER_RECIPIENT}"))
     expect_rent_red(rent_env(RENT_AGE_RECIPIENT=f"{RECIPIENT},{RECIPIENT}"))
@@ -416,9 +419,9 @@ def test_client_red() -> None:
 # Persistent root (windows #8/#14): every input generated per run; the client envelope has its own recipient.
 ROOT_CLIENT_RECIPIENT = "age1" + "".join(secrets.choice(fixtures.BECH32) for _ in range(58))
 ROOT_VALUES = {
-    "CLOUDFLARE_API_TOKEN": API_TOKEN, "AWS_ACCESS_KEY_ID": secrets.token_hex(16),
+    "RENT_CLOUDFLARE_API_TOKEN": API_TOKEN, "AWS_ACCESS_KEY_ID": secrets.token_hex(16),
     "AWS_SECRET_ACCESS_KEY": secrets.token_hex(32), "RENT_STATE_PASSPHRASE": secrets.token_hex(32),
-    "CLOUDFLARE_ACCOUNT_ID": ACCOUNT_ID, "CLOUDFLARE_ZONE_ID": secrets.token_hex(16),
+    "RENT_CLOUDFLARE_ACCOUNT_ID": ACCOUNT_ID, "RENT_CLOUDFLARE_ZONE_ID": secrets.token_hex(16),
     "RENT_HOSTNAME": f"rent-{secrets.token_hex(4)}.example.invalid", "RENT_ORIGIN_SERVICE": f"ssh://origin-{secrets.token_hex(4)}:2222",
     "RENT_SERVICE_TOKEN_DURATION": f"{1000 + secrets.randbelow(8000)}h", "RENT_STATE_BUCKET": f"rent-state-{secrets.token_hex(6)}",
     "RENT_STATE_KEY": f"state/{secrets.token_hex(6)}.tfstate", "RENT_AGE_RECIPIENT": RECIPIENT,
@@ -939,7 +942,7 @@ def test_root_inspect_bounded_fixture() -> None:
 
     def world(method, path, token, body):
         calls.append((method, path, token, body))
-        assert method == "GET" and token == ROOT_VALUES["CLOUDFLARE_API_TOKEN"] and body is None
+        assert method == "GET" and token == ROOT_VALUES["RENT_CLOUDFLARE_API_TOKEN"] and body is None
         return (200, {"success": True, "result": [{"id": "synthetic"}], "result_info": {"total_pages": 1}})
 
     saved = jev.ROOT_INSPECT_SOURCE_ACTIVE
