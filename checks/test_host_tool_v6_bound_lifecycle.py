@@ -263,6 +263,71 @@ class BoundLifecycle(unittest.TestCase):
         self.assertEqual(self.read(), ("SELECTED", STORE1))
         self.assert_closed(self.receive(previous=e), before)
 
+    def test_r1a_foreign_target_read_permission_never_exposes_observation(self):
+        self.seed_old_t()
+        original = (self.host.effect_count, self.host.observe(), self.host.snapshot())
+        other = copy.deepcopy(self.a)
+        other["target_ref"] = "ci-foreign-target"
+        self.assertEqual(self.read(other), "READ_AUTH_REQUIRED")
+        self.assertEqual(self.read({"kind": "envs.syntheticAuthority.v0", "read": True}),
+                         "READ_AUTH_REQUIRED")
+        self.assertEqual(self.read(), ("SELECTED", STORE1))
+        self.assertEqual((self.host.effect_count, self.host.observe(),
+                          self.host.snapshot()), original)
+
+    def test_r1b_source_fix_cannot_skip_quiet_writer_current_d_or_o(self):
+        self.seed_old_t()
+        before = (self.host.effect_count, self.host.observe(), self.host.snapshot())
+        original_receipts = set(self.host._issued)
+        # This would previously promote SOURCE_FIX's weaker guard into a Tool
+        # selector write despite four mandatory TOOL_CHANGE predicates failing.
+        self.assert_closed(self.receive(conditions={
+            "step": "SOURCE_FIX", "quiet_held": False, "one_writer": False,
+            "desired_current": False, "observation_fresh": False,
+        }), before)
+        self.assertEqual(set(self.host._issued), original_receipts)
+        # Without stage substitution, each false precondition must reject.
+        for key in ("quiet_held", "one_writer", "desired_current",
+                    "observation_fresh"):
+            with self.subTest(condition=key):
+                self.assert_closed(self.receive(conditions={key: False}), before)
+                self.assertEqual(set(self.host._issued), original_receipts)
+
+    def test_r1b_stage_subject_attempt_actor_and_work_cannot_be_replaced(self):
+        self.seed_old_t()
+        before = (self.host.effect_count, self.host.observe(), self.host.snapshot())
+        receipts = set(self.host._issued)
+        substitutions = (
+            {"step": "SOURCE_FIX"}, {"step": "READ"},
+            {"step": "TOOL_CHANGE"},  # even a matching caller override is not an authority
+            {"target_ref": "ci-foreign-target"},
+            {"actor_ref": "ci-foreign-actor"},
+            {"work_ref": "ci-foreign-work"},
+            {"attempt_ref": "ci-foreign-attempt"},
+            {"attempt_ref": "ci-bound-apply-1"},
+            {"receiver_start": {"receiver_started": True}},
+            {"kind": "envs.syntheticHostStep.v0"},
+        )
+        for changed in substitutions:
+            with self.subTest(substitution=changed):
+                self.assert_closed(self.receive(conditions=changed), before)
+                self.assertEqual(set(self.host._issued), receipts)
+        # An *actual* different operation attempt is allowed only when the
+        # stage facts derive the SAME attempt from the real selector argument.
+        actual = "ci-bound-apply-2"
+        received = self.receive(attempt=actual)
+        self.assertEqual(received["issued_receipt"]["attempt"], actual)
+        self.assertEqual(received["readback_store"], STORE0)
+        self.assertEqual(self.host.observe(), ("SELECTED", STORE0))
+        self.assertEqual(self.host.effect_count, before[0] + 1)
+        self.assertEqual(self.host.snapshot(), before[2])
+        self.assertEqual(self.host.rollback_fixture(
+            received["issued_receipt"], actual,
+            quiet=True, writer=True, current_desired=self.d,
+        ), "SYNTHETIC_ROLLBACK_NOT_NEW_D_SUCCESS")
+        self.assertEqual(self.host.observe(), ("SELECTED", STORE1))
+        self.assertEqual(self.host.snapshot(), before[2])
+
     def test_guard_quiet_writer_recovery_or_stale_revision_refuse_prewrite(self):
         self.seed_old_t()
         original = (self.host.effect_count, self.host.observe(), self.host.snapshot())
