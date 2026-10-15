@@ -12,6 +12,7 @@ import json
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "adapters"))
@@ -293,6 +294,76 @@ class BoundLifecycle(unittest.TestCase):
         e["state"] = "UNKNOWN"
         self.assertEqual(self.read(), ("SELECTED", STORE1))
         self.assert_closed(self.receive(previous=e), before)
+
+    def test_r2_receive_denies_bad_read_scope_without_touching_selector(self):
+        # R2's exact counterexample. Set up all effects and baseline reads
+        # BEFORE instrumenting the selector so calls are attributable to receive.
+        self.seed_old_t()
+        baseline = (self.host.effect_count, self.host.observe(),
+                    self.host.snapshot(), set(self.host._issued),
+                    self.host.number)
+        invalid = (
+            ("read-denied", lambda x: x.update(read=False)),
+            ("foreign-target", lambda x: x.update(target_ref="ci-foreign-target")),
+            ("missing-read", lambda x: x.pop("read")),
+            ("missing-target", lambda x: x.pop("target_ref")),
+            ("read-unknown", lambda x: x.update(read=None)),
+            ("read-string", lambda x: x.update(read="true")),
+            ("foreign-authority-kind", lambda x: x.update(kind="realAuthority")),
+        )
+        for reason, mutate in invalid:
+            bad = copy.deepcopy(self.a)
+            mutate(bad)
+            with self.subTest(reason=reason):
+                with patch.object(self.host, "observe", wraps=self.host.observe) as observed:
+                    self.assertEqual(self.read(bad), "READ_AUTH_REQUIRED")
+                    self.assertEqual(self.receive(authority=bad), "REFUSED_READ_AUTHORITY")
+                    # Not even a geometry read occurred. Effect/NOOP equality
+                    # alone cannot establish an authorized READ boundary.
+                    observed.assert_not_called()
+                self.assertEqual(
+                    (self.host.effect_count, self.host.observe(),
+                     self.host.snapshot(), set(self.host._issued), self.host.number),
+                    baseline,
+                )
+
+        # A structurally incomplete caller authority and a non-dict must not
+        # accidentally fall back to self.a, the valid positive fixture.
+        for bad in ({"kind": "envs.syntheticAuthority.v0",
+                     "target_ref": EXPECTED_TARGET, "read": True},
+                    "foreign-actor"):
+            with self.subTest(malformed=repr(bad)):
+                with patch.object(self.host, "observe", wraps=self.host.observe) as observed:
+                    self.assertEqual(self.receive(authority=bad), "REFUSED_READ_AUTHORITY")
+                    observed.assert_not_called()
+                self.assertEqual(
+                    (self.host.effect_count, self.host.observe(),
+                     self.host.snapshot(), set(self.host._issued), self.host.number),
+                    baseline,
+                )
+
+    def test_r2_valid_read_scope_independent_of_change_and_previous_unknown(self):
+        self.seed_old_t()
+        before = (self.host.effect_count, self.host.observe(),
+                  self.host.snapshot(), set(self.host._issued))
+        read_only = copy.deepcopy(self.a)
+        read_only["change"] = False
+        with patch.object(self.host, "observe", wraps=self.host.observe) as observed:
+            self.assertEqual(self.read(read_only), ("SELECTED", STORE1))
+            observed.assert_called_once_with()
+        with patch.object(self.host, "observe", wraps=self.host.observe) as observed:
+            self.assertEqual(self.receive(authority=read_only), "REFUSED_GUARD")
+            observed.assert_called_once_with()
+        unknown = copy.deepcopy(self.e)
+        unknown["state"] = "UNKNOWN"
+        with patch.object(self.host, "observe", wraps=self.host.observe) as observed:
+            self.assertEqual(self.read(), ("SELECTED", STORE1))
+            observed.assert_called_once_with()
+        with patch.object(self.host, "observe", wraps=self.host.observe) as observed:
+            self.assertEqual(self.receive(previous=unknown), "REFUSED_GUARD")
+            observed.assert_called_once_with()
+        self.assertEqual((self.host.effect_count, self.host.observe(),
+                          self.host.snapshot(), set(self.host._issued)), before)
 
     def test_r1a_foreign_target_read_permission_never_exposes_observation(self):
         self.seed_old_t()
