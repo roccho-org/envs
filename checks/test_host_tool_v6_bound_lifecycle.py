@@ -41,7 +41,8 @@ class BoundLifecycle(unittest.TestCase):
     def setUpClass(cls):
         # Public immutable reviewed resources Relation implementation, not a
         # copied imitation. Existing F1 tests use this same Git blob verification.
-        cls.relation_project, cls.relation_error = real_relation_projector()
+        projector, cls.relation_error = real_relation_projector()
+        cls.relation_project = staticmethod(projector)  # no accidental unittest self
         cls.proposals = read_jsonl(PROPOSAL)
         cls.targets = read_jsonl(TARGETS)
         cls.f1_source = json.loads(F1.read_text(encoding="utf-8"))
