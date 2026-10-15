@@ -274,7 +274,7 @@ def check_native_entry() -> None:
             assert done.stdout == json.dumps(CLOSED, separators=(",", ":")) + "\n"
             assert marker not in done.stdout
             assert not child.exists(), "a child ran before the independent source refusal"
-        for operation in ("qualify", "recover", "preview", "apply"):
+        for operation in ("qualify", "preview", "apply"):
             done = subprocess.run(
                 [sys.executable, "-I", str(ADAPTER), "--operation", operation],
                 cwd=home, env=env, capture_output=True, text=True, timeout=6, check=False,
@@ -282,6 +282,13 @@ def check_native_entry() -> None:
             assert done.returncode == 78 and done.stderr == ""
             assert json.loads(done.stdout)["status"] == "INPUT_UNPROVEN"
             assert marker not in done.stdout and not child.exists()
+        # The completed recovery is retired: it is an unsupported operation, refused before any input is read.
+        done = subprocess.run(
+            [sys.executable, "-I", str(ADAPTER), "--operation", "recover"],
+            cwd=home, env=env, capture_output=True, text=True, timeout=6, check=False,
+        )
+        assert done.returncode == 78 and done.stderr == ""
+        assert json.loads(done.stdout) == CLOSED and marker not in done.stdout and not child.exists()
         assert sorted(p.name for p in home.iterdir()) == ["bin"], "unexpected state/output file"
 
 
@@ -293,8 +300,8 @@ def check_manual_job() -> None:
     assert content.count("\n    if:") == 1
     assert "on:\n  workflow_dispatch:" in content
     assert "      expected_source_sha:" in content
-    for name, count in (("MAIL_CONFIG", 2), ("CLOUDFLARE_API_TOKEN", 2), ("AWS_ACCESS_KEY_ID", 1),
-                        ("AWS_SECRET_ACCESS_KEY", 1), ("RENT_STATE_PASSPHRASE", 1), ("MAIL_STATE_INPUTS", 1)):
+    for name, count in (("MAIL_CONFIG", 2), ("CLOUDFLARE_API_TOKEN", 2), ("AWS_ACCESS_KEY_ID", 0),
+                        ("AWS_SECRET_ACCESS_KEY", 0), ("RENT_STATE_PASSPHRASE", 0), ("MAIL_STATE_INPUTS", 1)):
         assert content.count("${{ secrets." + name + " }}") == count
     assert "secrets.SOPS_AGE_KEY" not in content and "secrets.MAIL_STATE_AGE_KEY" not in content
     for clause in ("github.sha == inputs.expected_source_sha", "github.run_attempt == 1",
@@ -302,11 +309,12 @@ def check_manual_job() -> None:
                    "github.triggering_actor == 'roccho-dev'"):
         assert clause in content
     assert "${{ vars." not in content
-    assert "options: [qualify, recover, preview, apply]" in content and "default: qualify" in content
+    assert "options: [qualify, preview, apply]" in content and "default: qualify" in content
     assert "ref: afd831dba8f401fb37fc20c27ab8d1f176102050" in content
-    assert "path: ${{ env.MAIL_HOME }}/mail-state.sops.json" in content and "cancel-in-progress: false" in content
-    assert "contains(fromJSON('[\"qualify\",\"recover\",\"preview\",\"apply\"]'), inputs.operation)" in content
-    assert "environment: ${{ inputs.operation == 'recover' && 'dev-rent-tunnel' || 'dev-projection' }}" in content
+    assert "mail-state.sops.json" not in content and "cancel-in-progress: false" in content
+    assert "contains(fromJSON('[\"qualify\",\"preview\",\"apply\"]'), inputs.operation)" in content
+    assert "    environment: dev-projection\n" in content and "dev-rent-" not in content
+    assert "recover" not in content and "recipient" not in content
     assert "    needs:" not in content
     assert content.count('"$ENVS_EFFECT_BIN/mail-routing-root" --operation "$MAIL_OPERATION"') == 1
 
@@ -924,14 +932,17 @@ def check_manual_integration(mail, manifest: str, identity: str, recipient: str)
             mail.STATE_CIPHERTEXT.write_bytes(encrypted)
             recovery = Path(directory) / "recovery"
             recovery.mkdir(mode=0o700)
-            sealed_env = {**values, "MAIL_STATE_AGE_RECIPIENT": recipient,
-                          "MAIL_HOME": str(recovery), "ENVS_EFFECT_TOOLCHAIN": manifest,
-                          "CLOUDFLARE_API_TOKEN": "UNUSED_CF_INPUT", "MAIL_STATE_AGE_KEY": "UNUSED_AGE_INPUT"}
-            assert mail.manual_entry("recover", sealed_env) == ("STATE_INPUTS_SEALED", 0)
-            recovered_cipher = (recovery / "mail-state.sops.json").read_bytes()
-            mail.state_ciphertext(recovered_cipher, recipient, values)
-            assert mail._decode_state(mail._sops(tools, recovery, recovered_cipher, identity=identity)) == values
-            assert stat.S_IMODE((recovery / "mail-state.sops.json").stat().st_mode) == 0o600
+            # The completed one-time recovery is retired: the operation is refused before any slot or child.
+            retired_env = {**values, "MAIL_STATE_AGE_RECIPIENT": recipient,
+                           "MAIL_HOME": str(recovery), "ENVS_EFFECT_TOOLCHAIN": manifest,
+                           "CLOUDFLARE_API_TOKEN": "UNUSED_CF_INPUT", "MAIL_STATE_AGE_KEY": "UNUSED_AGE_INPUT"}
+            try:
+                mail.manual_entry("recover", retired_env)
+                raise AssertionError("retired recovery operation accepted")
+            except mail.NativeSourceHold as error:
+                assert str(error) == "MAIL_OPERATION_UNSELECTED"
+            assert list(recovery.iterdir()) == [], "the retired recovery wrote an output"
+            recovered_cipher = encrypted
             assert all(value.encode() not in recovered_cipher for value in values.values())
             for bad in (b"{}", b"[]", json.dumps(list(values.items())).encode(),
                         b'{"RENT_STATE_PASSPHRASE":"x","RENT_STATE_PASSPHRASE":"y"}',
@@ -942,8 +953,8 @@ def check_manual_integration(mail, manifest: str, identity: str, recipient: str)
                 except mail.NativeSourceHold:
                     pass
             try:
-                mail._sops(tools, recovery, recovered_cipher, identity="AGE-SECRET-KEY-INVALID")
-                raise AssertionError("wrong identity decrypted recovery")
+                mail._sops(tools, cipher_home, recovered_cipher, identity="AGE-SECRET-KEY-INVALID")
+                raise AssertionError("wrong identity decrypted the carrier")
             except mail.NativeSourceHold:
                 pass
 

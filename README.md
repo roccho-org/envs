@@ -100,27 +100,21 @@ THIRD_PARTY_NOTICES.md
 | `dev-projection/SOPS_AGE_KEY` | secret | age_identity | persistent |
 | `dev-projection/CLOUDFLARE_API_TOKEN` | secret | opaque | persistent |
 | `dev-projection/CLOUDFLARE_ACCOUNT_ID` | variable | cloudflare_account_id | persistent |
-| `dev-rent-tunnel/CLOUDFLARE_API_TOKEN` | secret | opaque | persistent |
-| `dev-rent-tunnel/CLOUDFLARE_ACCOUNT_ID` | variable | cloudflare_account_id | persistent |
-| `dev-rent-tunnel/RENT_TUNNEL_ID` | variable | cloudflare_tunnel_id | persistent |
-| `dev-rent-tunnel/RENT_AGE_RECIPIENT` | variable | age_recipient | persistent |
-| `dev-rent-tunnel/AWS_ACCESS_KEY_ID` | secret | opaque | persistent |
-| `dev-rent-tunnel/AWS_SECRET_ACCESS_KEY` | secret | opaque | persistent |
-| `dev-rent-tunnel/RENT_STATE_PASSPHRASE` | secret | opaque | persistent |
-| `dev-rent-tunnel/CLOUDFLARE_ZONE_ID` | variable | cloudflare_zone_id | persistent |
-| `dev-rent-tunnel/RENT_HOSTNAME` | variable | opaque | persistent |
-| `dev-rent-tunnel/RENT_ORIGIN_SERVICE` | variable | opaque | persistent |
-| `dev-rent-tunnel/RENT_SERVICE_TOKEN_DURATION` | variable | opaque | persistent |
-| `dev-rent-tunnel/RENT_STATE_BUCKET` | variable | opaque | persistent |
-| `dev-rent-tunnel/RENT_STATE_KEY` | variable | opaque | persistent |
-| `dev-rent-tunnel/RENT_CLIENT_AGE_RECIPIENT` | variable | age_recipient | persistent |
-| `dev-rent-client/RENT_CLIENT_AGE_RECIPIENT` | variable | age_recipient | persistent |
+| `dev-projection/RENT_CLOUDFLARE_API_TOKEN` | secret | opaque | persistent |
+| `dev-projection/RENT_CLOUDFLARE_ACCOUNT_ID` | variable | cloudflare_account_id | persistent |
+| `dev-projection/RENT_TUNNEL_ID` | variable | cloudflare_tunnel_id | persistent |
+| `dev-projection/RENT_AGE_RECIPIENT` | variable | age_recipient | persistent |
+| `dev-projection/AWS_ACCESS_KEY_ID` | secret | opaque | persistent |
+| `dev-projection/AWS_SECRET_ACCESS_KEY` | secret | opaque | persistent |
+| `dev-projection/RENT_STATE_PASSPHRASE` | secret | opaque | persistent |
+| `dev-projection/RENT_CLOUDFLARE_ZONE_ID` | variable | cloudflare_zone_id | persistent |
+| `dev-projection/RENT_HOSTNAME` | variable | opaque | persistent |
+| `dev-projection/RENT_ORIGIN_SERVICE` | variable | opaque | persistent |
+| `dev-projection/RENT_SERVICE_TOKEN_DURATION` | variable | opaque | persistent |
+| `dev-projection/RENT_STATE_BUCKET` | variable | opaque | persistent |
+| `dev-projection/RENT_STATE_KEY` | variable | opaque | persistent |
+| `dev-projection/RENT_CLIENT_AGE_RECIPIENT` | variable | age_recipient | persistent |
 | `dev-projection/LINODE_API_TOKEN` | secret | opaque | persistent |
-| `dev-rent-access-probe/CLOUDFLARE_API_TOKEN` | secret | opaque | persistent |
-| `dev-rent-access-probe/CLOUDFLARE_ACCOUNT_ID` | variable | cloudflare_account_id | persistent |
-| `dev-rent-access-probe/CLOUDFLARE_ZONE_ID` | variable | cloudflare_zone_id | persistent |
-| `dev-rent-access-probe/R2_PARENT_API_TOKEN` | secret | opaque | finite_expiry |
-| `dev-rent-access-probe/R2_PARENT_ACCESS_KEY_ID` | secret | cloudflare_api_token_id | finite_expiry |
 | `stg-projection/JEV_API_KEY` | secret | opaque | persistent |
 | `stg-projection/CLOUDFLARE_API_TOKEN` | secret | opaque | persistent |
 | `stg-projection/CLOUDFLARE_ACCOUNT_ID` | variable | cloudflare_account_id | persistent |
@@ -128,9 +122,13 @@ THIRD_PARTY_NOTICES.md
 | `prd-projection/CLOUDFLARE_API_TOKEN` | secret | opaque | persistent |
 | `prd-projection/CLOUDFLARE_ACCOUNT_ID` | variable | cloudflare_account_id | persistent |
 
-`dev-rent-tunnel` also carries two planes: the standalone tunnel token GET (`dev.rent-tunnel`) and the persistent root (`dev.rent-root`), which the workflow runs and which reads every `dev-rent-tunnel` input above except `RENT_TUNNEL_ID`. `opaque` inputs are checked only for presence and for not appearing in the repository; OpenTofu and the provider decide whether a hostname, origin service or duration is valid, so this document names inputs and never their values.
+A host is not a GitHub Environment. The dev stage keeps two functional Environments, `dev-authoring` and `dev-projection`; rent's stage ingress lives in `dev-projection` beside Pages, Mail and Linode, and no host-specific `dev-rent-tunnel`, `dev-rent-client` or `dev-rent-access-probe` Environment is selected or declared. Rent never reads the Pages/Mail `CLOUDFLARE_API_TOKEN`/`CLOUDFLARE_ACCOUNT_ID` slots: its Cloudflare inputs are the distinct `RENT_CLOUDFLARE_API_TOKEN`, `RENT_CLOUDFLARE_ACCOUNT_ID` and `RENT_CLOUDFLARE_ZONE_ID` slots, which the adapter hands to its OpenTofu/API children only under the provider-native names. No equality of value or scope between the two token slots is assumed, and no combined token exists. Sharing one Environment is the chosen stage trust boundary: each job maps only its own inputs, which limits exposure but is not job-level secret isolation.
 
-There are no stg or prd authoring Environments. `dev-rent-access-probe` carries two planes: the Access probe reads `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ZONE_ID`, the state proof (`dev.rent-state-proof`) reads `R2_PARENT_API_TOKEN` and `R2_PARENT_ACCESS_KEY_ID`, both read `CLOUDFLARE_ACCOUNT_ID`, and neither reads the other's secret.
+`dev-projection` carries the rent planes: the standalone tunnel token GET (`dev.rent-tunnel`, no workflow) and the persistent root (`dev.rent-root`), which the hard-inactive workflow would run and which reads every rent input above except `RENT_TUNNEL_ID`. `RENT_TUNNEL_ID` stays declared for that standalone entry only; nothing creates or invents its value. `opaque` inputs are checked only for presence and for not appearing in the repository; OpenTofu and the provider decide whether a hostname, origin service or duration is valid, so this document names inputs and never their values.
+
+There are no stg or prd authoring Environments. The disposable Access probe and R2 state proof (`dev.rent-access-probe`, `dev.rent-state-proof`), their workflows, provider roots and parent token inputs are retired; their earlier runs remain history only, and any leftover provider cleanup is a separate owner decision.
+
+A plane row's `github_environment` names where the contract declares that plane's inputs; it is not an instruction to provision a GitHub Environment. The claim runs one way: a plane row alone does not require a live Environment, and a workflow job that selects one with `environment:` requires it for that run. `ACTIVE` still records only a sealed envelope. `dev.rent-client` is an output plane with no Environment of its own: `ciphertexts/dev-rent-client.sops.yaml` is sealed by `rent-root`, which reads its one recipient, `dev-projection/RENT_CLIENT_AGE_RECIPIENT`, as the producer, and whose job is hard-inactive (`if: ${{ false && ... }}`); the standalone `rent-client` entry reads the same producer declaration. Likewise `stg.projection` and `prd.projection` are `NOT_CONFIGURED` declarations; they do not require live Environments to be provisioned. Conversely, the absence of a selecting job does not show that an existing Environment is unneeded or may be deleted: it may serve a future stage, hold retained state or credentials, or be selected by a workflow on another ref.
 
 ## Dev Jev flow
 
@@ -228,7 +226,7 @@ dev-authoring/OPENCODE_API_KEY + dev-authoring/VERSAPRO_OWN_OCI_AGE_RECIPIENT
 The rent OCI host runs `cloudflared` from a token file. envs owns only the step from the provider-issued Named Tunnel token to a ciphertext that exactly one target can open:
 
 ```text
-dev-rent-tunnel/CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, RENT_TUNNEL_ID, RENT_AGE_RECIPIENT
+dev-projection/RENT_CLOUDFLARE_API_TOKEN, RENT_CLOUDFLARE_ACCOUNT_ID, RENT_TUNNEL_ID, RENT_AGE_RECIPIENT
 → envs-effect rent-tunnel (the standalone entry; the workflow now runs rent-root below)
 → one bounded GET of the tunnel token (30 s, 64 KiB, no redirect, entry-owned CA bundle)
 → token in memory → sops stdin, SOPS_AGE_RECIPIENTS = the one target recipient
@@ -236,37 +234,13 @@ dev-rent-tunnel/CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, RENT_TUNNEL_ID, REN
 → ciphertext handoff PR → merge to exact proposals SHA
 ```
 
-- Inputs are declared, not valued: until the owner configures `dev-rent-tunnel`, the plane is `NOT_CONFIGURED` and every missing or malformed input is RED before any provider call. `RENT_AGE_RECIPIENT` is a single age recipient; a list is RED, and the ciphertext must name exactly that recipient and carry only `RENT_TUNNEL_TOKEN`.
+- Inputs are declared, not valued: until the owner configures these `dev-projection` slots, the plane is `NOT_CONFIGURED` and every missing or malformed input is RED before any provider call. `RENT_AGE_RECIPIENT` is a single age recipient; a list is RED, and the ciphertext must name exactly that recipient and carry only `RENT_TUNNEL_TOKEN`.
 - The token and the API token never enter argv, a log line, an error message, or the result JSON, and the adapter writes neither to Git. If either is already in a tracked file, the run is RED: the API token before the provider call, the tunnel token before SOPS or any write. The ciphertext is public and permanent in history; recovering from a leaked target identity means rotating the tunnel token, not deleting the file.
 - `checks/test_rent_tunnel.py` proves the gates and failure cases with a fake provider and fake sops, and in `check` it runs the real locked sops with check-only `age-keygen` identities: the target identity decrypts, another identity and a tampered ciphertext are RED. `age` is a separate `check-age` output, and `check` proves it is absent from the provided artifact.
 
-## Dev rent Access SSH probe (windows #14)
+## Retired dev rent Access SSH probe (windows #14)
 
-Before any rent migration, one disposable probe must show whether the exact pinned client (`cloudflared` 2026.6.1, the version windows PR #21 ships) reaches an SSH origin through Cloudflare Access with a service token and no browser. `providers/dev-rent-access-probe/main.tf` declares it with the standard Cloudflare provider (5.21.1) for OpenTofu; `flake.nix` puts OpenTofu with only that provider, `cloudflared` and OpenSSH into the same effect artifact, so a run acquires nothing from a registry.
-
-```text
-dev-rent-access-probe/CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_ZONE_ID
-→ probe-dev-rent-access-ssh (manual dispatch on proposals only; read-only repository permissions)
-→ preflight lookup of the fixed names in a fresh state (create=false: no managed resource)
-   any match → UNKNOWN, ownership UNPROVEN, NEEDS_AUTHORITY; nothing created, adopted or deleted
-→ create: tunnel windows-rent-access-probe → ssh://localhost:2222, CNAME rent-access-probe.roccho.com,
-   Access app with one Service Auth policy for exactly one 1h service token
-→ localhost sshd answering a run-scoped nonce; cloudflared tunnel run with TUNNEL_TOKEN from the environment
-→ ssh -o BatchMode=yes with the PR #21 ProxyCommand shape, once per case and in this order, each case and
-   process with its own empty HOME (no runner or cross-case Access login cache):
-   service token, no token, wrong secret, service token again
-→ destroy exactly this state, then read back absence from a fresh lookup state
-```
-
-- Outcomes: `TOKEN_REACHED_NEGATIVES_REFUSED` only when both token cases return the nonce and both negative cases fail; an admitted negative is `ACCESS_NOT_ENFORCED`; both token cases failing is `UNATTENDED_PATH_FAILED`; any timeout, or a path not up on both sides of the negatives, is `UNKNOWN`. There is no retry, and cause is always `UNKNOWN`.
-- A refused negative is not an Access denial: the client cannot tell Access from DNS, edge, tunnel or sshd failures. The bracketing token cases show only that the path was up around the negatives, so `access_denial_evidence` stays `NOT_OBSERVED` until a provider-side Access decision record is read for each negative attempt.
-- If cleanup or its absence readback is not proven, the status is `CLEANUP_UNKNOWN` whatever the probe reached; the probe outcome stays under `probe`.
-- The exact IDs of all six managed resources come from this run's OpenTofu state right after apply, even a partial one, and are emitted at once as one ID-only line: `observed_state_ids`. They record what the state holds, not that the provider has or lacks the resource. After destroy the state is read again: `remaining_in_state` is what destroy left, `unverified_after_destroy` is what the state dropped but absence was not read back for (or the state was unreadable). Only these exact IDs may be cleaned up by the owner; the state JSON is parsed in memory and never written out, since it can hold secrets.
-- Credentials (API token, tunnel token, service-token secret) reach only the process that needs them, by environment; never argv, the result JSON, a log line or Git. OpenTofu state stays in the runner's temporary directory and is never committed, cached, uploaded or printed.
-- Cleanup deletes only what this run's state created. If the runner loses that state, name lookup locates candidates and never proves ownership: `rent-access-locate` reports them as `UNKNOWN`/`NEEDS_AUTHORITY` and has no delete path. A deletion of name-located resources needs its own contract.
-- `checks/test_rent_access_probe.py` proves the order, isolation, redaction, outcome classes and cleanup model against a fake provider and client. In `check` it also runs a real localhost sshd/ssh exchange from the closure, and `check` asserts the exact `cloudflared` version and its `--service-token-id`/`--service-token-secret` flags and initializes and validates the provider declaration with network access closed.
-
-Not proven here: that `cloudflared` 2026.6.1 honours a service token (a reported 2026.6.0 regression, cloudflare/cloudflared#1673, is a risk), any real Cloudflare resource or Access decision, the API token scope, unattended SSH to the rent, or G6I3 credential selection. The live run needs the `dev-rent-access-probe` Environment and its own contract.
+The disposable Access SSH probe (`dev.rent-access-probe`, its manual workflow, provider root, adapter entries and fake/real-ssh checks) is retired from source. It never became a current operation; its earlier runs and their exact-ID cleanup facts remain only in their own run history. Retirement neither deletes nor proves the absence of any provider resource it may have created; any such cleanup is a separate owner decision. `check` still asserts the closure `cloudflared` version and its service-token flags.
 
 Not proven here, and not owned by envs: a real provider retrieval or dispatch of this workflow, the Cloudflare API token scope it needs, whether Actions may open the handoff PR and whether `check` then runs for it, the target's age identity, applying the ciphertext on the target, the client credential, and unattended SSH.
 
@@ -277,11 +251,12 @@ Not proven here, and not owned by envs: a real provider retrieval or dispatch of
 It is applied only by `rent-root` under a separate effect grant: the manual `project-dev-rent-tunnel` workflow runs that one entry from the verified artifact, and nothing else plans or applies it. `check` initializes it without its backend and validates it with network access closed, and the repository check refuses the four things native validation accepts: a local (plaintext) backend instead of the locked native S3 backend, unenforced state or plan encryption, a credentials output that is not sensitive, and a service-token lifetime fixed in source. The output being sensitive does not keep the secrets out of state: the Tunnel token and the service-token secret are stored there, encrypted.
 
 ```text
-dev-rent-tunnel/CLOUDFLARE_API_TOKEN, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, RENT_STATE_PASSPHRASE,
-  CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_ZONE_ID, RENT_HOSTNAME, RENT_ORIGIN_SERVICE, RENT_SERVICE_TOKEN_DURATION,
+dev-projection/RENT_CLOUDFLARE_API_TOKEN, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, RENT_STATE_PASSPHRASE,
+  RENT_CLOUDFLARE_ACCOUNT_ID, RENT_CLOUDFLARE_ZONE_ID, RENT_HOSTNAME, RENT_ORIGIN_SERVICE, RENT_SERVICE_TOKEN_DURATION,
   RENT_STATE_BUCKET, RENT_STATE_KEY, RENT_AGE_RECIPIENT, RENT_CLIENT_AGE_RECIPIENT
-→ project-dev-rent-tunnel (manual dispatch on proposals only) → envs-effect rent-root
-→ tofu init (-backend-config bucket and key; the R2 endpoint of CLOUDFLARE_ACCOUNT_ID) → tofu apply
+→ project-dev-rent-tunnel (manual dispatch on proposals only; hard-inactive) → envs-effect rent-root
+→ the RENT_CLOUDFLARE_* slots reach OpenTofu only as CLOUDFLARE_API_TOKEN, TF_VAR_account_id and TF_VAR_zone_id
+→ tofu init (-backend-config bucket and key; the R2 endpoint of RENT_CLOUDFLARE_ACCOUNT_ID) → tofu apply
    TF_ENCRYPTION is built from RENT_STATE_PASSPHRASE with the fixed key provider and method name k0
 → tofu output -json credentials, in memory → tunnel token sealed to RENT_AGE_RECIPIENT and the service token
    pair to RENT_CLIENT_AGE_RECIPIENT, both before any write
@@ -296,7 +271,7 @@ dev-rent-tunnel/CLOUDFLARE_API_TOKEN, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, 
 - The handoff commit names the repository owner (roccho); the pushing actor is the workflow token and the commit is unsigned. GitHub documents that a pull request opened by the workflow token gets `check` runs that wait for approval. Before merge, the handoff's exact head must have successful `check` runs, from that approval or, only if no such run exists after reconciliation, from a separately authorized `check` dispatch on that branch, never both.
 - `checks/test_rent_tunnel.py` proves the entry's routing, refusals, ordering, scoped environments, redaction and failure semantics with fakes; in `check` the closure `tofu` applies an encrypted schema-only fixture root whose synthetic credentials arrive only as `TF_VAR_credentials`, and the production sealer turns its real output into both envelopes with the real sops.
 
-Not proven here: a real Cloudflare apply, the R2 backend's existence, ownership, locking and durability, the state key's recovery, real issued values, credential rotation, any dispatch or approval, and anything on a target. The existing owned bucket, a least-scoped principal, the backend credential, the state-key custody and each target's own age identity are owner prerequisites of the effect grant. The disposable R2 proof below is design evidence only; a denied connection still needs provider Access evidence, and the exact Windows client, reboot and cutover are later windows #14/#8 gates.
+Not proven here: a real Cloudflare apply, the R2 backend's existence, ownership, locking and durability, the state key's recovery, real issued values, credential rotation, any dispatch or approval, and anything on a target. The existing owned bucket, a least-scoped principal, the backend credential, the state-key custody and each target's own age identity are owner prerequisites of the effect grant. The retired disposable R2 proof was design evidence only; a denied connection still needs provider Access evidence, and the exact Windows client, reboot and cutover are later windows #14/#8 gates.
 
 ## Dev rent placement (windows #14-E)
 
@@ -305,7 +280,8 @@ One G6I3 normal-user Access service credential serves every surface of the `wind
 ```text
 tofu output -json credentials (the persistent root's sensitive output) → stdin of `rent-client`
 → the service token pair, each one line of the windows slot rule → sops stdin, one recipient
-   (dev-rent-client/RENT_CLIENT_AGE_RECIPIENT) → ciphertexts/dev-rent-client.sops.yaml + dev.rent-client ACTIVE
+   (dev-projection/RENT_CLIENT_AGE_RECIPIENT, the producer's declaration) → ciphertexts/dev-rent-client.sops.yaml
+   + dev.rent-client ACTIVE
 
 on the target, from the verified envs-placement-<sha> distribution (pinned official sops.exe 3.13.2, the locked
 sops version, by its release digest; adapters/place.ps1; adapters/rent-receive.sh; this source's ciphertexts):
@@ -322,46 +298,11 @@ place.ps1 -Target rent -Identity <identity> -RentImage ghcr.io/roccho-dev/window
 
 Not proven here: the production `-Mode RentAccess` glue (G6I3 normal-user caller, ledger lock, owner-only write; the windows proof covers the writer functions), WSLC (Docker stands in for the receiver), the target identities and their bootstrap, real issuance or placement, Cloudflare acceptance and denial, no-browser behaviour, and packaged Windows Codex.
 
-## Dev rent R2 state proof (windows #8/#14)
+## Retired dev rent R2 state proof (windows #8/#14)
 
-Before any production state, one bounded run must show that the bundled OpenTofu keeps encrypted state with a native lock file in Cloudflare R2. `providers/dev-rent-state-proof/main.tf` declares exactly two per-run buckets (`windows-rent-state-proof-<run_id>-<attempt>` and its `-decoy`); `providers/dev-rent-state-proof/backend/main.tf` is an S3-backend root on the proof bucket with `use_lockfile = true`, enforced state and plan encryption, and only built-in resources.
+The disposable R2 state proof (`dev.rent-state-proof`, its manual workflow, bucket and backend roots, adapter entry, evidence parser and checks) is retired from source, and its parent token is no longer an input of any plane. Its earlier runs stay in their own run history only. Retirement deletes and proves nothing about provider buckets, objects or the parent and temporary credentials; old R2 credential and cleanup status remains a separate owner matter.
 
-```text
-dev-rent-access-probe/R2_PARENT_API_TOKEN, R2_PARENT_ACCESS_KEY_ID, CLOUDFLARE_ACCOUNT_ID
-→ probe-dev-rent-state (manual dispatch on proposals only, with the required expected_source_sha; the job and its
-   Environment secrets start only when github.sha equals it and only as run attempt 1; read-only repository
-   permissions)
-→ parent verify: ID equals R2_PARENT_ACCESS_KEY_ID, active, not_before passed, expiry covers the job bound + margin
-→ both per-run names absent; first bounded create (proof bucket) is the only capability probe, then the decoy
-→ one temporary credential (attempt recorded before the one POST): proof bucket, prefix state/, object-read-write,
-   900 s, never the parent token; the control writes the fixed marker state/boundary-probe and reads it back exactly
-→ one lock holder and one refused contender, then release; raw object is ciphertext without the canary;
-   fresh-directory readback; pbkdf2 key rotation through fallback; each negative right after its control:
-   old key, no encryption, no credential (OpenTofu); the marker PUT outside the prefix and the GET of the parent's
-   verified decoy marker (curl); the same credential reads again after the negatives
-→ cleanup once: the same credential refused 401 reading the same marker after its TTL, the state, lock and every
-   attempted marker key deleted, owned buckets destroyed, both names 404
-```
-
-- Negatives are `REFUSED` only when the adjacent control succeeds and the failure has its own cause: decryption, an encryption refusal of the encrypted state, missing credential, or, for the outside-prefix write and the decoy read, a completed HTTP 403 whose parsed S3 XML `Error` has exactly one direct `Code`, `AccessDenied`. A negative that succeeds is `ADMITTED` (RED); a 401, a 5xx, a transport error or any other cause is `UNKNOWN`, and so is a bodyless or other-coded 403, a missing object or a reply that merely contains the word.
-- The object boundaries use the locked closure `curl` (`pkgs.curl`), because OpenTofu reads (HEAD) its state key before any lock write and a refused HEAD carries no error code. One path-style request each, signed `aws:amz:auto:s3` with the temporary credential, which reaches curl only through its stdin config (`-q`, the default config disabled), never argv, a file or a log; no proxy, redirect or retry, and the reply stays in process. The fixed non-secret marker `state/boundary-probe`: the credential control writes it and reads it back exactly; right before the outside-prefix write, the write control PUTs the same bytes to it again, and `outside/boundary-probe` gets an otherwise identical PUT; the parent token writes the decoy's marker and reads it back exactly, then the read control GETs the proof marker with exact bytes right before the credential reads the decoy's, so a refusal is never a missing object. Proof and decoy reads differ only in the bucket. Every PUT is recorded as attempted before it is sent, and cleanup deletes every attempted key even when the reply was a timeout. If the decoy marker cannot be verified, the decoy negative is not attempted. No raw curl read of `state/proof.tfstate` is made; the OpenTofu and Wrangler reads of it are unchanged.
-- `unencrypted_read_refused` reads the state with no encryption configuration at all: a temporary copy of the backend root with its one exact enforced `encryption` block removed, without `TF_ENCRYPTION`, used for `init` and `output -raw canary` only (never plan, apply or migration). Its control and every other step keep the unchanged enforced root. A missing, differing or repeated block leaves the negative unattempted (`UNKNOWN`, diagnostics `null`). The enforced root without `TF_ENCRYPTION` is a configuration error (no method), not a read refusal, and stays `UNKNOWN`. Which phase R2 refuses at (init or read), and that this read leaves the remote state unwritten, are not observed; OpenTofu 1.12.3 `output` and S3 `StateMgr` source show only reads for an existing default workspace.
-- The credential is `UNUSABLE_AFTER_TTL` only for a 401 reading the same marker after a usable control; otherwise it is `UNKNOWN`. Any issuance failure (transport, 5xx, malformed, 4xx) is `ISSUANCE_UNKNOWN`: the provider may still have issued one, so cleanup is at best `UNKNOWN` even when both buckets are gone.
-- `diagnostics` records which branch produced each label, using only closed values. It explains an `UNKNOWN`; it never creates or changes a label or a check, and no value is a rejection or acceptance proof by itself. Diagnostics outside the closed sets are dropped (`null`). A `STATE_BACKEND_PROVEN` stands only with complete evidence: an entry for every negative and the post-TTL probe's status `401`; dropped, missing or `null` evidence makes it `UNKNOWN`, while an early stop may still carry `null` entries:
-  - `negatives.<name>` (`null` when that negative did not run): `control` (the adjacent control succeeded), `phase` where the attempt stopped (`admitted`, or refused at `init`, `read`, `lock` or `write`, the object PUT), and the failure facts the cause is computed from.
-  - `credential_probe`: `probe` (`not_run`, `admitted`, `refused` or `local_failure`), the same failure facts, `local` (`none`, `envs`, `os` or `subprocess`), and `code`: a completed failed reply's single direct S3 error code if it is one of R2's authentication and authorization codes (`Unauthorized`, `AccessDenied`, `ExpiredRequest`, `SignatureDoesNotMatch`, `NotEntitled`), `other` for any other parsed code, otherwise `none`. The code only narrows the investigation; it never changes a label, and the credential end is still only a completed 401.
-  - Failure facts: `status` (`none`, `401`, `403`, `5xx`, `other`, `multiple`), `access_denied` (for OpenTofu the text named AccessDenied; for curl the parsed XML error code is AccessDenied), `transient` (timeout or connection noise; for curl any nonzero exit, such as a partial transfer, so no status or body it carried counts as a completed reply), `word` (`decrypt`, `encrypt`, `credential`, `none`). A status outranks the wording, as in the label rule.
-  - A 403 with `access_denied` false is not `access_denied`. Captured output, status bodies, keys, credentials and exception text never reach the receipt; a value outside these sets drops `diagnostics` to `null`. A failure that ends the proof records `error` only as its kind (`envs`, `os` or `subprocess`), with `stage` saying where. A failure before or outside the receipt, including preflight, prints only `RENT_STATE_PROOF=RED: <kind>` (`envs`, `os`, `subprocess` or `other`) and exits non-zero: no exception text, class name or traceback reaches the job log.
-
-- Every OpenTofu process gets its own directory and empty HOME. The parent token reaches only the bucket root, Wrangler and the Cloudflare API; the temporary credential and the `TF_ENCRYPTION` text reach only the backend root, by environment. Neither enters argv, `-backend-config`, a log line, the result JSON, an artifact, a cache or Git; the raw state object stays in process memory.
-- Right after each create the run emits one evidence line per bucket (`envs.rentStateProofCreated.v1`: bucket, provider `creation_date`, run ID, attempt, head). Cleanup deletes only a bucket whose evidence and current `creation_date` match; a bucket name alone never authorizes deletion. The same parser reads those lines from a job log as recovery input for a later exact contract.
-- `STATE_BACKEND_PROVEN` needs every positive check, every negative `REFUSED`, a usable control and `cleanup` `ABSENT` (buckets `ABSENT`, `owned` equal to every bucket this run's create evidence names, and the credential `UNUSABLE_AFTER_TTL`; a 404 for a created bucket never read back as owned is `UNKNOWN`, not absence). A remaining bucket is `LEFTOVER`; an unobserved credential end or unreadable evidence is `UNKNOWN`; either replaces the status, with no retry. Force cancellation or runner loss can bypass cleanup. The failure signatures above are to be confirmed by the live run.
-- `checks/test_rent_state_proof.py` proves the gates, order, isolation, redaction, outcome classes, cleanup model and evidence parser against a fake provider; `check` initializes and validates both roots with network access closed and checks Wrangler's `r2 object get --pipe --remote` shape.
-- `check` also runs it with `--real-tofu "$tool/tofu"`: the pinned closure OpenTofu writes, rotates and reads one synthetic state through a local backend with network access closed, using the adapter's own encryption configuration. It needs the new key to read, the old key alone to fail by decryption, and the raw state to be rewritten without the canary. Right after the new-key read, `no_config_read_refused` reads the same encrypted state from a copy of the root with no encryption block at all (init and output only, never plan or apply) and needs it refused for the adapter's own encryption or decryption cause, with the phase where it stopped; `no_config_state_unchanged` needs the raw state bytes identical afterwards. `enforced_init_refused` is a separate guard: the enforced root without `TF_ENCRYPTION` is rejected at init by its own configuration (no method) before any state is read, so it is not counted as a read refusal and its cause is not classified. This is a property of OpenTofu on a synthetic local root, not evidence for the live `unencrypted_read_refused` negative, whose backend root keeps the enforced block. It prints only the stage outcomes, fails if the tool cannot run, and leaves its fresh work directory to the ephemeral runner rather than deleting it. It proves OpenTofu's encryption metadata behaviour, not R2 or S3.
-- `check` also runs it with `--real-s3 "$tool/curl"`: the closure curl sends real signed requests to a bounded in-process `127.0.0.1` HTTP fixture with synthetic credentials. It asserts the exact request order, method, path-style path, host, payload, SigV4 credential scope and `SignedHeaders` containing `x-amz-security-token` and `x-amz-content-sha256`, then keeps apart an XML 403 AccessDenied, a bodyless 403, a 401, a 404 NoSuchKey, a signature error, malformed, duplicate-code or text-only bodies, a 5xx, an unfollowed redirect, a timeout and partial transfers (exit 18) carrying an XML 403 AccessDenied, a 401 or the exact marker, all `UNKNOWN`, with no retry and no secret in argv or the environment. It also checks Wrangler's `r2 object put --pipe` shape and that curl is in the provided closure. The fixture is a transport test, not an S3 service or R2 evidence.
-- `R2_PARENT_ACCESS_KEY_ID` is a secret input: as a variable its value was printed in the public step log (run 36797154456). The GitHub Environment still registers it as a variable; moving it is a later owner action. Until then the adapter's input gate rejects the missing secret before any provider call; that is source behaviour, not yet observed on a runner.
-
-Not proven here: any real R2 effect, the parent token's permission (only the first bounded create proves it), R2 lock-file and prefix-scoped temporary-credential behaviour, whether R2 accepts curl's signature and returns XML AccessDenied for these scopes, or production state. A qualifying refusal shows only that the same credential was refused for that target, not which policy caused it. The live run needs its own contract.
+- History: the parent token ID was once registered as a variable, and as a variable its value was printed in the public step log (run 36797154456); that exposure remains part of the record. A 2026-10-15 audit observed it registered in `dev-rent-access-probe` as a Secret, not a Variable. That observation is not evidence of rotation, revocation or cleanup, and no rent or projection plane reads it.
 
 ## Effect toolchain
 
@@ -412,10 +353,10 @@ No failure summary authorizes a retry or recovers a discarded older capture.
 
 `operate-dev-mail-routing` is manual and restricted to the exact canonical
 SHA, `roccho-dev`, first attempt and serialized runs. Its closed operations
-are `qualify`, `recover`, `preview` and `apply`, defaulting to qualification.
-Target data is never a dispatch input; `recipient` is an existing public age
-recipient, never an identity. Runtime uses the existing `dev-projection`
-Environment: `MAIL_CONFIG`, its Cloudflare token and `MAIL_STATE_INPUTS`.
+are `qualify`, `preview` and `apply`, defaulting to qualification.
+Target data is never a dispatch input. It always selects the static
+`dev-projection` Environment: `MAIL_CONFIG`, its Cloudflare token and
+`MAIL_STATE_INPUTS`; it never reads the rent `RENT_*` or `AWS_*` slots.
 The state-input Secret is one JSON object containing only `AWS_ACCESS_KEY_ID`,
 `AWS_SECRET_ACCESS_KEY` and the unchanged `RENT_STATE_PASSPHRASE`. Its exact
 field/type/ASCII/passphrase checks precede private native composition.
@@ -432,15 +373,15 @@ selected backend/provider inputs do. Native streams remain private and are
 never uploaded. No arguments or unsupported operations still return
 `INACTIVE / NOT_RUN`, exit78 before reading protected input.
 
-Recovery selects historical `dev-rent-tunnel` solely to seal its unchanged
-three state slots to the existing owner public recipient. It receives no
-Cloudflare token or real private age key and invokes no OpenTofu. Only the
-validated encrypted carrier is uploaded for one day. The fixed
-`ciphertexts/dev-mail-state.sops.json` is a recovery copy, not a CI decryption
-dependency. Local restoration with the Owner's existing identity provides
-only the three necessary values for the projection Secret. Credential entry
-and submission in the browser belong to the Owner. Existing rent slots,
-private keys and the unrelated projection identity are not replaced.
+The one-time recovery operation, which once selected the former rent
+Environment solely to seal its three state slots to the existing owner public
+recipient, has completed and is retired with its `recipient` input, dynamic
+Environment selector and upload step. The fixed
+`ciphertexts/dev-mail-state.sops.json` remains a recovery copy, not a CI
+decryption dependency. Local restoration with the Owner's existing identity
+provides only the three necessary values for the projection Secret. Credential
+entry and submission in the browser belong to the Owner. Private keys and the
+unrelated projection identity are not replaced.
 
 The adopted carrier came from canonical recovery run38511433848,
 artifact11869414743. Exact ZIP digest/member bytes were independently
@@ -482,8 +423,6 @@ python3 checks/repository.py
 python3 checks/test_repository.py
 python3 checks/test_jev_api.py                                        # --sops/--age-keygen in check: real OCI roundtrip
 python3 checks/test_rent_tunnel.py
-python3 checks/test_rent_access_probe.py
-python3 checks/test_rent_state_proof.py
 nix build .#effect-toolchain .#effect-artifact --no-update-lock-file   # check workflow, toolchain job
 nix build .#check-age --no-update-lock-file                             # check-only, real SOPS roundtrip
 ```

@@ -118,12 +118,21 @@ def main() -> None:
     finally:
         shutil.rmtree(commented.parent, ignore_errors=True)
     expect_red(replace_text(manual, "github.run_attempt == 1", "github.run_attempt >= 1"))
-    expect_red(replace_text(manual, "options: [qualify, recover, preview, apply]", "options: [qualify, recover, preview, apply, destroy]"))
-    expect_red(replace_text(manual, "|| 'dev-projection' }}", "|| 'dev-authoring' }}"))
+    expect_red(replace_text(manual, "options: [qualify, preview, apply]", "options: [qualify, preview, apply, destroy]"))
+    # The retired recovery, its rent Environment and any dynamic selector never return.
+    expect_red(replace_text(manual, "options: [qualify, preview, apply]", "options: [qualify, recover, preview, apply]"))
+    expect_red(replace_text(manual, "    environment: dev-projection\n",
+                            "    environment: ${{ inputs.operation == 'recover' && 'dev-rent-tunnel' || 'dev-projection' }}\n"))
+    expect_red(replace_text(manual, "    environment: dev-projection\n", "    environment: dev-rent-tunnel\n"))
+    expect_red(replace_text(manual, "    environment: dev-projection\n", "    environment: dev-authoring\n"))
     expect_red(replace_text(manual, "MAIL_STATE_INPUTS: ${{ secrets.MAIL_STATE_INPUTS }}",
                             "MAIL_STATE_INPUTS: ${{ secrets.SOPS_AGE_KEY }}"))
+    expect_red(replace_text(manual, "MAIL_STATE_INPUTS: ${{ secrets.MAIL_STATE_INPUTS }}",
+                            "MAIL_STATE_INPUTS: ${{ secrets.RENT_STATE_PASSPHRASE }}"))
     expect_red(replace_text(manual, "if: inputs.operation == 'preview' || inputs.operation == 'apply'",
-                            "if: inputs.operation != 'recover'"))
+                            "if: inputs.operation != 'qualify'"))
+    expect_red(replace_text("adapters/mail_routing_root.py", 'MAIL_OPERATIONS = ("qualify", "preview", "apply")',
+                            'MAIL_OPERATIONS = ("qualify", "recover", "preview", "apply")'))
     expect_red(replace_text(manual,
                             '"$ENVS_EFFECT_BIN/mail-routing-root"',
                             '"$ENVS_EFFECT_BIN/envs-effect"'))
@@ -174,6 +183,7 @@ def main() -> None:
         ("          ref: ${{ steps.select.outputs.app_sha }}", "          ref: proposals"),
         ("          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}", ""),
         ("    environment: dev-projection", "    environment: dev-rent-tunnel"),
+        ("    environment: dev-projection", "    environment: dev-rent-access-probe"),
     ):
         expect_red(replace_text(calendar, old, new))
 
@@ -339,13 +349,22 @@ def main() -> None:
     linode = ".github/workflows/probe-dev-linode-read.yml"
     expect_red(replace_text(linode, "environment: dev-projection", "environment: dev-authoring"))
     expect_red(replace_text(linode, "${{ secrets.LINODE_API_TOKEN }}", "${{ secrets.CLOUDFLARE_API_TOKEN }}"))
-    expect_red(replace_text(linode, f"{entry} linode-read-probe", f"{entry} rent-access-probe"))
+    expect_red(replace_text(linode, f"{entry} linode-read-probe", f"{entry} rent-tunnel"))
     expect_red(mutate_plane("dev.linode-read-probe", lambda row: row["required_secrets"][0].update(
         {"lifecycle": "one_shot_ingress"})))
 
     rent = ".github/workflows/project-dev-rent-tunnel.yml"
     expect_red(replace_text(rent, "on:\n  workflow_dispatch:\n", "on:\n  workflow_dispatch:\n  push:\n"))
-    expect_red(replace_text(rent, "environment: dev-rent-tunnel", "environment: dev-projection"))
+    # Rent stage ingress is dev-projection: no host-specific Environment, and never the Pages/Mail Cloudflare slots.
+    expect_red(replace_text(rent, "environment: dev-projection", "environment: dev-rent-tunnel"))
+    expect_red(replace_text(rent, "environment: dev-projection", "environment: dev-authoring"))
+    expect_red(replace_text(rent, "environment: dev-projection", "environment: ${{ 'dev-projection' }}"))
+    rent_token = "          RENT_CLOUDFLARE_API_TOKEN: ${{ secrets.RENT_CLOUDFLARE_API_TOKEN }}\n"
+    expect_red(replace_text(rent, rent_token, "          RENT_CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}\n"))
+    expect_red(replace_text(rent, rent_token, "          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}\n"))
+    expect_red(replace_text(rent, "          RENT_CLOUDFLARE_ACCOUNT_ID: ${{ vars.RENT_CLOUDFLARE_ACCOUNT_ID }}\n",
+                            "          RENT_CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}\n"))
+    expect_red(replace_text(rent, rent_token, rent_token + "          R2_PARENT_API_TOKEN: ${{ secrets.R2_PARENT_API_TOKEN }}\n"))
     expect_red(replace_text(rent, "${{ vars.RENT_AGE_RECIPIENT }}", "${{ secrets.RENT_AGE_RECIPIENT }}"))
     expect_red(replace_text(rent, "          RENT_STATE_KEY: ${{ vars.RENT_STATE_KEY }}\n", ""))
     expect_red(replace_text(rent, "          RENT_STATE_KEY: ${{ vars.RENT_STATE_KEY }}\n",
@@ -356,19 +375,32 @@ def main() -> None:
     expect_red(replace_text(rent, " ciphertexts/dev-rent-client.sops.yaml contracts/", " contracts/"))
     expect_red(mutate_plane("dev.rent-root", lambda row: row["required_variables"].pop()))
     expect_red(mutate_plane("dev.rent-root", lambda row: row.update({"github_environment": "dev-rent-client"})))
+    for plane, retired in (("dev.rent-root", "dev-rent-tunnel"), ("dev.rent-tunnel", "dev-rent-tunnel")):
+        expect_red(mutate_plane(plane, lambda row, retired=retired: row.update(
+            {"github_environment": retired, "active_github_environment": retired})))
+    expect_red(mutate_plane("dev.rent-root", lambda row: row["required_secrets"][0].update({"name": "CLOUDFLARE_API_TOKEN"})))
+    expect_red(mutate_plane("dev.rent-root", lambda row: row["required_variables"][0].update({"name": "CLOUDFLARE_ACCOUNT_ID"})))
+    expect_red(mutate_plane("dev.rent-root", lambda row: row["required_secrets"].append(
+        {"name": "R2_PARENT_API_TOKEN", "type": "opaque", "lifecycle": "finite_expiry"})))
+    # The client plane is an output only: no Environment and no ingress of its own.
+    expect_red(mutate_plane("dev.rent-client", lambda row: row.update(
+        {"github_environment": "dev-rent-client", "active_github_environment": "dev-rent-client"})))
+    expect_red(mutate_plane("dev.rent-client", lambda row: row.update({"required_secrets": [], "required_variables": [
+        {"name": "RENT_CLIENT_AGE_RECIPIENT", "type": "age_recipient", "lifecycle": "persistent"}]})))
     # The root activated without its envelopes, from a valid fresh preimage: on a tree that already holds the
     # accepted handoff the same row change alone would be a no-op.
     expect_red(lambda root: (fresh_rent(root), mutate_plane("dev.rent-root", lambda row: row.update(
-        {"migration_state": "ACTIVE", "active_github_environment": "dev-rent-tunnel"}))(root)))
+        {"migration_state": "ACTIVE", "active_github_environment": "dev-projection"}))(root)))
     expect_red(replace_text("contracts/provider-consumer.jsonl", '"provider_apply_authority",', ""))
-    expect_red(replace_text("README.md", "dev-rent-tunnel/RENT_STATE_PASSPHRASE", "dev-rent-tunnel/REMOVED"))
+    expect_red(replace_text("README.md", "dev-projection/RENT_STATE_PASSPHRASE", "dev-projection/REMOVED"))
+    expect_red(replace_text("README.md", "dev-projection/RENT_CLOUDFLARE_API_TOKEN", "dev-rent-tunnel/RENT_CLOUDFLARE_API_TOKEN"))
     expect_red(replace_text("README.md", "applied only by `rent-root` under a separate effect grant", "declaration only"))
     expect_red(replace_text(check, ' --tofu "$tool/tofu"', ""))
     expect_red(mutate_plane("dev.rent-tunnel", lambda row: row["required_variables"].pop()))
     expect_red(mutate_plane("dev.rent-tunnel", lambda row: row["required_variables"][2].update({"type": "age_recipient_list"})))
     expect_red(mutate_plane("dev.rent-tunnel", lambda row: row.update({"source_kind": "public_sops"})))
     expect_red(replace_text("contracts/provider-consumer.jsonl", '"does_not_own":["target_apply",', '"does_not_own":['))
-    expect_red(replace_text("README.md", "dev-rent-tunnel/RENT_AGE_RECIPIENT", "dev-rent-tunnel/REMOVED"))
+    expect_red(replace_text("README.md", "dev-projection/RENT_AGE_RECIPIENT", "dev-projection/REMOVED"))
 
     # The OCI dev target: one declared binding, one literal author step with only its own inputs, no default target.
     oci_mapping = "          OCI_DEV_AGE_RECIPIENT: ${{ vars.OCI_DEV_AGE_RECIPIENT }}\n"
@@ -442,24 +474,35 @@ def main() -> None:
     expect_red(replace_text("flake.nix", "        check-age = pkgs.age;\n", ""))
     expect_red(replace_text("flake.nix", "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt", "/etc/ssl/certs/ca-certificates.crt"))
 
-    # The Access probe: manual, read-only on the repository, standard provider, every resource gated, no state in Git.
-    probe = ".github/workflows/probe-dev-rent-access-ssh.yml"
-    tf = "providers/dev-rent-access-probe/main.tf"
-    expect_red(replace_text(probe, "on:\n  workflow_dispatch:\n", "on:\n  workflow_dispatch:\n  push:\n"))
-    expect_red(replace_text(probe, "  contents: read\n", "  contents: write\n"))
-    expect_red(replace_text(probe, "environment: dev-rent-access-probe", "environment: dev-rent-tunnel"))
-    expect_red(replace_text(probe, "          CLOUDFLARE_ZONE_ID: ${{ vars.CLOUDFLARE_ZONE_ID }}\n", ""))
-    expect_red(replace_text(probe, f"{entry} rent-access-probe", f"{entry} rent-access-locate"))
-    expect_red(replace_text(probe, f"{entry} rent-access-probe", '"$ENVS_EFFECT_BIN/tofu" destroy'))
-    expect_red(replace_text(tf, '  count   = local.count\n  zone_id = var.zone_id\n  name    = local.hostname',
-                            '  zone_id = var.zone_id\n  name    = local.hostname'))
-    expect_red(replace_text(tf, "terraform {\n", 'terraform {\n  backend "local" {}\n'))
-    expect_red(replace_text(tf, 'decision   = "non_identity"', 'decision   = "allow"'))
-    expect_red(replace_text(tf, "service_token = { token_id = cloudflare_zero_trust_access_service_token.probe[0].id }",
-                            "any_valid_service_token = {}"))
-    expect_red(replace_text(tf, 'version = "5.21.1"', 'version = ">= 5.0"'))
-    expect_red(replace_text(tf, 'output "credentials" {\n  sensitive = true\n', 'output "credentials" {\n'))
-    expect_red(lambda root: (root / "providers/dev-rent-access-probe/terraform.tfstate").write_text("{}\n"))
+    # The retired disposable Access probe and R2 state proof: no workflow, provider root, test, plane or boundary returns.
+    def restore(relative: str, text: str):
+        def mutate(root: Path) -> None:
+            (root / relative).parent.mkdir(parents=True, exist_ok=True)
+            (root / relative).write_text(text, encoding="utf-8")
+        return mutate
+
+    for relative in repository.RETIRED_PATHS:
+        expect_red(restore(relative, "# retired\n"))
+    expect_red(restore("providers/dev-rent-access-probe/terraform.tfstate", "{}\n"))
+
+    def restore_row(relative: str, row: dict):
+        def mutate(root: Path) -> None:
+            path = root / relative
+            path.write_text(path.read_text(encoding="utf-8") + json.dumps(row, separators=(",", ":")) + "\n",
+                            encoding="utf-8")
+        return mutate
+
+    expect_red(restore_row("contracts/environments.jsonl", {
+        "id": "dev.rent-access-probe", "kind": "envs.secretPlane.v1", "stage_id": "dev", "plane_id": "rent-access-probe",
+        "owner": "envs", "github_environment": "dev-rent-access-probe", "active_github_environment": None,
+        "migration_state": "NOT_CONFIGURED", "source_kind": "provider_issued", "target_kind": "disposable_probe",
+        "desired_state": "ENABLED", "required_secrets": [], "required_variables": []}))
+    expect_red(restore_row("contracts/provider-consumer.jsonl", {
+        "id": "dev.rent-state-proof.provider", "kind": "envs.providerConsumerBoundary.v1", "role": "provider",
+        "repository": "roccho-dev/envs", "stage": "dev", "capability": "rent-state-proof"}))
+    expect_red(replace_text(".github/workflows/check.yml", "run: python3 checks/test_rent_tunnel.py\n",
+                            "run: python3 checks/test_rent_tunnel.py\n\n      - name: Retired\n"
+                            "        run: python3 checks/test_rent_state_proof.py\n"))
     # The persistent root: native validate accepts each of these, so the oracle must refuse them.
     rent = "providers/dev-rent-cloudflare/main.tf"
     expect_red(replace_text(rent, '  backend "http" {}\n', '  backend "local" {}\n'))
@@ -506,11 +549,7 @@ def main() -> None:
                                     '  /*\n  duration = "1h"\n  */\n  duration   = var.service_token_duration # bound at deployment\n'))
     assert '  /*\n  duration = "1h"\n  */\n' in commented, "rent fixture anchor missing"
     repository.check_rent_config(commented)
-    expect_red(lambda root: (root / "providers/dev-rent-access-probe/.terraform.lock.hcl").write_text("\n"))
-    expect_red(mutate_plane("dev.rent-access-probe", lambda row: row.update(
-        {"active_github_environment": "dev-rent-access-probe", "migration_state": "ACTIVE"})))
-    expect_red(replace_text("contracts/provider-consumer.jsonl", '"does_not_own":["existing_cloudflare_resources",',
-                            '"does_not_own":['))
+    expect_red(restore("providers/dev-rent-access-probe/.terraform.lock.hcl", "\n"))
     expect_red(replace_text("flake.nix", 'pkgs.cloudflared.version == "2026.6.1"', 'pkgs.cloudflared.version != ""'))
     expect_red(replace_text("flake.nix", "[ p.cloudflare_cloudflare ]", "[ p.cloudflare_cloudflare p.hashicorp_random ]"))
     expect_red(replace_text("flake.nix", 'tofu = "${opentofu}/bin/tofu";', 'tofu = "/usr/bin/tofu";'))
@@ -524,27 +563,11 @@ def main() -> None:
     expect_red(replace_text("flake.nix", "grep -qF -- --address backend.help", "true"))
     expect_red(replace_text("flake.nix", '"$target" --help >backend.help 2>&1 || true', "true >backend.help"))
     expect_red(replace_text(check, "HTTPS_PROXY=http://127.0.0.1:9 HTTP_PROXY=http://127.0.0.1:9 ", ""))
-    expect_red(replace_text(check, ' --real-ssh "$tool"', ""))
-    # The state proof job enters only for the dispatched expected SHA on attempt 1; the input stays required.
-    state = ".github/workflows/probe-dev-rent-state.yml"
-    expect_red(replace_text(state, " && github.sha == inputs.expected_source_sha", ""))
-    expect_red(replace_text(state, " && github.run_attempt == '1'", ""))
-    expect_red(replace_text(state, "github.sha == inputs.expected_source_sha", "github.sha != inputs.expected_source_sha"))
-    expect_red(replace_text(state, "        required: true\n", "        required: false\n"))
-    expect_red(replace_text(state, "    inputs:\n      expected_source_sha:\n", "    inputs:\n      source_sha:\n"))
-    expect_red(replace_text(state, "    timeout-minutes:", "    if: always()\n    timeout-minutes:"))
-    # The state proof's native OpenTofu rotation regression is mandatory in check, not an optional local run.
-    expect_red(replace_text(check, ' --real-tofu "$tool/tofu"', ""))
-    # So is the real closure curl against the signed loopback fixture, its closure membership and the marker argv.
-    expect_red(replace_text(check, ' --real-s3 "$tool/curl"', ""))
     expect_red(replace_text(check, 'grep -qxF "$curl" "$RUNNER_TEMP/provided.list"', "true"))
-    expect_red(replace_text(check, 'grep -qF -- --pipe "$RUNNER_TEMP/r2-object-put.help"', "true"))
     expect_red(replace_text("flake.nix", 'curl = "${pkgs.curl}/bin/curl";', 'curl = "/usr/bin/curl";'))
     expect_red(replace_text("flake.nix", "openssh curl ]", "openssh ]"))
     expect_red(replace_text(check, 'grep -qF "cloudflared version 2026.6.1 "', 'grep -qF "cloudflared version"'))
-    expect_red(replace_text(check, "run: python3 checks/test_rent_access_probe.py\n", "run: 'true'\n"))
-    expect_red(replace_text("README.md", "name lookup locates candidates and never proves ownership", "name lookup finds ours"))
-    expect_red(replace_text("README.md", "dev-rent-access-probe/CLOUDFLARE_ZONE_ID", "dev-rent-access-probe/REMOVED"))
+    expect_red(replace_text("README.md", "dev-projection/RENT_CLOUDFLARE_ZONE_ID", "dev-projection/REMOVED"))
 
     # placement-gate (windows #14): each job binds the actual outputs; the entrance and the receiver keep values private.
     for marker in (
@@ -595,7 +618,7 @@ def main() -> None:
     expect_red(replace_text("README.md", "placement-gate", "placement gate"))
     expect_red(replace_text("contracts/provider-consumer.jsonl", '"distribution_source":"', '"distribution_source":"main'))
     expect_red(replace_text("contracts/provider-consumer.jsonl", '"root_output_projection",', ""))
-    expect_red(mutate_plane("dev.rent-client", lambda row: row["required_variables"][0].update({"type": "age_recipient_list"})))
+    expect_red(mutate_plane("dev.rent-root", lambda row: row["required_variables"][-1].update({"type": "age_recipient_list"})))
     expect_red(mutate_plane("dev.rent-client", lambda row: row.update({"github_environment": "dev-rent-tunnel"})))
 
     def invalid_client_ciphertext(root: Path) -> None:

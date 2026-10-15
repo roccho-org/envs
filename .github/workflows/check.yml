@@ -42,12 +42,6 @@ jobs:
       - name: Test rent tunnel adapter
         run: python3 checks/test_rent_tunnel.py
 
-      - name: Test access probe adapter
-        run: python3 checks/test_rent_access_probe.py
-
-      - name: Test state proof adapter
-        run: python3 checks/test_rent_state_proof.py
-
       - name: Test Linode read probe adapter
         run: python3 checks/test_linode_read_probe.py
 
@@ -765,10 +759,9 @@ jobs:
           done
           "$tool/wrangler" pages secret put --help 2>&1 | grep -Ei 'pages secret put <key>' >/dev/null
 
-      # The probe tools come from the built closure: the exact client version and its service-token flags, the provider
-      # declaration and the persistent root initialized and validated with every network route closed, and a real
-      # localhost sshd/ssh exchange.
-      - name: Access probe tools from the closure without network or credentials
+      # The closure client and the persistent root: the exact client version and its service-token flags, and the root
+      # initialized and validated with every network route closed. The disposable probe and state proof are retired.
+      - name: Closure client and rent root without network or credentials
         run: |
           set -euo pipefail
           tool="$RUNNER_TEMP/envs-effect/bin"
@@ -777,11 +770,6 @@ jobs:
           "$tool/cloudflared" access ssh --help >"$RUNNER_TEMP/access-ssh.help" 2>&1 || true
           grep -qF -- --service-token-id "$RUNNER_TEMP/access-ssh.help"
           grep -qF -- --service-token-secret "$RUNNER_TEMP/access-ssh.help"
-          probe="$RUNNER_TEMP/probe-config"
-          mkdir "$probe"
-          cp providers/dev-rent-access-probe/main.tf "$probe/"
-          HTTPS_PROXY=http://127.0.0.1:9 HTTP_PROXY=http://127.0.0.1:9 "$tool/tofu" -chdir="$probe" init -input=false -no-color
-          "$tool/tofu" -chdir="$probe" validate -no-color
           # The persistent root is declaration only: initialized without its backend and validated, never planned.
           rent="$RUNNER_TEMP/rent-cloudflare"
           mkdir "$rent"
@@ -789,31 +777,7 @@ jobs:
           HTTPS_PROXY=http://127.0.0.1:9 HTTP_PROXY=http://127.0.0.1:9 "$tool/tofu" -chdir="$rent" init -backend=false -input=false -no-color
           "$tool/tofu" -chdir="$rent" validate -no-color
           "$tool/ssh" -V
-          "$tool/python3" -I checks/test_rent_access_probe.py --real-ssh "$tool"
-
-      # The state proof roots come from the same closure: both initialized and validated with every network route
-      # closed (the backend root without a backend), the Wrangler raw-read and marker-write argv shapes, and the
-      # self-test with real OpenTofu and the real closure curl against a loopback HTTP fixture.
-      - name: State proof roots from the closure without network or credentials
-        run: |
-          set -euo pipefail
-          tool="$RUNNER_TEMP/envs-effect/bin"
-          state="$RUNNER_TEMP/state-config"
-          mkdir -p "$state/backend"
-          cp providers/dev-rent-state-proof/main.tf "$state/"
-          cp providers/dev-rent-state-proof/backend/main.tf "$state/backend/"
-          HTTPS_PROXY=http://127.0.0.1:9 HTTP_PROXY=http://127.0.0.1:9 "$tool/tofu" -chdir="$state" init -input=false -no-color
-          "$tool/tofu" -chdir="$state" validate -no-color
-          HTTPS_PROXY=http://127.0.0.1:9 HTTP_PROXY=http://127.0.0.1:9 "$tool/tofu" -chdir="$state/backend" init -backend=false -input=false -no-color
-          "$tool/tofu" -chdir="$state/backend" validate -no-color
-          "$tool/tofu" version
-          "$tool/wrangler" r2 object get --help >"$RUNNER_TEMP/r2-object-get.help" 2>&1 || true
-          grep -qF -- --pipe "$RUNNER_TEMP/r2-object-get.help"
-          grep -qF -- --remote "$RUNNER_TEMP/r2-object-get.help"
-          "$tool/wrangler" r2 object put --help >"$RUNNER_TEMP/r2-object-put.help" 2>&1 || true
-          grep -qF -- --pipe "$RUNNER_TEMP/r2-object-put.help"
           "$tool/curl" --version
-          "$tool/python3" -I checks/test_rent_state_proof.py --real-tofu "$tool/tofu" --real-s3 "$tool/curl"
 
       - name: Test Jev adapter on the toolchain interpreter
         run: '"$RUNNER_TEMP/envs-effect/bin/python3" -I checks/test_jev_api.py'
