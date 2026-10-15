@@ -42,10 +42,6 @@ jobs:
       - name: Test rent tunnel adapter
         run: python3 checks/test_rent_tunnel.py
 
-      # TEMPORARY: the one-time rent Secret relocation entry's guards, inputs and receipt (retired with it).
-      - name: Test rent Secret relocation guards
-        run: python3 checks/test_relocate_rent_secrets.py
-
       - name: Test Linode read probe adapter
         run: python3 checks/test_linode_read_probe.py
 
@@ -782,17 +778,6 @@ jobs:
           "$tool/tofu" -chdir="$rent" validate -no-color
           "$tool/ssh" -V
           "$tool/curl" --version
-
-      # TEMPORARY: the relocation entry on the same locked-nixpkgs Python with PyNaCl the relocation run builds, with
-      # ephemeral synthetic keys and values only (retired with it).
-      - name: Test rent Secret relocation crypto with locked PyNaCl
-        run: |
-          set -euo pipefail
-          flake="builtins.getFlake \"path:$GITHUB_WORKSPACE\""
-          pkgs="import ($flake).inputs.nixpkgs { system = \"x86_64-linux\"; }"
-          python="$(nix build --impure --no-link --print-out-paths --expr "($pkgs).python3.withPackages (ps: [ ps.pynacl ])")/bin/python3"
-          "$python" -I adapters/relocate_rent_secrets.py selftest
-          "$python" -I checks/test_relocate_rent_secrets.py --require-nacl
 
       - name: Test Jev adapter on the toolchain interpreter
         run: '"$RUNNER_TEMP/envs-effect/bin/python3" -I checks/test_jev_api.py'
