@@ -171,6 +171,39 @@ RETIRED_PATHS = (
     "checks/test_rent_access_probe.py",
     "checks/test_rent_state_proof.py",
 )
+# TEMPORARY one-time encrypted relocation (closure-v2): the only entrance that may select the old dev-rent-tunnel
+# Environment. Its retirement removes these paths, this exception and the check.yml steps before dev-rent-tunnel goes.
+RELOCATION_WORKFLOW = "relocate-dev-rent-secrets.yml"
+RELOCATION_PATHS = (
+    ".github/workflows/relocate-dev-rent-secrets.yml",
+    "adapters/relocate_rent_secrets.py",
+    "checks/test_relocate_rent_secrets.py",
+)
+RELOCATION_ENVIRONMENT = "dev-rent-tunnel"
+RELOCATION_SECRETS = ("CLOUDFLARE_API_TOKEN", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "RENT_STATE_PASSPHRASE")
+RELOCATION_GATE = (
+    "    if: ${{ github.repository == 'roccho-org/envs' && github.repository_id == '1391871347'"
+    " && github.ref == 'refs/heads/proposals' && github.event_name == 'workflow_dispatch'"
+    " && github.sha == inputs.expected_source_sha && github.run_attempt == '1' && github.actor == 'roccho-dev'"
+    " && github.actor_id == '40359643' && github.triggering_actor == 'roccho-dev' }}\n"
+)
+RELOCATION_ACTIONS = {
+    ("actions/checkout", "3d3c42e5aac5ba805825da76410c181273ba90b1"),
+    ("cachix/install-nix-action", "13d8dd58da0234aa297dedd986986ccb8e7f3e24"),
+    ("actions/upload-artifact", "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"),
+}
+RELOCATION_STEPS = [
+    "Checkout exact canonical revision", "Install pinned Nix", "Build locked Python with PyNaCl",
+    "Synthetic self-test before any Secret", "Seal the four Secrets to the dev-projection public key",
+    "Upload the encrypted receipt only",
+]
+# The locked nixpkgs Python with PyNaCl, from the existing lock and nothing else; the same expression tests it in check.
+RELOCATION_NIXPKGS = "test \"$(nix eval --impure --raw --expr \"($flake).inputs.nixpkgs.rev\")\" = f9948418dc8628ac02b6d6337e191ade9429d59d"
+RELOCATION_PYTHON = ('python="$(nix build --impure --no-link --print-out-paths --expr '
+                     '"($pkgs).python3.withPackages (ps: [ ps.pynacl ])")/bin/python3"')
+RELOCATION_SELFTEST = "run: '\"$RELOCATE_PYTHON\" -I adapters/relocate_rent_secrets.py selftest'\n"
+RELOCATION_SEAL = ("run: '\"$RELOCATE_PYTHON\" -I adapters/relocate_rent_secrets.py seal --output "
+                   "\"$RUNNER_TEMP/relocate/receipt.json\"'\n")
 # check proves the closure client and the persistent root declaration: exact client version, its token flags, and an
 # OpenTofu init/validate of the root with every network route closed.
 PROBE_TOOL_CHECKS = (
@@ -589,7 +622,8 @@ def check_workflows(root: Path, environments: dict[str, dict[str, Any]],
     workflow_root = root / ".github/workflows"
     names = {path.name for path in workflow_root.iterdir() if path.is_file()}
     require(
-        names == {"check.yml", "jev-issue-comment.yml", "deploy-calendar-pages.yml", "operate-dev-mail-routing.yml", *EFFECT_WORKFLOWS},
+        names == {"check.yml", "jev-issue-comment.yml", "deploy-calendar-pages.yml", "operate-dev-mail-routing.yml",
+                  RELOCATION_WORKFLOW, *EFFECT_WORKFLOWS},
         f"workflow set differs: {sorted(names)}",
     )
     texts = {path.name: path.read_text(encoding="utf-8") for path in workflow_root.iterdir() if path.is_file()}
@@ -609,15 +643,21 @@ def check_workflows(root: Path, environments: dict[str, dict[str, Any]],
         # Every selected Environment is one literal functional dev name: no expression, no host-specific name.
         selected = [value.strip() for value in re.findall(r"(?m)^\s*environment:(.*)$", text)]
         require("${{" not in "".join(selected), f"{name}: dynamic Environment is forbidden")
-        for retired in RETIRED_ENVIRONMENTS:
-            require(retired not in selected, f"{name}: retired host-specific Environment {retired} is selected")
-        require(set(selected) <= {"dev-authoring", "dev-projection"}, f"{name}: Environment outside dev-authoring/dev-projection")
+        if name == RELOCATION_WORKFLOW:
+            # The one temporary exception: exactly the old Environment, once, in the strictly checked entrance below.
+            require(selected == [RELOCATION_ENVIRONMENT], f"{name}: the relocation selects only {RELOCATION_ENVIRONMENT}")
+        else:
+            for retired in RETIRED_ENVIRONMENTS:
+                require(retired not in selected, f"{name}: retired host-specific Environment {retired} is selected")
+            require(set(selected) <= {"dev-authoring", "dev-projection"},
+                    f"{name}: Environment outside dev-authoring/dev-projection")
         require("R2_PARENT_" not in text, f"{name}: the retired R2 parent token is referenced")
         for action, ref in ACTION_USE.findall(text):
             if not action.startswith(("./", "docker://")):
                 require(re.fullmatch(r"[0-9a-f]{40}", ref) is not None, f"{name}: mutable Action {action}@{ref}")
 
     check = texts["check.yml"]
+    check_relocation(root, texts[RELOCATION_WORKFLOW], check)
     require("pull_request:" in check and "proposals" in check, "check workflow must validate proposals PRs")
     require("${{ secrets." not in check, "check workflow must be secret-free")
     require("checks/repository.py" in check, "check workflow must execute repository oracle")
@@ -861,6 +901,76 @@ def check_workflows(root: Path, environments: dict[str, dict[str, Any]],
             and "github.triggering_actor == 'roccho-dev'" in mail,
             "Mail dispatch must admit only the fixed GitHub controller, without claiming chat role identity")
 
+
+def check_relocation(root: Path, source: str, check: str) -> None:
+    """TEMPORARY: the one-time encrypted rent Secret relocation entrance, strictly; retired with its exception."""
+    for path in RELOCATION_PATHS:
+        require((root / path).is_file(), f"relocation path missing: {path}")
+    significant = [line.rstrip() for line in source.splitlines() if line.strip() and not line.lstrip().startswith("#")]
+    require(significant[significant.index("on:"):significant.index("jobs:")] == [
+        "on:", "  workflow_dispatch:", "    inputs:", "      expected_source_sha:",
+        "        description: Exact canonical source SHA authorized for this one run", "        type: string",
+        "        required: true", "permissions:", "  contents: read", "concurrency:",
+        "  group: relocate-dev-rent-secrets", "  cancel-in-progress: false",
+    ], "relocation admits only one manual dispatch with its source SHA, contents:read and one serialized run")
+    job = source[source.find("\njobs:\n"):]
+    require(re.findall(r"(?m)^  ([a-z0-9-]+):\s*$", job) == ["relocate"], "relocation has exactly one job")
+    require(source.count(RELOCATION_GATE) == 1 and source.count("\n    if:") == 1 and "\n        if:" not in source
+            and source.find(RELOCATION_GATE) < source.find("    runs-on: ubuntu-24.04\n")
+            < source.find(f"    environment: {RELOCATION_ENVIRONMENT}\n") < source.find("    steps:\n"),
+            "relocation must gate exact repository, branch ref, event, source, attempt and controller before its Environment")
+    require(re.search(r"(?m)^ {0,4}(env|permissions|defaults|container|services|outputs|strategy):", job) is None,
+            "relocation job may not widen permissions or set job environment")
+    require(re.findall(r"(?m)^      - name: (.+)$", source) == RELOCATION_STEPS, "relocation step set differs")
+    require({(action, ref) for action, ref in ACTION_USE.findall(source)} == RELOCATION_ACTIONS,
+            "relocation uses only the pinned checkout, Nix installer and upload actions")
+    steps = {name: source[source.find(f"      - name: {name}\n"):] for name in RELOCATION_STEPS}
+    for current, following in zip(RELOCATION_STEPS, RELOCATION_STEPS[1:] + [None]):
+        if following:
+            steps[current] = steps[current][:steps[current].find(f"      - name: {following}\n")]
+    build, selftest, seal = (steps[RELOCATION_STEPS[2]], steps[RELOCATION_STEPS[3]], steps[RELOCATION_STEPS[4]])
+    # Tools are built and the synthetic self-test passes before the only step that maps the four existing Secrets.
+    require(RELOCATION_NIXPKGS in build and RELOCATION_PYTHON in build
+            and 'flake="builtins.getFlake \\"path:$GITHUB_WORKSPACE\\""' in build
+            and 'echo "RELOCATE_PYTHON=$python" >>"$GITHUB_ENV"' in build and source.count("GITHUB_ENV") == 1
+            and "${{" not in build, "relocation builds only the locked Python with PyNaCl, without any Secret")
+    require(selftest.count(RELOCATION_SELFTEST) == 1 and "${{" not in selftest, "relocation self-test must precede Secrets")
+    mapped = [f"          {name}: ${{{{ secrets.{name} }}}}\n" for name in RELOCATION_SECRETS]
+    require(all(seal.count(line) == 1 for line in mapped) and seal.count("${{ secrets.") == len(RELOCATION_SECRETS)
+            and source.count("${{ secrets.") == len(RELOCATION_SECRETS) and "${{ vars." not in source
+            and "          EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}\n" in seal
+            and set(re.findall(r"(?<![).\w])inputs\.([A-Za-z0-9_]+)", source)) == {"expected_source_sha"}
+            and seal.count(RELOCATION_SEAL) == 1 and "nix " not in seal and "echo" not in seal,
+            "relocation maps exactly the four existing Secrets into the one seal step, with no key or recipient input")
+    upload = steps[RELOCATION_STEPS[5]]
+    require("          name: relocate-receipt-${{ github.sha }}-${{ github.run_id }}\n" in upload
+            and "          path: ${{ runner.temp }}/relocate/receipt.json\n" in upload
+            and "          if-no-files-found: error\n" in upload and "          retention-days: 3\n" in upload,
+            "relocation uploads only the encrypted receipt, kept three days")
+    for token in ("set -x", "MAIL_CONFIG", "R2_PARENT_", "RENT_TUNNEL_ID", "pull_request", "secrets: inherit"):
+        require(token not in source, f"relocation must not use {token}")
+    spec = importlib.util.spec_from_file_location("relocate_rent_secrets_oracle", root / RELOCATION_PATHS[1])
+    entry = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(entry)
+    try:
+        key_ok = len(entry.public_key()) == 32
+    except entry.RelocationError:
+        key_ok = False
+    require(key_ok and entry.DEST_ENVIRONMENT == "dev-projection"
+            and entry.DEST_ENVIRONMENT_ID == 22898969883 and entry.SOURCE_ENVIRONMENT == RELOCATION_ENVIRONMENT
+            and entry.SOURCE_ENVIRONMENT_ID == 23400924734
+            and entry.MAPPING == tuple((name, "RENT_CLOUDFLARE_API_TOKEN" if name == "CLOUDFLARE_API_TOKEN" else name)
+                                       for name in RELOCATION_SECRETS)
+            and "MAIL_CONFIG" in entry.FORBIDDEN_INPUTS and entry.SECRET_LIMIT == 48 * 1024
+            and entry.RECEIPT_LIMIT == 1024 * 1024 and entry.WORKFLOW == RELOCATION_PATHS[0],
+            "relocation entry must seal the fixed four names to the fixed existing dev-projection key")
+    adapter = (root / RELOCATION_PATHS[1]).read_text(encoding="utf-8")
+    require("os.environb" in adapter and ".strip(" not in adapter and "unicodedata" not in adapter
+            and "argparse" not in adapter, "relocation must keep injected bytes exactly and take no key input")
+    for marker in ('"$python" -I adapters/relocate_rent_secrets.py selftest',
+                   '"$python" -I checks/test_relocate_rent_secrets.py --require-nacl', RELOCATION_PYTHON,
+                   "run: python3 checks/test_relocate_rent_secrets.py\n"):
+        require(marker in check, f"check must test the relocation entry with the locked PyNaCl: {marker}")
 
 
 def check_calendar_pages_workflow(source: str, canonical_consumer: str) -> None:
