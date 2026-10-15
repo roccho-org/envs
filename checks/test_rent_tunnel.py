@@ -886,33 +886,44 @@ def real_root_roundtrip(sops_bin: str, keygen_bin: str, tofu_bin: str) -> None:
 
 
 
-# S2 SOURCE: real read-only inspector wired through the existing root tool
-# port, with every remote child replaced by finite synthetic fixture results.
-# In deployed source the first gate is permanently closed.
+# Real read-only inspector wired through the existing root tool port, with every remote child replaced by finite
+# synthetic fixture results. The readiness grant opens this one entry; apply, migration and plan stay closed.
 def test_root_inspect_source_gate() -> None:
+    assert jev.ROOT_INSPECT_SOURCE_ACTIVE is True
+    assert not any((jev.ROOT_APPLY_SOURCE_ACTIVE, jev.ROOT_MIGRATE_SOURCE_ACTIVE, jev.ROOT_PLAN_SOURCE_ACTIVE))
+    # Closed again, the gate is still the entry's first line: a refusal before any contract, input or child.
     root = fresh_root()
-    runner = RootRunner()
     before = snapshot(root)
     out, err = io.StringIO(), io.StringIO()
-    with fixtures.environment(root_env()), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-        code = jev.main(["--root", str(root), "rent-root-inspect"])
+    jev.ROOT_INSPECT_SOURCE_ACTIVE = False
+    try:
+        with fixtures.environment(root_env()), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = jev.main(["--root", str(root), "rent-root-inspect"])
+    finally:
+        jev.ROOT_INSPECT_SOURCE_ACTIVE = True
     assert code == 1 and out.getvalue() == ""
     assert err.getvalue() == "RENT_ROOT_INSPECT=RED: envs at source_guard\n", err.getvalue()
-    assert runner.calls == [] and snapshot(root) == before
-    assert jev.ROOT_INSPECT_SOURCE_ACTIVE is False
+    assert snapshot(root) == before
 
 
 def test_root_inspect_bounded_fixture() -> None:
+    # Sentinels stand in for the 13 inputs, the decrypted state and the Cloudflare world. Through the real CLI, every
+    # branch prints only the closed receipt or a closed kind and stage, never a sentinel.
     root = fresh_root()
     before = snapshot(root)
-    managed = [{"mode": "managed", "type": kind, "name": "rent"}
+    lineage = str(uuid.uuid4())
+    state_sentinel = "STATE-SENTINEL-" + secrets.token_hex(12)
+    world_sentinel = "WORLD-SENTINEL-" + secrets.token_hex(12)
+    managed = [{"mode": "managed", "type": kind, "name": "rent",
+                "instances": [{"attributes": {"id": state_sentinel, "value": state_sentinel}}]}
                for kind in sorted(jev.ROOT_INSPECT_RESOURCE_TYPES)]
-    state = json.dumps({"lineage": "fixture-lineage", "serial": 3, "resources": managed}).encode()
+    state = json.dumps({"lineage": lineage, "serial": 3, "resources": managed}).encode()
+    sentinels = [*ROOT_VALUES.values(), state_sentinel, world_sentinel]
 
     class InspectRunner:
-        def __init__(self, state_reply: bytes = state, lock: str = "404") -> None:
+        def __init__(self, state_reply: bytes = state, head: str = "200", lock: str = "404", head_exit: int = 0) -> None:
             self.calls: list[tuple[list[str], bytes | None, dict[str, str]]] = []
-            self.state_reply, self.lock = state_reply, lock
+            self.state_reply, self.head, self.lock, self.head_exit = state_reply, head, lock, head_exit
 
         def __call__(self, argv, input_data, env):
             self.calls.append((list(argv), input_data, dict(env or {})))
@@ -923,8 +934,10 @@ def test_root_inspect_bounded_fixture() -> None:
                 assert "aws-sigv4" in config and "data-binary" not in config
                 assert not any(value in str(argv) for value in ROOT_SECRET_VALUES)
                 assert set(env or {}).isdisjoint(jev.ROOT_SECRETS)
-                code = self.lock if ".tflock" in config else "200"
-                return subprocess.CompletedProcess(argv, 0, stdout=b"", stderr=code.encode())
+                code = self.lock if ".tflock" in config else self.head
+                # A child's own output carries a sentinel; it must never reach the CLI streams.
+                return subprocess.CompletedProcess(argv, self.head_exit, stdout=state_sentinel.encode(),
+                                                   stderr=code.encode())
             assert argv[0] == fixtures.TOOLS["tofu"]
             if argv[2] == "init":
                 assert "-backend-config=bucket=" + ROOT_VALUES["RENT_STATE_BUCKET"] in argv
@@ -932,43 +945,71 @@ def test_root_inspect_bounded_fixture() -> None:
                 # The former S3 backend comes only from the source-declared legacy root, never the root's main.tf.
                 work = Path(argv[1].split("=", 1)[1])
                 assert (work / "main.tf").read_text(encoding="utf-8") == jev.ROOT_LEGACY_S3_CONFIG
-                return subprocess.CompletedProcess(argv, 0, stdout=b"", stderr=b"")
+                return subprocess.CompletedProcess(argv, 0, stdout=b"", stderr=state_sentinel.encode())
             assert argv[2:] == ["state", "pull"]
             assert env["TF_ENCRYPTION"] == jev.encryption_config("k0", ROOT_VALUES["RENT_STATE_PASSPHRASE"])
             assert "CLOUDFLARE_API_TOKEN" not in env
-            return subprocess.CompletedProcess(argv, 0, stdout=self.state_reply, stderr=b"")
+            return subprocess.CompletedProcess(argv, 0, stdout=self.state_reply, stderr=state_sentinel.encode())
 
-    calls: list[tuple[str, str, str, object]] = []
+    def world(pages: int = 1, success: bool = True):
+        calls: list[tuple[str, str, str, object]] = []
 
-    def world(method, path, token, body):
-        calls.append((method, path, token, body))
-        assert method == "GET" and token == ROOT_VALUES["RENT_CLOUDFLARE_API_TOKEN"] and body is None
-        return (200, {"success": True, "result": [{"id": "synthetic"}], "result_info": {"total_pages": 1}})
+        def api(method, path, token, body):
+            calls.append((method, path, token, body))
+            assert method == "GET" and token == ROOT_VALUES["RENT_CLOUDFLARE_API_TOKEN"] and body is None
+            return (200, {"success": success, "result": [{"id": world_sentinel, "name": world_sentinel}],
+                          "result_info": {"total_pages": pages}})
 
-    saved = jev.ROOT_INSPECT_SOURCE_ACTIVE
-    jev.ROOT_INSPECT_SOURCE_ACTIVE = True
-    try:
-        with fixtures.environment(root_env()):
-            positive = InspectRunner()
-            result = jev.rent_root_inspect(root, runner=positive, api=world)
-            assert result["status"] == "BOUNDED_READ_ONLY"
-            assert result["old_state"] == "PRESENT_ENCRYPTED_READ" and result["old_lock"] == "ABSENT"
-            assert result["managed_root_resources"] == 6
-            assert result["world_state_equivalence"] == "NOT_PROVEN"
-            assert result["provider_delta_F"] == "NOT_PROVEN" and result["native_migration"] == "NOT_RUN"
-            assert len(positive.calls) == 4 and len(calls) == 4
-            assert all(call[0] == "GET" for call in calls)
-            assert not any(c in {"apply", "plan", "import", "destroy"} for args, _, _ in positive.calls for c in args)
-            for wrong in (InspectRunner(lock="200"), InspectRunner(state_reply=b"{}")):
-                try:
-                    jev.rent_root_inspect(root, runner=wrong, api=world)
-                except jev.EnvsError:
-                    pass
-                else:
-                    raise AssertionError("unsafe inspect fixture passed")
-    finally:
-        jev.ROOT_INSPECT_SOURCE_ACTIVE = saved
-    assert snapshot(root) == before and jev.ROOT_INSPECT_SOURCE_ACTIVE is False
+        api.calls = calls
+        return api
+
+    def run_cli(runner, api) -> tuple[int, str, str]:
+        saved = jev.rent_root_inspect
+        jev.rent_root_inspect = lambda root, progress=None: saved(root, runner=runner, api=api, progress=progress)
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            with fixtures.environment(root_env()), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = jev.main(["--root", str(root), "rent-root-inspect"])
+        finally:
+            jev.rent_root_inspect = saved
+        for sentinel in sentinels:
+            assert sentinel not in out.getvalue() and sentinel not in err.getvalue(), "a sentinel reached the CLI"
+        return code, out.getvalue(), err.getvalue()
+
+    common = {"kind": "envs.rentRootInspect.v1", "status": "BOUNDED_READ_ONLY",
+              "cloudflare_counts": {"tunnels": 1, "applications": 1, "service_tokens": 1, "dns": 1},
+              "world_state_equivalence": "NOT_PROVEN", "provider_delta_F": "NOT_PROVEN",
+              "native_migration": "NOT_RUN", "effect": "NONE"}
+    positive, api = InspectRunner(), world()
+    code, out, err = run_cli(positive, api)
+    assert code == 0 and err == "", err
+    assert json.loads(out) == {**common, "old_state": "PRESENT", "old_lock": "ABSENT", "old_state_read": "ENCRYPTED_READ",
+                               "lineage": lineage, "serial": 3, "managed_root_resources": 6}
+    assert len(positive.calls) == 4 and len(api.calls) == 4 and all(call[0] == "GET" for call in api.calls)
+    assert not any(c in {"apply", "plan", "import", "destroy", "force-unlock", "push"}
+                   for args, _, _ in positive.calls for c in args)
+    # An absent state or a held lock is a classification: reported, and the state is then not read.
+    for runner, old_state, old_lock in ((InspectRunner(head="404"), "ABSENT", "ABSENT"),
+                                        (InspectRunner(lock="200"), "PRESENT", "PRESENT"),
+                                        (InspectRunner(head="404", lock="200"), "ABSENT", "PRESENT")):
+        code, out, err = run_cli(runner, world())
+        assert code == 0 and err == "", err
+        assert json.loads(out) == {**common, "old_state": old_state, "old_lock": old_lock, "old_state_read": "NOT_READ",
+                                   "lineage": None, "serial": None, "managed_root_resources": None}
+        assert [args[0] for args, _, _ in runner.calls] == [fixtures.TOOLS["curl"]] * 2, "state read without a clear lock"
+    # UNKNOWN is red at its stage with a closed kind only: an unanswerable HEAD, an unreadable or unidentified state,
+    # a failed or paginated Cloudflare read.
+    bad_lineage = json.dumps({"lineage": state_sentinel, "serial": 3, "resources": managed}).encode()
+    for runner, api, stage in ((InspectRunner(head="500"), world(), "s3_head"),
+                               (InspectRunner(lock="403"), world(), "s3_head"),
+                               (InspectRunner(head_exit=7), world(), "s3_head"),
+                               (InspectRunner(state_reply=b"{}"), world(), "state_read"),
+                               (InspectRunner(state_reply=bad_lineage), world(), "state_read"),
+                               (InspectRunner(), world(success=False), "cloudflare_read"),
+                               (InspectRunner(), world(pages=2), "cloudflare_read")):
+        code, out, err = run_cli(runner, api)
+        assert code == 1 and out == "" and err == f"RENT_ROOT_INSPECT=RED: envs at {stage}\n", (stage, err)
+    assert snapshot(root) == before and jev.ROOT_INSPECT_SOURCE_ACTIVE is True
 
 
 @contextlib.contextmanager
@@ -988,8 +1029,7 @@ def source_active(name: str):
 REF_TOKEN = "ref-principal-" + secrets.token_urlsafe(24)
 GATED_ENTRIES = (("rent-root", "RENT_ROOT", "ROOT_APPLY_SOURCE_ACTIVE"),
                  ("rent-root-migrate", "RENT_ROOT_MIGRATE", "ROOT_MIGRATE_SOURCE_ACTIVE"),
-                 ("rent-root-plan", "RENT_ROOT_PLAN", "ROOT_PLAN_SOURCE_ACTIVE"),
-                 ("rent-root-inspect", "RENT_ROOT_INSPECT", "ROOT_INSPECT_SOURCE_ACTIVE"))
+                 ("rent-root-plan", "RENT_ROOT_PLAN", "ROOT_PLAN_SOURCE_ACTIVE"))
 
 
 def test_root_source_gates() -> None:

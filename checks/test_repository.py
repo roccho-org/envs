@@ -174,6 +174,35 @@ def main() -> None:
     expect_red(replace_text(selected, literal, literal.replace("roccho-org/envs", "roccho-dev/envs")))
     expect_red(replace_text(selected, "rent-root-inspect'", "rent-root-other'"))
     expect_red(replace_text(selected, "rent-root-inspect'", "rent-root'"))
+    # The inspect job: each native caller clause, the accepted SHA, the first attempt and its ordering before the
+    # Environment are required, and the job stays repository read-only with exactly its four steps.
+    for clause in (" && github.repository_id == '1391871347'", " && github.ref == 'refs/heads/proposals'",
+                   " && github.event_name == 'workflow_dispatch'", " && github.sha == inputs.expected_source_sha",
+                   " && github.run_attempt == '1'", " && github.actor_id == '40359643'",
+                   " && github.triggering_actor == 'roccho-dev'"):
+        expect_red(replace_text(selected, clause, ""))
+    expect_red(replace_text(selected, "github.run_attempt == '1'", "github.run_attempt >= '1'"))
+    expect_red(replace_text(selected, "      expected_source_sha:\n", "      source:\n"))
+    expect_red(replace_text(selected, "    environment: dev-projection\n    permissions:\n",
+                            "    permissions:\n"))
+    expect_red(replace_text(selected, "      actions: read\n      contents: read\n    steps:\n",
+                            "      actions: read\n      contents: write\n    steps:\n"))
+    expect_red(replace_text(selected, "      actions: read\n      contents: read\n    steps:\n",
+                            "      actions: read\n      contents: read\n      pull-requests: write\n    steps:\n"))
+    expect_red(replace_text(selected, "    environment: dev-projection\n    permissions:\n",
+                            "    environment: dev-projection\n    outputs:\n      receipt: x\n    permissions:\n"))
+    expect_red(replace_text(selected, "  inspect:\n", "  inspector:\n"))
+    expect_red(replace_text(selected, "- name: Inspect old S3 state/lock and Cloudflare world\n",
+                            "- name: Inspect old S3 state/lock and Cloudflare world (copy)\n"))
+    # Privacy: nothing of its own may print, export or keep a value; Environment inputs map on the inspect step only.
+    inspect_run = "        run: '\"$ENVS_EFFECT_BIN/envs-effect\" --root \"$GITHUB_WORKSPACE\" rent-root-inspect'\n"
+    for extra in ("        continue-on-error: true\n      - name: Show inputs\n        run: echo \"$RENT_HOSTNAME\"\n",
+                  "      - name: Keep receipt\n        run: '\"$ENVS_EFFECT_BIN/envs-effect\" >> \"$GITHUB_OUTPUT\"'\n",
+                  "      - name: Upload receipt\n        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a\n"):
+        expect_red(replace_text(selected, inspect_run, inspect_run + extra))
+    toolchain_run = "        run: '\"$ENVS_EFFECT_BIN/envs-effect\" --root \"$GITHUB_WORKSPACE\" toolchain'\n"
+    expect_red(replace_text(selected, toolchain_run, "        env:\n          RENT_STATE_KEY: ${{ vars.RENT_STATE_KEY }}\n"
+                            + toolchain_run))
     calendar = ".github/workflows/deploy-calendar-pages.yml"
     for old, new in (
         ("github.event.issue.number == 69", "github.event.issue.number == 70"),
@@ -566,11 +595,15 @@ def main() -> None:
     expect_red(mutate_plane("dev.rent-root", lambda row: row.pop("state_backend")))
     expect_red(mutate_plane("dev.rent-tunnel", lambda row: row.update({"state_backend": {"state_path": "x"}})))
     adapter = "adapters/jev_api.py"
-    for gate in ("ROOT_INSPECT_SOURCE_ACTIVE", "ROOT_APPLY_SOURCE_ACTIVE", "ROOT_MIGRATE_SOURCE_ACTIVE",
-                 "ROOT_PLAN_SOURCE_ACTIVE"):
+    for gate in ("ROOT_APPLY_SOURCE_ACTIVE", "ROOT_MIGRATE_SOURCE_ACTIVE", "ROOT_PLAN_SOURCE_ACTIVE"):
         expect_red(replace_text(adapter, f"\n{gate} = False\n", f"\n{gate} = True\n"))
         expect_red(replace_text(adapter, f"\n{gate} = False\n", f"\n{gate} = bool(0)\n"))
         expect_red(replace_text(adapter, f"    require({gate}, ", f"    require(True or {gate}, "))
+    # The readiness grant opens only inspect, as one literal True that still guards the entry's first line.
+    expect_red(replace_text(adapter, "\nROOT_INSPECT_SOURCE_ACTIVE = True\n", "\nROOT_INSPECT_SOURCE_ACTIVE = bool(1)\n"))
+    expect_red(replace_text(adapter, "\nROOT_INSPECT_SOURCE_ACTIVE = True\n",
+                            "\nROOT_INSPECT_SOURCE_ACTIVE = True\nROOT_INSPECT_SOURCE_ACTIVE = True\n"))
+    expect_red(replace_text(adapter, "    require(ROOT_INSPECT_SOURCE_ACTIVE, ", "    require(True or ROOT_INSPECT_SOURCE_ACTIVE, "))
     expect_red(replace_text(adapter, '    require(ROOT_PLAN_SOURCE_ACTIVE, "rent-root backend-only plan is source-hard-inactive")\n'
                                      '    progress["stage"] = "contracts"\n    contracts = validate_contracts(root)\n',
                             '    progress["stage"] = "contracts"\n    contracts = validate_contracts(root)\n'
