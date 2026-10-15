@@ -481,7 +481,7 @@ HTTPS authentication requires beside a token.
 The rent-root flow above, with `-backend-config` bucket and key, is the
 **former R2 S3 era**: that apply (`rent-root`) is now closed in source.
 
-Two future entries are composed but closed in source, like inspect:
+Two future entries are composed but closed in source:
 `envs-effect rent-root-migrate` (standard `tofu init -migrate-state` from the
 former S3 backend, read through a source-declared legacy root, onto the empty
 GitHub ref, holding both locks; it requires the same lineage and resources and
