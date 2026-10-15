@@ -1591,6 +1591,45 @@ def rent_root_plan(root: Path = ROOT, *, runner: Runner = default_runner, spawn:
     return {"kind": "envs.rentRootPlan.v1", "status": "EMPTY_PLAN", "apply": "NOT_RUN", "saved_plan": "NONE"}
 
 
+# One bounded Cloudflare inventory page holds at most this many items; the route asks for exactly this page size.
+ROOT_CLOUDFLARE_PAGE = 50
+# Closed HTTP reasons; every other non-200 status is http_other. The number itself never leaves.
+ROOT_CLOUDFLARE_HTTP = {401: "http_auth", 403: "http_auth", 404: "http_not_found", 429: "http_rate"}
+
+
+def rent_inspect_page(label: str, path: str, token: str, api: Api, progress: dict[str, str]) -> int:
+    # One GET of one route's first page. Each refusal names its route and closed reason as the stage, in this order:
+    # token_shape, request, http_*, response, page_shape, completeness. No status, message, body or identifier leaves.
+    def reason(name: str) -> None:
+        progress["stage"] = f"cloudflare_{label}_{name}"
+
+    reason("token_shape")
+    require(BEARER.fullmatch(token) is not None, "rent-root Cloudflare token shape is invalid")
+    reason("request")
+    status, reply = api("GET", path, token, None)
+    if status != 200:
+        reason(ROOT_CLOUDFLARE_HTTP.get(status, "http_other"))
+        raise EnvsError("rent-root Cloudflare read status is not 200")
+    reason("response")
+    require(isinstance(reply, dict) and reply.get("success") is True, "rent-root Cloudflare read is UNKNOWN")
+    # Only the fields every route's public schema declares: page, count and total_count, each an int and never a
+    # bool. total_pages is optional (the tunnel list does not declare it) and, when present, an int too.
+    reason("page_shape")
+    values, page = reply.get("result"), reply.get("result_info")
+    require(isinstance(values, list) and isinstance(page, dict)
+            and all(type(page.get(name)) is int for name in ("page", "count", "total_count"))
+            and ("total_pages" not in page or type(page["total_pages"]) is int),
+            "rent-root Cloudflare inventory page shape is UNKNOWN")
+    # The whole inventory is this one first page: no other page is followed and the bound is not raised. An empty
+    # list may report total_pages 0 or 1; a non-empty one only 1.
+    reason("completeness")
+    require(len(values) <= ROOT_CLOUDFLARE_PAGE and page["page"] == 1
+            and page["count"] == len(values) and page["total_count"] == len(values)
+            and ("total_pages" not in page or page["total_pages"] in ((1,) if values else (0, 1))),
+            "rent-root Cloudflare inventory is not one complete page")
+    return len(values)
+
+
 def rent_root_inspect(root: Path = ROOT, *, runner: Runner = default_runner,
                       api: Api = default_api, progress: dict[str, str] | None = None) -> dict[str, Any]:
     # First gate is compile-time/source-owned and cannot be flipped by env,
@@ -1645,16 +1684,10 @@ def rent_root_inspect(root: Path = ROOT, *, runner: Runner = default_runner,
         ("service_tokens", f"/accounts/{account}/access/service_tokens?per_page=50"),
         ("dns", f"/zones/{zone}/dns_records?per_page=50"),
     )
+    # The tunnel list is unfiltered, so its count includes deleted tunnels: a count, not a live inventory.
     counts: dict[str, int] = {}
     for label, path in routes:
-        status, reply = api("GET", path, token, None)
-        require(status == 200 and isinstance(reply, dict) and reply.get("success") is True,
-                "rent-root Cloudflare read is UNKNOWN")
-        values, page = reply.get("result"), reply.get("result_info")
-        require(isinstance(values, list) and len(values) <= 50
-                and isinstance(page, dict) and type(page.get("total_pages")) is int
-                and page["total_pages"] == 1, "rent-root Cloudflare inventory page is UNKNOWN")
-        counts[label] = len(values)
+        counts[label] = rent_inspect_page(label, path, token, api, progress)
     progress["stage"] = "complete"
     return {
         "kind": "envs.rentRootInspect.v1", "status": "BOUNDED_READ_ONLY",

@@ -952,14 +952,39 @@ def test_root_inspect_bounded_fixture() -> None:
             assert "CLOUDFLARE_API_TOKEN" not in env
             return subprocess.CompletedProcess(argv, 0, stdout=self.state_reply, stderr=state_sentinel.encode())
 
-    def world(pages: int = 1, success: bool = True):
+    # The four exact route URLs, and one first page shaped as each route's public schema declares: the tunnel list
+    # declares no total_pages, the other three do. Every item carries the world sentinel.
+    account, zone = ROOT_VALUES["RENT_CLOUDFLARE_ACCOUNT_ID"], ROOT_VALUES["RENT_CLOUDFLARE_ZONE_ID"]
+    routes = {"tunnels": f"/accounts/{account}/cfd_tunnel?per_page=50",
+              "applications": f"/accounts/{account}/access/apps?per_page=50",
+              "service_tokens": f"/accounts/{account}/access/service_tokens?per_page=50",
+              "dns": f"/zones/{zone}/dns_records?per_page=50"}
+    missing = object()
+
+    def page_reply(label: str, items: int = 1, **info: object) -> dict[str, object]:
+        result_info: dict[str, object] = {"page": 1, "per_page": 50, "count": items, "total_count": items}
+        if label != "tunnels":
+            result_info["total_pages"] = 1 if items else 0
+        for name, value in info.items():
+            if value is missing:
+                result_info.pop(name, None)
+            else:
+                result_info[name] = value
+        return {"success": True, "errors": [], "messages": [], "result_info": result_info,
+                "result": [{"id": world_sentinel, "name": world_sentinel} for _ in range(items)]}
+
+    def world(replies: dict[str, object] | None = None):
         calls: list[tuple[str, str, str, object]] = []
 
         def api(method, path, token, body):
             calls.append((method, path, token, body))
             assert method == "GET" and token == ROOT_VALUES["RENT_CLOUDFLARE_API_TOKEN"] and body is None
-            return (200, {"success": success, "result": [{"id": world_sentinel, "name": world_sentinel}],
-                          "result_info": {"total_pages": pages}})
+            assert path in routes.values(), "a route URL or its query changed"
+            label = next(name for name, route in routes.items() if route == path)
+            reply = (replies or {}).get(label, (200, page_reply(label)))
+            if isinstance(reply, BaseException):
+                raise reply
+            return reply
 
         api.calls = calls
         return api
@@ -987,9 +1012,24 @@ def test_root_inspect_bounded_fixture() -> None:
     assert code == 0 and err == "", err
     assert json.loads(out) == {**common, "old_state": "PRESENT", "old_lock": "ABSENT", "old_state_read": "ENCRYPTED_READ",
                                "lineage": lineage, "serial": 3, "managed_root_resources": 6}
-    assert len(positive.calls) == 4 and len(api.calls) == 4 and all(call[0] == "GET" for call in api.calls)
+    assert len(positive.calls) == 4 and [call[1] for call in api.calls] == list(routes.values())
     assert not any(c in {"apply", "plan", "import", "destroy", "force-unlock", "push"}
                    for args, _, _ in positive.calls for c in args)
+    # One complete first page is any 0..50 items: an empty list reports total_pages 0 or 1, and total_pages is optional
+    # on every route (present on the tunnel list too, or absent from another).
+    for replies, counts in (({"tunnels": (200, page_reply("tunnels", 0)),
+                              "applications": (200, page_reply("applications", 0)),
+                              "service_tokens": (200, page_reply("service_tokens", 0, total_pages=1)),
+                              "dns": (200, page_reply("dns", 0, total_pages=1))},
+                             {"tunnels": 0, "applications": 0, "service_tokens": 0, "dns": 0}),
+                            ({"tunnels": (200, page_reply("tunnels", 50, total_pages=1)),
+                              "applications": (200, page_reply("applications", 50)),
+                              "service_tokens": (200, page_reply("service_tokens", 2, total_pages=missing)),
+                              "dns": (200, page_reply("dns", 0, total_pages=missing))},
+                             {"tunnels": 50, "applications": 50, "service_tokens": 2, "dns": 0})):
+        code, out, err = run_cli(InspectRunner(), world(replies))
+        assert code == 0 and err == "", err
+        assert json.loads(out)["cloudflare_counts"] == counts
     # An absent state or a held lock is a classification: reported, and the state is then not read.
     for runner, old_state, old_lock in ((InspectRunner(head="404"), "ABSENT", "ABSENT"),
                                         (InspectRunner(lock="200"), "PRESENT", "PRESENT"),
@@ -999,18 +1039,67 @@ def test_root_inspect_bounded_fixture() -> None:
         assert json.loads(out) == {**common, "old_state": old_state, "old_lock": old_lock, "old_state_read": "NOT_READ",
                                    "lineage": None, "serial": None, "managed_root_resources": None}
         assert [args[0] for args, _, _ in runner.calls] == [fixtures.TOOLS["curl"]] * 2, "state read without a clear lock"
-    # UNKNOWN is red at its stage with a closed kind only: an unanswerable HEAD, an unreadable or unidentified state,
-    # a failed or paginated Cloudflare read.
+    # UNKNOWN is red at its stage with a closed kind only: an unanswerable HEAD, an unreadable or unidentified state.
     bad_lineage = json.dumps({"lineage": state_sentinel, "serial": 3, "resources": managed}).encode()
     for runner, api, stage in ((InspectRunner(head="500"), world(), "s3_head"),
                                (InspectRunner(lock="403"), world(), "s3_head"),
                                (InspectRunner(head_exit=7), world(), "s3_head"),
                                (InspectRunner(state_reply=b"{}"), world(), "state_read"),
-                               (InspectRunner(state_reply=bad_lineage), world(), "state_read"),
-                               (InspectRunner(), world(success=False), "cloudflare_read"),
-                               (InspectRunner(), world(pages=2), "cloudflare_read")):
+                               (InspectRunner(state_reply=bad_lineage), world(), "state_read")):
         code, out, err = run_cli(runner, api)
         assert code == 1 and out == "" and err == f"RENT_ROOT_INSPECT=RED: envs at {stage}\n", (stage, err)
+
+    # Each route's refusal names that route and one closed reason, never the status, message, body or an item, and no
+    # later route is asked. Every bool below would equal 1 if it were not refused as a type.
+    def without(body: dict[str, object], name: str) -> dict[str, object]:
+        return {key: value for key, value in body.items() if key != name}
+
+    def refusals(label: str) -> list[tuple[str, object]]:
+        page = page_reply(label)
+        return [("request", jev.EnvsError(world_sentinel)),
+                ("http_auth", (401, page)), ("http_auth", (403, page)), ("http_not_found", (404, page)),
+                ("http_rate", (429, page)), ("http_other", (500, page)), ("http_other", (302, page)),
+                ("response", (200, None)), ("response", (200, [world_sentinel])),
+                ("response", (200, {**page, "success": False})), ("response", (200, without(page, "success"))),
+                ("page_shape", (200, without(page, "result"))), ("page_shape", (200, without(page, "result_info"))),
+                ("page_shape", (200, {**page, "result": {"id": world_sentinel}})),
+                ("page_shape", (200, {**page, "result_info": [world_sentinel]})),
+                ("page_shape", (200, page_reply(label, page=True))),
+                ("page_shape", (200, page_reply(label, count=True))),
+                ("page_shape", (200, page_reply(label, total_count=True))),
+                ("page_shape", (200, page_reply(label, total_pages=True))),
+                ("page_shape", (200, page_reply(label, page="1"))),
+                ("page_shape", (200, page_reply(label, count=1.0))),
+                ("page_shape", (200, page_reply(label, total_count=None))),
+                ("page_shape", (200, page_reply(label, total_pages="1"))),
+                ("page_shape", (200, page_reply(label, page=missing))),
+                ("page_shape", (200, page_reply(label, count=missing))),
+                ("page_shape", (200, page_reply(label, total_count=missing))),
+                ("completeness", (200, page_reply(label, page=2))),
+                ("completeness", (200, page_reply(label, page=0))),
+                ("completeness", (200, page_reply(label, count=2))),
+                ("completeness", (200, page_reply(label, total_count=2))),
+                ("completeness", (200, page_reply(label, 0, total_count=1))),
+                ("completeness", (200, page_reply(label, 51, total_pages=1))),
+                ("completeness", (200, page_reply(label, total_pages=0))),
+                ("completeness", (200, page_reply(label, total_pages=2))),
+                ("completeness", (200, page_reply(label, 0, total_pages=2)))]
+
+    for index, label in enumerate(routes):
+        for reason, reply in refusals(label):
+            api = world({label: reply})
+            code, out, err = run_cli(InspectRunner(), api)
+            stage = f"cloudflare_{label}_{reason}"
+            assert code == 1 and out == "" and err == f"RENT_ROOT_INSPECT=RED: envs at {stage}\n", (stage, err)
+            assert [call[1] for call in api.calls] == list(routes.values())[:index + 1], f"{stage} asked another route"
+    # A token outside the closed bearer shape is refused before any Cloudflare request is made.
+    token_sentinels = ["TOKEN SENTINEL-" + secrets.token_hex(12), "TOKEN-SENTINEL-é" + secrets.token_hex(12)]
+    sentinels.extend(token_sentinels)
+    for token in token_sentinels:
+        api = world()
+        code, out, err = run_cli(InspectRunner(), api, RENT_CLOUDFLARE_API_TOKEN=token)
+        assert code == 1 and out == "" and err == "RENT_ROOT_INSPECT=RED: envs at cloudflare_tunnels_token_shape\n", err
+        assert api.calls == [], "a Cloudflare request was made with a malformed token"
     # Each preflight is its own closed stage, refused before any child: invalid contracts, a missing toolchain, an
     # invalid input, an invalid encryption input, a secret stored in the checkout, an unsafe state key.
     broken = fresh_root()
