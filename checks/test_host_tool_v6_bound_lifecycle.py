@@ -34,6 +34,17 @@ EXPECTED_SCOPE = "ci-session-1"
 EXPECTED_SELECTOR = "/nix/var/nix/profiles/rent-dev"
 EXPECTED_TARGET = "pc7337-rent"
 EXPECTED_Q = "sha256:f531f4c49182a8cf15475103c1890475cefbb634512baf3d3b2fd9369da445a4"
+# SOURCE-only actor/work labels: these cannot authenticate a real principal.
+SOURCE_ACTOR = "fixed-existing-W"
+SOURCE_WORK = "host-tool-ci"
+STAGE_SUBJECT = ("step", "target_ref", "actor_ref", "work_ref", "attempt_ref")
+# Caller conditions only narrow readiness; they cannot replace operation identity.
+STAGE_CONDITIONS = frozenset((
+    "identity_current", "step_authority", "route_usable", "safe_boundary",
+    "affected_effects_resolved", "inputs_current", "stage_checks",
+    "desired_current", "observation_fresh", "tool_compatible",
+    "one_writer", "quiet_held", "recovery_available", "write_unresolved",
+))
 
 
 class BoundLifecycle(unittest.TestCase):
@@ -76,10 +87,20 @@ class BoundLifecycle(unittest.TestCase):
         return o, identity
 
     def read(self, authority=None):
-        # Public read on this disposable Target requires separate READ
-        # capability, NOT an admitted D nor resolution of a previous E.
+        # Rebind the immutable PROPOSED source: READ authority MUST match its
+        # Target, but never requires admitted D or resolving a prior UNKNOWN E.
         auth = self.a if authority is None else authority
-        if auth.get("kind") != "envs.syntheticAuthority.v0" or auth.get("read") is not True:
+        if type(auth) is not dict:
+            return "READ_AUTH_REQUIRED"
+        try:
+            verified = bind(copy.deepcopy(self.f1_source), self.proposals, self.targets,
+                            self.relation_project)
+            read_gate = judge(self.p, desired=None, authority=auth)
+        except (ValueError, TypeError, KeyError):
+            return "READ_AUTH_REQUIRED"
+        if (self.bound != verified or verified["target_ref"] != EXPECTED_TARGET
+                or auth.get("target_ref") != verified["target_ref"]
+                or read_gate["synthetic_read_preconditions"] is not True):
             return "READ_AUTH_REQUIRED"
         before = self.host.effect_count, self.host.snapshot()
         value = self.host.observe()
@@ -124,16 +145,35 @@ class BoundLifecycle(unittest.TestCase):
             )
             gate = judge(self.p, desired=self.d, observed=o, authority=auth,
                          previous=effect)
-            stage_facts = facts("TOOL_CHANGE")
-            if conditions:
+            # One immutable stage subject: same verified Target and same
+            # attempt/actor/work as this selector operation, never the
+            # unrelated default attempt in facts("TOOL_CHANGE").
+            operation = {
+                "step": "TOOL_CHANGE", "target_ref": verified["target_ref"],
+                "actor_ref": SOURCE_ACTOR, "work_ref": SOURCE_WORK,
+                "attempt_ref": attempt,
+            }
+            stage_facts = facts(operation["step"])
+            stage_facts.update(operation)
+            if conditions is not None:
+                # Caller flags may DENY, but never replace step/target/actor/
+                # work/attempt or introduce a fake started/receipt context.
+                if (type(conditions) is not dict
+                        or any(k not in STAGE_CONDITIONS for k in conditions)
+                        or any(v is not None and type(v) is not bool
+                               for v in conditions.values())):
+                    return "REFUSED_STAGE_BINDING"
                 stage_facts.update(conditions)
             step = evaluate(stage_facts)
         except (ValueError, TypeError):
             return "REFUSED_SOURCE_BINDING"
         if (candidate_plan["stage"] != "SYNTHETIC_TOOL_ONLY_CANDIDATE"
                 or gate["stage"] != "SYNTHETIC_CHANGE_CANDIDATE"
+                or step["step"] != operation["step"]
+                or step["target_ref"] != operation["target_ref"]
+                or any(stage_facts[k] != operation[k] for k in STAGE_SUBJECT)
                 or not step["synthetic_mutation_ready"]
-                or auth["target_ref"] != EXPECTED_TARGET):
+                or auth["target_ref"] != operation["target_ref"]):
             return "REFUSED_GUARD"
         receipt = self.host.native_set_fixture(
             requested_store, attempt, desired_revision=self.rev,
