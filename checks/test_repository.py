@@ -402,6 +402,55 @@ def main() -> None:
     expect_red(replace_text("contracts/provider-consumer.jsonl", '"does_not_own":["target_apply",', '"does_not_own":['))
     expect_red(replace_text("README.md", "dev-projection/RENT_AGE_RECIPIENT", "dev-projection/REMOVED"))
 
+    # TEMPORARY one-time encrypted relocation: the only dev-rent-tunnel selector, strictly gated and sealed to the fixed key.
+    relocation = ".github/workflows/relocate-dev-rent-secrets.yml"
+    relocation_entry = "adapters/relocate_rent_secrets.py"
+    expect_red(replace_text(relocation, "github.ref == 'refs/heads/proposals'", "github.ref_name == 'proposals'"))
+    for clause in (" && github.repository_id == '1391871347'", " && github.event_name == 'workflow_dispatch'",
+                   " && github.sha == inputs.expected_source_sha", " && github.run_attempt == '1'",
+                   " && github.actor_id == '40359643'", " && github.triggering_actor == 'roccho-dev'"):
+        expect_red(replace_text(relocation, clause, ""))
+    expect_red(replace_text(relocation, "        required: true\n",
+                            "        required: true\n      public_key:\n        type: string\n        required: true\n"))
+    expect_red(replace_text(relocation, "  workflow_dispatch:\n", "  push:\n  workflow_dispatch:\n"))
+    expect_red(replace_text(relocation, "  contents: read\n", "  contents: write\n"))
+    expect_red(replace_text(relocation, "  cancel-in-progress: false\n", "  cancel-in-progress: true\n"))
+    expect_red(replace_text(relocation, "    environment: dev-rent-tunnel\n", "    environment: dev-projection\n"))
+    expect_red(replace_text(relocation, "    timeout-minutes: 30\n", "    timeout-minutes: 30\n    env:\n      PYTHONPATH: /tmp\n"))
+    rent_passphrase = "          RENT_STATE_PASSPHRASE: ${{ secrets.RENT_STATE_PASSPHRASE }}\n"
+    expect_red(replace_text(relocation, rent_passphrase, rent_passphrase + "          MAIL_CONFIG: ${{ secrets.MAIL_CONFIG }}\n"))
+    expect_red(replace_text(relocation, rent_passphrase, ""))
+    expect_red(replace_text(relocation, "      - name: Build locked Python with PyNaCl\n        run: |\n",
+                            "      - name: Build locked Python with PyNaCl\n        env:\n"
+                            "          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}\n        run: |\n"))
+    expect_red(replace_text(relocation, " -I adapters/relocate_rent_secrets.py selftest'", " -c pass'"))
+    expect_red(replace_text(relocation, "          set -euo pipefail\n          test \"$(git rev-parse HEAD)\"",
+                            "          set -euxo pipefail\n          set -x\n          test \"$(git rev-parse HEAD)\""))
+    expect_red(replace_text(relocation, "f9948418dc8628ac02b6d6337e191ade9429d59d", "0" * 40))
+    expect_red(replace_text(relocation, "(ps: [ ps.pynacl ])", "(ps: [ ps.pynacl ps.requests ])"))
+    expect_red(replace_text(relocation, " -I adapters/relocate_rent_secrets.py selftest'\n",
+                            " -I adapters/relocate_rent_secrets.py selftest'\n        env:\n          X: ${{ vars.X }}\n"))
+    expect_red(replace_text(relocation, "          retention-days: 3\n", "          retention-days: 90\n"))
+    expect_red(replace_text(relocation, "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+                            "actions/upload-artifact@v4"))
+    expect_red(replace_text(relocation, 'echo "RELOCATE_PYTHON=$python" >>"$GITHUB_ENV"',
+                            'echo "RELOCATE_PYTHON=$python" >>"$GITHUB_ENV"\n          echo "LD_PRELOAD=/tmp/x.so" >>"$GITHUB_ENV"'))
+    expect_red(replace_text(relocation_entry, 'DEST_PUBLIC_KEY = "0p90Ahe11eOEuKSz+G63Mbzuk81Xx7hKM7b7cwG5ZgQ="',
+                            'DEST_PUBLIC_KEY = "' + "A" * 43 + '="'))
+    expect_red(replace_text(relocation_entry, '("CLOUDFLARE_API_TOKEN", "RENT_CLOUDFLARE_API_TOKEN")',
+                            '("CLOUDFLARE_API_TOKEN", "CLOUDFLARE_API_TOKEN")'))
+    expect_red(replace_text(relocation_entry, 'FORBIDDEN_INPUTS = ("MAIL_CONFIG", ', 'FORBIDDEN_INPUTS = ('))
+    expect_red(replace_text(relocation_entry, "values.append((source, destination, bytes(value)))",
+                            "values.append((source, destination, bytes(value).strip()))"))
+    expect_red(replace_text(relocation_entry, "SECRET_LIMIT = 48 * 1024", "SECRET_LIMIT = 1024 * 1024"))
+    expect_red(replace_text(check, '"$python" -I checks/test_relocate_rent_secrets.py --require-nacl',
+                            '"$python" -I checks/test_relocate_rent_secrets.py'))
+    expect_red(replace_text(check, "run: python3 checks/test_relocate_rent_secrets.py\n", "run: 'true'\n"))
+    expect_red(lambda root: (root / "checks/test_relocate_rent_secrets.py").unlink())
+    # The relocation exception is this one file only: another workflow still may not select the old Environment.
+    expect_red(replace_text(".github/workflows/operate-dev-mail-routing.yml", "    environment: dev-projection\n",
+                            "    environment: dev-rent-tunnel\n"))
+
     # The OCI dev target: one declared binding, one literal author step with only its own inputs, no default target.
     oci_mapping = "          OCI_DEV_AGE_RECIPIENT: ${{ vars.OCI_DEV_AGE_RECIPIENT }}\n"
     cloudflare_mapping = "          SOPS_AGE_RECIPIENTS: ${{ vars.SOPS_AGE_RECIPIENTS }}\n"
