@@ -58,6 +58,9 @@ jobs:
       - name: Prove real resources Relation and envs Tool q bind same CI Host
         run: python3 checks/test_host_tool_functional_binding.py
 
+      - name: Exercise F1 q/Host/Unit to disposable Target receive, O, receipt and UNKNOWN
+        run: python3 checks/test_host_tool_v6_bound_lifecycle.py
+
       - name: Test frozen v6 F1/F2 actual CI attempts and false-GREEN refusals (offline)
         run: python3 checks/test_host_tool_v6_source_gate.py
 
@@ -776,13 +779,16 @@ jobs:
       - name: Prove current Host Relation / D-q integration on exact SOURCE head
         run: python3 checks/test_host_tool_functional_binding.py
 
+      - name: Exercise F1 to disposable Target lifecycle on exact SOURCE head
+        run: python3 checks/test_host_tool_v6_bound_lifecycle.py
+
       - name: Test v6 F1/F2 CI-attempt and binding negative cases at exact head
         run: python3 checks/test_host_tool_v6_source_gate.py
 
       # SOURCE-only public GET; current PR CI never proves itself.
       # Only this isolated unadmitted v6 verification branch performs live reads.
       - name: Verify frozen F1/F2/relation public SOURCE evidence (not S4 admission)
-        if: github.event_name == 'pull_request' && github.head_ref == 'codex/host-common-v6-f1-f2-source-gate-20261015'
+        if: github.event_name == 'pull_request' && (github.head_ref == 'codex/host-common-v6-f1-f2-source-gate-20261015' || github.head_ref == 'codex/host-common-v6-proposed-target-lifecycle-20261015')
         run: python3 checks/host_tool_v6_source_gate.py --snapshot checks/fixtures/host-tool-v6-source-set.json
 
       - name: Test public SOURCE provenance refusal at exact source head
