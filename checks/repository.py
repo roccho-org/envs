@@ -19,8 +19,6 @@ REQUIRED_FILES = {
     ".github/workflows/author-dev-jev-api.yml",
     ".github/workflows/project-dev-jev-api.yml",
     ".github/workflows/project-dev-rent-tunnel.yml",
-    ".github/workflows/probe-dev-rent-access-ssh.yml",
-    ".github/workflows/probe-dev-rent-state.yml",
     ".github/workflows/probe-dev-linode-read.yml",
     ".github/workflows/probe-dev-mail-routing.yml",
     ".github/workflows/operate-dev-mail-routing.yml",
@@ -39,8 +37,6 @@ REQUIRED_FILES = {
     "checks/repository.py",
     "checks/test_jev_api.py",
     "checks/test_calendar_pages.py",
-    "checks/test_rent_access_probe.py",
-    "checks/test_rent_state_proof.py",
     "checks/test_linode_read_probe.py",
     "checks/test_mail_routing_read.py",
     "checks/test_mail_routing_root.py",
@@ -52,10 +48,7 @@ REQUIRED_FILES = {
     "contracts/targets.jsonl",
     "flake.lock",
     "flake.nix",
-    "providers/dev-rent-access-probe/main.tf",
     "providers/dev-rent-cloudflare/main.tf",
-    "providers/dev-rent-state-proof/main.tf",
-    "providers/dev-rent-state-proof/backend/main.tf",
 }
 ALLOWED_ROOTS = {
     ".github",
@@ -161,42 +154,33 @@ EFFECT_WORKFLOWS = {
     "project-dev-jev-api.yml": "dev.projection",
     # The rent workflow applies the persistent root; the standalone rent-tunnel GET stays an entry without a workflow.
     "project-dev-rent-tunnel.yml": "dev.rent-root",
-    "probe-dev-rent-access-ssh.yml": "dev.rent-access-probe",
-    "probe-dev-rent-state.yml": "dev.rent-state-proof",
     "probe-dev-linode-read.yml": "dev.linode-read-probe",
     "probe-dev-mail-routing.yml": "dev.projection",
 }
-PROBE_CONFIG = "providers/dev-rent-access-probe/main.tf"
 RENT_CONFIG = "providers/dev-rent-cloudflare/main.tf"
-STATE_CONFIG = "providers/dev-rent-state-proof/main.tf"
-STATE_BACKEND = "providers/dev-rent-state-proof/backend/main.tf"
-# check initializes and validates both state-proof roots from the built closure with every network route closed, proves
-# the Wrangler raw-read argv shape, and runs the state-proof self-test on the closure interpreter.
-STATE_TOOL_CHECKS = (
-    'HTTPS_PROXY=http://127.0.0.1:9 HTTP_PROXY=http://127.0.0.1:9 "$tool/tofu" -chdir="$state" init -input=false -no-color',
-    '"$tool/tofu" -chdir="$state" validate -no-color',
-    'HTTPS_PROXY=http://127.0.0.1:9 HTTP_PROXY=http://127.0.0.1:9 "$tool/tofu" -chdir="$state/backend" init -backend=false'
-    ' -input=false -no-color',
-    '"$tool/tofu" -chdir="$state/backend" validate -no-color',
-    'grep -qF -- --pipe "$RUNNER_TEMP/r2-object-get.help"',
-    'grep -qF -- --remote "$RUNNER_TEMP/r2-object-get.help"',
-    'grep -qF -- --pipe "$RUNNER_TEMP/r2-object-put.help"',
-    '"$tool/curl" --version',
-    '"$tool/python3" -I checks/test_rent_state_proof.py --real-tofu "$tool/tofu" --real-s3 "$tool/curl"',
+# Host-specific GitHub Environments are retired: rent stage ingress lives in dev-projection. No workflow may select
+# one of these names, and nothing may declare it as a plane's Environment.
+RETIRED_ENVIRONMENTS = ("dev-rent-tunnel", "dev-rent-client", "dev-rent-access-probe")
+# The retired disposable probe and state proof entrances, their parent token and their roots never return.
+RETIRED_PATHS = (
+    ".github/workflows/probe-dev-rent-access-ssh.yml",
+    ".github/workflows/probe-dev-rent-state.yml",
+    "providers/dev-rent-access-probe/main.tf",
+    "providers/dev-rent-state-proof/main.tf",
+    "providers/dev-rent-state-proof/backend/main.tf",
+    "checks/test_rent_access_probe.py",
+    "checks/test_rent_state_proof.py",
 )
-# check proves the probe tools from the built closure: exact client version, its token flags, and an OpenTofu
-# init/validate of the provider declaration with every network route closed.
+# check proves the closure client and the persistent root declaration: exact client version, its token flags, and an
+# OpenTofu init/validate of the root with every network route closed.
 PROBE_TOOL_CHECKS = (
     '"$tool/cloudflared" --version | tee "$RUNNER_TEMP/cloudflared.version"',
     'grep -qF "cloudflared version 2026.6.1 " "$RUNNER_TEMP/cloudflared.version"',
     'grep -qF -- --service-token-id "$RUNNER_TEMP/access-ssh.help"',
-    'HTTPS_PROXY=http://127.0.0.1:9 HTTP_PROXY=http://127.0.0.1:9 "$tool/tofu" -chdir="$probe" init -input=false -no-color',
-    '"$tool/tofu" -chdir="$probe" validate -no-color',
     'cp providers/dev-rent-cloudflare/main.tf "$rent/"',
     'HTTPS_PROXY=http://127.0.0.1:9 HTTP_PROXY=http://127.0.0.1:9 "$tool/tofu" -chdir="$rent" init -backend=false -input=false'
     ' -no-color',
     '"$tool/tofu" -chdir="$rent" validate -no-color',
-    '"$tool/python3" -I checks/test_rent_access_probe.py --real-ssh "$tool"',
 )
 CIPHERTEXTS = {
     "ciphertexts/dev-mail-state.sops.json",
@@ -267,11 +251,6 @@ ALLOWED_COMMAND = re.compile(
     r'|"\$(?:ENVS_EFFECT_BIN|tool)/[a-z0-9-]+"(?: .*)?)$'
 )
 COMMAND_CONTROL = re.compile(r"[;&|<>`\n]|\$\(")
-STATE_DISPATCH_INPUT = ("on:\n  workflow_dispatch:\n    inputs:\n      expected_source_sha:\n"
-                        "        description: The exact canonical commit authorized for this one attempt\n"
-                        "        required: true\n        type: string\n")
-STATE_JOB_GUARD = ("    if: github.repository == 'roccho-dev/envs' && github.ref_name == 'proposals'"
-                   " && github.sha == inputs.expected_source_sha && github.run_attempt == '1'\n")
 FLAKE_NIXPKGS = re.compile(r'(?m)^\s*inputs\.nixpkgs\.url = "github:NixOS/nixpkgs/([0-9a-f]{40})";$')
 
 
@@ -337,38 +316,17 @@ def check_shape(root: Path) -> None:
         require(bool(ciphertexts) and set(ciphertexts) <= CIPHERTEXTS, f"unexpected ciphertexts: {ciphertexts}")
 
     providers = sorted(path.relative_to(root).as_posix() for path in (root / "providers").rglob("*") if path.is_file())
-    require(providers == sorted([PROBE_CONFIG, RENT_CONFIG, STATE_CONFIG, STATE_BACKEND]),
+    require(providers == [RENT_CONFIG],
             f"unexpected provider files (state or lock files are never committed): {providers}")
-    check_probe_config((root / PROBE_CONFIG).read_text(encoding="utf-8"))
+    for retired in RETIRED_PATHS:
+        require(not (root / retired).exists(), f"retired probe/state-proof path survives: {retired}")
     check_rent_config((root / RENT_CONFIG).read_text(encoding="utf-8"))
-    check_state_config((root / STATE_CONFIG).read_text(encoding="utf-8"), (root / STATE_BACKEND).read_text(encoding="utf-8"))
 
     handoff_dir = root / "handoffs"
     if handoff_dir.exists():
         handoffs = sorted(path.relative_to(root).as_posix() for path in handoff_dir.rglob("*") if path.is_file())
         require(bool(handoffs) and set(handoffs) <= {"handoffs/dev-jev-api.json", "handoffs/dev-jev-api.github-actions.json"},
                 f"unexpected handoffs: {handoffs}")
-
-
-def check_probe_config(text: str) -> None:
-    # Standard provider at the locked version; local ephemeral state only; every managed resource exists only when
-    # create = true, so the default lookup run declares nothing it could create or delete.
-    require('source  = "cloudflare/cloudflare"' in text and 'version = "5.21.1"' in text,
-            "probe must pin the standard Cloudflare provider")
-    for token in ("backend", "cloud {", "import {", "removed {", "moved {", "provisioner", "local-exec"):
-        require(token not in text, f"probe declaration must not use {token.strip(' {')}")
-    resources = re.findall(r'(?m)^resource "([a-z_]+)" "probe" \{\n  count\s+= local\.count\n', text)
-    require(len(resources) == text.count('\nresource "') and len(resources) == 6,
-            "every probe resource must be gated by create")
-    require(re.search(r'(?m)^data "cloudflare_zero_trust_tunnel_cloudflared_token" "probe" \{\n  count\s+= local\.count\n', text)
-            is not None, "the tunnel token read must be gated by create")
-    require('decision   = "non_identity"' in text and "service_token = { token_id = cloudflare_zero_trust_access_service_token.probe[0].id }" in text
-            and "any_valid_service_token" not in text and '"bypass"' not in text and '"allow"' not in text,
-            "the Access policy must be Service Auth for exactly the probe token")
-    require('name     = "windows-rent-access-probe"' in text and 'hostname = "rent-access-probe.roccho.com"' in text,
-            "probe names differ")
-    require(re.search(r'(?ms)^output "credentials" \{\n  sensitive = true\n', text) is not None,
-            "probe credentials must be a sensitive output")
 
 
 def check_rent_config(source: str) -> None:
@@ -388,36 +346,6 @@ def check_rent_config(source: str) -> None:
     require('variable "service_token_duration" {\n  type = string\n}\n' in text
             and durations == ["var.service_token_duration"],
             "the service-token duration must be a required input with no default")
-
-
-def check_state_config(buckets: str, backend: str) -> None:
-    # Buckets: the standard provider at the locked version, local ephemeral state, exactly the proof bucket and a
-    # count-gated decoy, both named from the run; no existing or reserved bucket, adoption or other resource.
-    require('source  = "cloudflare/cloudflare"' in buckets and 'version = "5.21.1"' in buckets,
-            "state buckets must pin the standard Cloudflare provider")
-    for token in ("backend", "cloud {", "import {", "removed {", "moved {", "provisioner", "local-exec", "data \""):
-        require(token not in buckets, f"state buckets must not use {token.strip(' {')}")
-    resources = re.findall(r'(?m)^resource "([a-z0-9_]+)" "([a-z]+)" \{$', buckets)
-    require(resources == [("cloudflare_r2_bucket", "proof"), ("cloudflare_r2_bucket", "decoy")]
-            and buckets.count("\nresource \"") == 2, "state buckets must be exactly proof and decoy")
-    require('  name = "windows-rent-state-proof-${var.run}"\n' in buckets and '  count      = var.decoy ? 1 : 0\n' in buckets
-            and '  name       = "${local.name}-decoy"\n' in buckets and '  name       = local.name\n' in buckets,
-            "state bucket names must derive from the run and the decoy must be gated")
-    require('"windows-rent-state"' not in buckets, "the reserved production state bucket is never declared")
-    # Backend: native S3 lock file on R2 and enforced native encryption; no credential, provider or server-side flag.
-    for marker in ('  backend "s3" {\n', "    bucket                      = var.bucket\n",
-                   "    key                         = var.key\n", "    use_lockfile                = true\n",
-                   '    endpoints                   = { s3 = "https://${var.account_id}.r2.cloudflarestorage.com" }\n',
-                   "    state {\n      enforced = true\n    }\n", "    plan {\n      enforced = true\n    }\n"):
-        require(marker in backend, f"state backend differs: {marker.strip()}")
-    for token in ("access_key", "secret_key", "token", "encrypt ", "encrypt=", "required_providers", "passphrase",
-                  "cloudflare_", "dynamodb", "profile", "shared_"):
-        require(token not in backend, f"state backend must not carry {token.strip()}")
-    backend_resources = re.findall(r'(?m)^resource "([a-z_]+)" "([a-z]+)" \{$', backend)
-    require(backend_resources == [("terraform_data", "canary"), ("terraform_data", "hold")],
-            "state backend resources must be the built-in canary and lock holder only")
-    require("    interpreter = [var.python, \"-I\", \"-c\"]\n" in backend and backend.count("local-exec") == 1,
-            "the lock holder must run only the closure interpreter")
 
 
 def check_text(root: Path) -> None:
@@ -559,28 +487,26 @@ def check_manual_mail(root: Path, source: str, canonical: str) -> None:
         "        type: string",
         "        required: true",
         "      operation:",
-        "        description: Qualify, seal recovery, preview, or apply the approved declaration",
+        "        description: Qualify, preview, or apply the approved declaration",
         "        type: choice",
-        "        options: [qualify, recover, preview, apply]",
+        "        options: [qualify, preview, apply]",
         "        default: qualify",
         "        required: true",
-        "      recipient:",
-        "        description: Existing owner public age recipient for recovery; never a private key",
-        "        type: string",
-        "        default: ''",
     ], "Mail candidate must admit only the one manual event and its source input")
     job = source[source.find("\njobs:\n"):]
     require(re.findall(r"(?m)^  ([a-z0-9-]+):\s*$", job) == ["operate"],
             "Mail candidate must have one and only one job")
-    gate = "    if: ${{ github.repository == 'roccho-org/envs' && github.ref_name == 'proposals' && github.sha == inputs.expected_source_sha && github.run_attempt == 1 && github.actor == 'roccho-dev' && github.actor_id == '40359643' && github.triggering_actor == 'roccho-dev' && contains(fromJSON('[\"qualify\",\"recover\",\"preview\",\"apply\"]'), inputs.operation) }}"
+    gate = "    if: ${{ github.repository == 'roccho-org/envs' && github.ref_name == 'proposals' && github.sha == inputs.expected_source_sha && github.run_attempt == 1 && github.actor == 'roccho-dev' && github.actor_id == '40359643' && github.triggering_actor == 'roccho-dev' && contains(fromJSON('[\"qualify\",\"preview\",\"apply\"]'), inputs.operation) }}"
     require(source.count(gate) == 1 and source.count("\n    if:") == 1,
             "Mail job must be source/controller-bound without re-runs")
-    environment = "    environment: ${{ inputs.operation == 'recover' && 'dev-rent-tunnel' || 'dev-projection' }}\n"
+    environment = "    environment: dev-projection\n"
     require(-1 < source.find(gate) < source.find(environment)
             < source.find("    steps:\n"),
             "Mail job must fail before Environment resolution or child execution")
-    require(source.count("    environment:") == 1 and source.count(environment) == 1,
-            "Only recovery reads the historical rent slots; runtime uses projection")
+    # The completed one-time recovery is retired: no recover operation, recipient input or rent Environment selector.
+    require(source.count("    environment:") == 1 and source.count(environment) == 1
+            and "recover" not in source and "recipient" not in source and "dev-rent-" not in source,
+            "Mail selects only the static dev-projection Environment and has no recovery path")
     require(source.count("    runs-on: ubuntu-24.04\n") == 1
             and "    timeout-minutes: 10\n" in source,
             "Mail candidate job must be finite and fixed")
@@ -596,32 +522,25 @@ def check_manual_mail(root: Path, source: str, canonical: str) -> None:
             ], "Mail candidate may only grant effective actions/contents read")
     require("  cancel-in-progress: false\n" in source,
             "Mail candidate must not auto-cancel and replay")
-    recovery_step = source[source.find("      - name: Seal unchanged state inputs"):source.find("      - name: Provide encrypted recovery")]
     private_step = source[source.find("      - name: Initialize backend and run one selected Mail operation\n"):]
     qualification_step = source[source.find("      - name: Qualify projection with GET only\n"):source.find("      # The state-input Secret")]
-    recovery_inputs = {("secrets", name) for name in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "RENT_STATE_PASSPHRASE")}
     qualification_inputs = {("secrets", name) for name in ("MAIL_CONFIG", "CLOUDFLARE_API_TOKEN")}
     projection_inputs = qualification_inputs | {("secrets", "MAIL_STATE_INPUTS")}
-    expected_inputs = recovery_inputs | projection_inputs
-    require(set(INPUT_REFERENCE.findall(source)) == expected_inputs
-            and len(INPUT_REFERENCE.findall(source)) == len(recovery_inputs) + len(qualification_inputs) + len(projection_inputs)
-            and set(INPUT_REFERENCE.findall(recovery_step)) == recovery_inputs
+    require(set(INPUT_REFERENCE.findall(source)) == projection_inputs
+            and len(INPUT_REFERENCE.findall(source)) == len(qualification_inputs) + len(projection_inputs)
             and set(INPUT_REFERENCE.findall(qualification_step)) == qualification_inputs
             and set(INPUT_REFERENCE.findall(private_step)) == projection_inputs
-            and "R2_PARENT_" not in source and "TF_ENCRYPTION" not in source,
+            and "R2_PARENT_" not in source and "RENT_" not in source and "AWS_" not in source
+            and "TF_ENCRYPTION" not in source,
             "Mail inputs must remain isolated to the selected operation's slots")
     require(consumer_run(source, "operate-dev-mail-routing.yml") == canonical,
             "Mail candidate must use the existing exact-SHA artifact consumer")
-    require({action for action, _ in ACTION_USE.findall(source)} ==
-            EFFECT_ACTIONS | {"actions/upload-artifact"},
-            "Mail uses pinned checkout and ciphertext-only upload")
-    require("          path: ${{ env.MAIL_HOME }}/mail-state.sops.json\n" in source
-            and "          retention-days: 1\n" in source
-            and "uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02\n" in source
-            and recovery_step.count("if: inputs.operation == 'recover'") == 1
-            and qualification_step.count("if: inputs.operation == 'qualify'") == 1
+    require({action for action, _ in ACTION_USE.findall(source)} == EFFECT_ACTIONS
+            and "actions/upload-artifact" not in source,
+            "Mail uses only the pinned checkout and uploads nothing")
+    require(qualification_step.count("if: inputs.operation == 'qualify'") == 1
             and private_step.count("if: inputs.operation == 'preview' || inputs.operation == 'apply'") == 1,
-            "Recovery and projection must remain isolated; upload only the encrypted carrier")
+            "Qualification and projection must remain isolated")
     require("          ref: ${{ github.sha }}\n" in source
             and "          persist-credentials: false\n" in source,
             "Mail candidate checkout must be source-bound without retained auth")
@@ -632,7 +551,7 @@ def check_manual_mail(root: Path, source: str, canonical: str) -> None:
             "Mail must consume the fixed Ops declaration without retained auth")
     require("      - name: Checkout fixed Ops declaration\n"
             "        if: inputs.operation == 'preview' || inputs.operation == 'apply'\n" in source,
-            "Qualification/recovery must not acquire or initialize the Ops root")
+            "Qualification must not acquire or initialize the Ops root")
     require(run_commands(source.replace(canonical, "")) == [
         TOOLCHAIN_IDENTITY, "set -euo pipefail", "umask 077",
         'home="$(mktemp -d "$RUNNER_TEMP/mail-m0.XXXXXX")"',
@@ -641,13 +560,12 @@ def check_manual_mail(root: Path, source: str, canonical: str) -> None:
         'for file in main.tf .terraform.lock.hcl README.md safety.tftest.hcl; do',
         'install -m 600 "$GITHUB_WORKSPACE/mail-ops-source/providers/mail-routing/$file" "$home/root/$file"',
         'done', 'fi', 'echo "MAIL_HOME=$home" >>"$GITHUB_ENV"',
-        '"$ENVS_EFFECT_BIN/mail-routing-root" --operation recover',
         '"$ENVS_EFFECT_BIN/mail-routing-root" --operation qualify',
         "set +e", '"$ENVS_EFFECT_BIN/mail-routing-root" --operation "$MAIL_OPERATION"',
         'result=$?', 'if [ "$MAIL_OPERATION" = preview ] && [ "$result" -eq 2 ]; then',
         'exit 0', 'fi', 'exit "$result"',
     ], "Mail can run only artifact identity, private root preparation and one operation")
-    require(source.count("      - name: ") == 9,
+    require(source.count("      - name: ") == 7,
             "Mail manual consumer must retain the bounded step set")
     adapter_source = (root / "adapters/mail_routing_root.py").read_text(encoding="utf-8")
     require("EXIT_INACTIVE = 78\n" in adapter_source
@@ -662,6 +580,9 @@ def check_manual_mail(root: Path, source: str, canonical: str) -> None:
             and 'sys.argv[2] not in MAIL_OPERATIONS' in adapter_source
             and '        print(CLOSED_RESULT)\n        return EXIT_INACTIVE\n' in adapter_source,
             "Mail public entry must refuse unsupported/no-argument operation before inputs")
+    require('\nMAIL_OPERATIONS = ("qualify", "preview", "apply")\n' in adapter_source
+            and "recover_state" not in adapter_source and "MAIL_STATE_AGE_RECIPIENT" not in adapter_source,
+            "the completed Mail recovery operation is retired")
 
 def check_workflows(root: Path, environments: dict[str, dict[str, Any]],
                     author_targets: dict[str, set[tuple[str, str]]], adapter) -> None:
@@ -685,8 +606,13 @@ def check_workflows(root: Path, environments: dict[str, dict[str, Any]],
     for name, text in texts.items():
         require("pull_request_target:" not in text, f"{name}: pull_request_target is forbidden")
         require("secrets: inherit" not in text, f"{name}: secrets inheritance is forbidden")
-        require("environment: ${{" not in text or name == "operate-dev-mail-routing.yml",
-                f"{name}: dynamic Environment is forbidden")
+        # Every selected Environment is one literal functional dev name: no expression, no host-specific name.
+        selected = [value.strip() for value in re.findall(r"(?m)^\s*environment:(.*)$", text)]
+        require("${{" not in "".join(selected), f"{name}: dynamic Environment is forbidden")
+        for retired in RETIRED_ENVIRONMENTS:
+            require(retired not in selected, f"{name}: retired host-specific Environment {retired} is selected")
+        require(set(selected) <= {"dev-authoring", "dev-projection"}, f"{name}: Environment outside dev-authoring/dev-projection")
+        require("R2_PARENT_" not in text, f"{name}: the retired R2 parent token is referenced")
         for action, ref in ACTION_USE.findall(text):
             if not action.startswith(("./", "docker://")):
                 require(re.fullmatch(r"[0-9a-f]{40}", ref) is not None, f"{name}: mutable Action {action}@{ref}")
@@ -698,8 +624,9 @@ def check_workflows(root: Path, environments: dict[str, dict[str, Any]],
     require("checks/test_repository.py" in check, "check workflow must test repository oracle")
     require("checks/test_jev_api.py" in check, "check workflow must test Jev adapter")
     require("run: python3 checks/test_rent_tunnel.py\n" in check, "check workflow must test the rent tunnel adapter")
-    require("run: python3 checks/test_rent_access_probe.py\n" in check, "check workflow must test the access probe adapter")
-    require("run: python3 checks/test_rent_state_proof.py\n" in check, "check workflow must test the state proof adapter")
+    require("test_rent_access_probe" not in check and "test_rent_state_proof" not in check
+            and "dev-rent-access-probe" not in check and "dev-rent-state-proof" not in check,
+            "check workflow must not run the retired probe/state-proof roots or tests")
     require("run: python3 checks/test_linode_read_probe.py\n" in check, "check workflow must test the Linode read probe")
     require("run: python3 checks/test_mail_routing_read.py\n" in check, "check must run Mail GET-only/redaction selftest")
     require("run: python3 checks/test_mail_routing_root.py\n" in check,
@@ -749,9 +676,7 @@ def check_workflows(root: Path, environments: dict[str, dict[str, Any]],
     ):
         require(marker in toolchain, f"check must run the real SOPS roundtrip with check-only age: {marker}")
     for marker in PROBE_TOOL_CHECKS:
-        require(marker in toolchain, f"check must prove the probe tools from the closure: {marker}")
-    for marker in STATE_TOOL_CHECKS:
-        require(marker in toolchain, f"check must prove the state proof roots from the closure: {marker}")
+        require(marker in toolchain, f"check must prove the closure client and rent root from the closure: {marker}")
     require(toolchain.find(REAL_ROUNDTRIP) < toolchain.find('if grep -qxF "$age"') and toolchain.find(ARTIFACT_BUILD)
             < toolchain.find('if grep -qxF "$age"'), "check-only age must be proven outside the built artifact")
     require(toolchain.find(CHECK_AGE_BUILD) < toolchain.find(OCI_ROUNDTRIP) < toolchain.find('if grep -qxF "$age"'),
@@ -896,26 +821,13 @@ def check_workflows(root: Path, environments: dict[str, dict[str, Any]],
     require('"$tool/git" add ciphertexts/dev-rent-tunnel.sops.yaml ciphertexts/dev-rent-client.sops.yaml '
             'contracts/environments.jsonl\n' in rent and rent.count('"$tool/git" add ') == 1,
             "rent handoff must stage only both ciphertexts and plane state")
-    probe = texts["probe-dev-rent-access-ssh.yml"]
-    require(f"run: '{EFFECT_ENTRY} rent-access-probe'" in probe, "access probe workflow entry call missing")
-    require("permissions:\n  actions: read\n  contents: read\n" in probe and "write" not in probe,
-            "access probe workflow must be read-only on the repository")
-    require("rent-access-locate" not in probe, "live name lookup dispatch needs its own contract")
-    state = texts["probe-dev-rent-state.yml"]
-    require(f"run: '{EFFECT_ENTRY} rent-state-proof'" in state and state.count(" rent-state-proof'") == 1,
-            "state proof workflow entry call missing")
-    require("permissions:\n  actions: read\n  contents: read\n" in state and "write" not in state,
-            "state proof workflow must be read-only on the repository")
-    # The provider job enters only for the one authorized commit and first attempt; the SHA is a required input.
-    require(STATE_DISPATCH_INPUT in state and state.count("expected_source_sha") == 2,
-            "state proof dispatch must require the exact expected source SHA")
-    require(state.count(STATE_JOB_GUARD) == 1 and state.count("    if: ") == 1,
-            "state proof job must enter only for the expected SHA on its first attempt")
-    require(f"    timeout-minutes: {adapter.STATE_JOB_MINUTES}\n" in state and state.count("timeout-minutes:") == 1,
-            "state proof job bound differs from the adapter's expiry window")
-    # One Environment, two meanings kept apart: neither workflow maps the other's secret.
-    require("CLOUDFLARE_API_TOKEN" not in state and "R2_PARENT_" not in probe,
-            "the access probe and state proof secrets must stay distinct")
+    # Rent shares dev-projection with Pages/Mail but never their Cloudflare slots: it maps only its RENT_CLOUDFLARE_*
+    # storage slots, and the adapter passes them to its children under the provider-native names.
+    require(re.search(r"\b(?:secrets|vars)\.CLOUDFLARE_", rent) is None
+            and all(f"{name}: ${{{{ {namespace}.{name} }}}}" in rent
+                    for namespace, name in (("secrets", "RENT_CLOUDFLARE_API_TOKEN"), ("vars", "RENT_CLOUDFLARE_ACCOUNT_ID"),
+                                            ("vars", "RENT_CLOUDFLARE_ZONE_ID"))),
+            "rent must map only its distinct RENT_CLOUDFLARE_* slots, never the Pages/Mail Cloudflare slots")
     linode = texts["probe-dev-linode-read.yml"]
     require(f"run: '{EFFECT_ENTRY} linode-read-probe'" in linode and linode.count(" linode-read-probe'") == 1,
             "Linode read workflow entry call missing")
@@ -1134,15 +1046,8 @@ def check_readme(root: Path, environments: dict[str, dict[str, Any]]) -> None:
         "handoffs/dev-jev-api.json",
         "ciphertexts/dev-rent-tunnel.sops.yaml",
         "checks/test_rent_tunnel.py",
-        PROBE_CONFIG,
         RENT_CONFIG,
         "applied only by `rent-root` under a separate effect grant",
-        "checks/test_rent_access_probe.py",
-        "name lookup locates candidates and never proves ownership",
-        STATE_CONFIG,
-        STATE_BACKEND,
-        "checks/test_rent_state_proof.py",
-        "a bucket name alone never authorizes deletion",
         "dev-authoring/OCI_DEV_AGE_RECIPIENT",
         "dev-authoring/OPENCODE_API_KEY",
         "ciphertexts/dev-jev-api.oci-dev.sops.yaml",
@@ -1157,6 +1062,8 @@ def check_readme(root: Path, environments: dict[str, dict[str, Any]]) -> None:
     ):
         require(marker in text, f"README missing {marker}")
     require("delete `main`" not in text.lower(), "README proposes deleting main")
+    for retired in RETIRED_ENVIRONMENTS:
+        require(f"`{retired}/" not in text, f"README declares an input on the retired Environment {retired}")
 
 
 def check_main_compatibility_refresh(root: Path) -> None:
