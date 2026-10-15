@@ -120,6 +120,18 @@ ROOT_LEGACY_S3_CONFIG = """terraform {
 
 # The format secrets.token_hex(32) produces, placed inside an HCL string: a format check, not a strength proof.
 ROOT_PASSPHRASE = re.compile(r"^[0-9a-f]{64}$")
+# The old S3 state object key exactly as the Environment declares it (the contract types it opaque): no prefix is
+# assumed. A closed ASCII charset keeps out any query, escape, space or control; every segment is a real name, so
+# there is no leading, trailing or doubled slash and no "." or ".." that a client could normalise to another object.
+ROOT_STATE_KEY_CHARS = re.compile(r"[A-Za-z0-9_./-]{1,180}")
+ROOT_LOCK_SUFFIX = ".tflock"
+
+
+def root_state_key_ok(key: str) -> bool:
+    return (ROOT_STATE_KEY_CHARS.fullmatch(key) is not None and key.endswith(".tfstate") and ".." not in key
+            and all(segment not in ("", ".") for segment in key.split("/")))
+
+
 # The windows slot rule (Get-RentAccessProblem) for each line: 1-1024 printable ASCII characters.
 SLOT_LINE = re.compile(r"^[!-~]{1,1024}$")
 WINDOWS_CONSUMER = "windows.rent.consumer"
@@ -1348,9 +1360,8 @@ def rent_inspect_head(tools: Mapping[str, str], inputs: Mapping[str, str], runne
     bucket = inputs["RENT_STATE_BUCKET"]
     require(re.fullmatch(r"[a-z0-9][a-z0-9.-]{2,62}", bucket) is not None and ".." not in bucket,
             "rent inspect bucket is not a closed R2 object name")
-    require(object_key.startswith("state/") and ".." not in object_key and "//" not in object_key
-            and re.fullmatch(r"[a-zA-Z0-9_./-]{1,180}", object_key) is not None,
-            "rent inspect object key is not bounded")
+    base = object_key[:-len(ROOT_LOCK_SUFFIX)] if object_key.endswith(ROOT_LOCK_SUFFIX) else object_key
+    require(root_state_key_ok(base), "rent inspect object key is not bounded")
     endpoint = r2_endpoint(account)
     lines = [
         f"url = {curl_value(f'{endpoint}/{bucket}/{object_key}')}",
@@ -1491,10 +1502,9 @@ def start_root_backend(tools: Mapping[str, str], home: Path, token: str, spawn: 
 
 def root_s3_inventory(tools: Mapping[str, str], inputs: Mapping[str, str], runner: Runner) -> None:
     key = inputs["RENT_STATE_KEY"]
-    require(key.startswith("state/") and key.endswith(".tfstate") and ".." not in key,
-            "rent-root requires the declared old-S3 state key")
+    require(root_state_key_ok(key), "rent-root requires the declared old-S3 state key")
     require(rent_inspect_head(tools, inputs, runner, key) == "PRESENT", "rent-root old-S3 state missing or UNKNOWN")
-    require(rent_inspect_head(tools, inputs, runner, key + ".tflock") == "ABSENT",
+    require(rent_inspect_head(tools, inputs, runner, key + ROOT_LOCK_SUFFIX) == "ABSENT",
             "rent-root old-S3 lock present or UNKNOWN")
 
 
@@ -1588,23 +1598,28 @@ def rent_root_inspect(root: Path = ROOT, *, runner: Runner = default_runner,
     progress = {} if progress is None else progress
     progress["stage"] = "source_guard"
     require(ROOT_INSPECT_SOURCE_ACTIVE, "rent-root inspect is source-hard-inactive")
+    # Each preflight names its own closed stage, so a refusal says which check failed and never with what value.
     progress["stage"] = "contracts"
     contracts = validate_contracts(root)
+    progress["stage"] = "toolchain"
     tools = toolchain(root)
+    progress["stage"] = "inputs"
     inputs = gate(root, contracts, ROOT_PLANE)
+    progress["stage"] = "encryption_input"
     require(ROOT_PASSPHRASE.fullmatch(inputs["RENT_STATE_PASSPHRASE"]) is not None,
             "rent-root inspect encryption input invalid")
+    progress["stage"] = "secret_live"
     for name in ROOT_SECRETS:
         reject_live_values(root, name, [inputs[name]])
+    progress["stage"] = "state_key"
     key = inputs["RENT_STATE_KEY"]
-    require(key.startswith("state/") and key.endswith(".tfstate") and ".." not in key,
-            "rent-root inspect requires the declared old-S3 state key")
+    require(root_state_key_ok(key), "rent-root inspect requires the declared old-S3 state key")
 
     # The old S3 state and its native lock are each classified PRESENT or ABSENT; only an unanswerable HEAD is
     # UNKNOWN and stops red here. An absent state or a held lock is reported, and the state is then not read.
     progress["stage"] = "s3_head"
     old_state = rent_inspect_head(tools, inputs, runner, key)
-    old_lock = rent_inspect_head(tools, inputs, runner, key + ".tflock")
+    old_lock = rent_inspect_head(tools, inputs, runner, key + ROOT_LOCK_SUFFIX)
     identity: dict[str, Any] = {"old_state_read": "NOT_READ", "lineage": None, "serial": None,
                                 "managed_root_resources": None}
     if old_state == "PRESENT" and old_lock == "ABSENT":

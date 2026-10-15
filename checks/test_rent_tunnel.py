@@ -424,7 +424,8 @@ ROOT_VALUES = {
     "RENT_CLOUDFLARE_ACCOUNT_ID": ACCOUNT_ID, "RENT_CLOUDFLARE_ZONE_ID": secrets.token_hex(16),
     "RENT_HOSTNAME": f"rent-{secrets.token_hex(4)}.example.invalid", "RENT_ORIGIN_SERVICE": f"ssh://origin-{secrets.token_hex(4)}:2222",
     "RENT_SERVICE_TOKEN_DURATION": f"{1000 + secrets.randbelow(8000)}h", "RENT_STATE_BUCKET": f"rent-state-{secrets.token_hex(6)}",
-    "RENT_STATE_KEY": f"state/{secrets.token_hex(6)}.tfstate", "RENT_AGE_RECIPIENT": RECIPIENT,
+    # Unprefixed and multi-segment like the deployed old-S3 key: the source assumes no "state/" prefix.
+    "RENT_STATE_KEY": f"dev/rent-{secrets.token_hex(6)}/root.tfstate", "RENT_AGE_RECIPIENT": RECIPIENT,
     jev.CLIENT_RECIPIENT: ROOT_CLIENT_RECIPIENT,
 }
 ROOT_SECRET_VALUES = [ROOT_VALUES[name] for name in jev.ROOT_SECRETS]
@@ -963,13 +964,14 @@ def test_root_inspect_bounded_fixture() -> None:
         api.calls = calls
         return api
 
-    def run_cli(runner, api) -> tuple[int, str, str]:
+    def run_cli(runner, api, cli_root: Path | None = None, **overrides: str) -> tuple[int, str, str]:
         saved = jev.rent_root_inspect
         jev.rent_root_inspect = lambda root, progress=None: saved(root, runner=runner, api=api, progress=progress)
         out, err = io.StringIO(), io.StringIO()
         try:
-            with fixtures.environment(root_env()), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                code = jev.main(["--root", str(root), "rent-root-inspect"])
+            with fixtures.environment(root_env(**overrides)), contextlib.redirect_stdout(out), \
+                    contextlib.redirect_stderr(err):
+                code = jev.main(["--root", str(cli_root or root), "rent-root-inspect"])
         finally:
             jev.rent_root_inspect = saved
         for sentinel in sentinels:
@@ -1009,7 +1011,66 @@ def test_root_inspect_bounded_fixture() -> None:
                                (InspectRunner(), world(pages=2), "cloudflare_read")):
         code, out, err = run_cli(runner, api)
         assert code == 1 and out == "" and err == f"RENT_ROOT_INSPECT=RED: envs at {stage}\n", (stage, err)
+    # Each preflight is its own closed stage, refused before any child: invalid contracts, a missing toolchain, an
+    # invalid input, an invalid encryption input, a secret stored in the checkout, an unsafe state key.
+    broken = fresh_root()
+    rows = [json.loads(line) for line in (broken / jev.ENVIRONMENTS).read_text(encoding="utf-8").splitlines() if line]
+    for row in rows:
+        if row["id"] == "dev.authoring":
+            row["github_environment"] = "dev-other"
+    (broken / jev.ENVIRONMENTS).write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    leaked = fresh_root()
+    (leaked / "notes.txt").write_text(ROOT_VALUES["AWS_SECRET_ACCESS_KEY"] + "\n", encoding="utf-8")
+    recipient_sentinel = "RECIPIENT-SENTINEL-" + secrets.token_hex(12)
+    passphrase_sentinel = "PASSPHRASE-SENTINEL-" + secrets.token_hex(12)
+    key_sentinel = f"../KEY-SENTINEL-{secrets.token_hex(12)}.tfstate"
+    sentinels.extend((recipient_sentinel, passphrase_sentinel, key_sentinel))
+    for cli_root, overrides, stage in ((broken, {}, "contracts"),
+                                       (None, {"ENVS_EFFECT_TOOLCHAIN": ""}, "toolchain"),
+                                       (None, {"RENT_AGE_RECIPIENT": recipient_sentinel}, "inputs"),
+                                       (None, {"RENT_STATE_PASSPHRASE": passphrase_sentinel}, "encryption_input"),
+                                       (leaked, {}, "secret_live"),
+                                       (None, {"RENT_STATE_KEY": key_sentinel}, "state_key")):
+        runner = InspectRunner()
+        code, out, err = run_cli(runner, world(), cli_root, **overrides)
+        assert code == 1 and out == "" and err == f"RENT_ROOT_INSPECT=RED: envs at {stage}\n", (stage, err)
+        assert runner.calls == [], f"a child ran before the {stage} preflight passed"
     assert snapshot(root) == before and jev.ROOT_INSPECT_SOURCE_ACTIVE is True
+
+
+def test_root_state_key_shape() -> None:
+    # The shared closed predicate of the inspect HEAD, the inspect entry and the closed migrate inventory: the
+    # declared key in any shape inside the closed charset, never a path, escape or extension trick.
+    stem = "a" * (180 - len(".tfstate"))
+    for key in ("state/x.tfstate", "dev/rent-0a1b/root.tfstate", "root.tfstate", "a_b-c.d/e.tfstate",
+                ROOT_VALUES["RENT_STATE_KEY"], stem + ".tfstate"):
+        assert jev.root_state_key_ok(key), key
+    for key in ("", "x.json", "x.tfstate.bak", "x.tflock", "../x.tfstate", "a/../x.tfstate", "a..b.tfstate",
+                "a//x.tfstate", "/x.tfstate", "x.tfstate/", "./x.tfstate", "a/./x.tfstate", "a b.tfstate",
+                "a%2Fb.tfstate", "a?b.tfstate", "a#b.tfstate", "a\\b.tfstate", "a\nb.tfstate", "é.tfstate",
+                "a" + stem + ".tfstate"):
+        assert not jev.root_state_key_ok(key), key
+    # The HEAD accepts exactly an accepted key or that key with the native lock suffix appended once (at most 187).
+    seen: list[str] = []
+
+    def head(argv, input_data, env):
+        seen.append(input_data.decode())
+        return subprocess.CompletedProcess(argv, 0, stdout=b"", stderr=b"404")
+
+    tools = {"curl": fixtures.TOOLS["curl"]}
+    key = ROOT_VALUES["RENT_STATE_KEY"]
+    with fixtures.environment(root_env()):
+        for object_key in (key, key + jev.ROOT_LOCK_SUFFIX, stem + ".tfstate" + jev.ROOT_LOCK_SUFFIX):
+            assert jev.rent_inspect_head(tools, ROOT_VALUES, head, object_key) == "ABSENT", object_key
+        for object_key in (key + ".tflock.tflock", key + ".tflockx", "x.tflock", "../" + key + jev.ROOT_LOCK_SUFFIX,
+                           key[:-1], "a" + stem + ".tfstate" + jev.ROOT_LOCK_SUFFIX):
+            try:
+                jev.rent_inspect_head(tools, ROOT_VALUES, head, object_key)
+            except jev.EnvsError:
+                pass
+            else:
+                raise AssertionError(f"unbounded object key accepted: {object_key!r}")
+    assert len(seen) == 3, "an unbounded object key reached the HEAD child"
 
 
 @contextlib.contextmanager
@@ -1263,6 +1324,7 @@ def main() -> None:
             test_root_init_hint()
         test_root_inspect_source_gate()
         test_root_inspect_bounded_fixture()
+        test_root_state_key_shape()
         test_root_source_gates()
         test_root_migrate_fixture()
         test_root_plan_fixture()
