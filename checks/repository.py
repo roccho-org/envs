@@ -197,6 +197,15 @@ RELOCATION_STEPS = [
     "Synthetic self-test before any Secret", "Seal the four Secrets to the dev-projection public key",
     "Upload the encrypted receipt only",
 ]
+# The rent inspect job admits the same one native controller dispatch as the relocation, before its Environment.
+RENT_INSPECT_GATE = RELOCATION_GATE
+RENT_INSPECT_STEPS = [
+    "Checkout exact canonical revision", "Obtain provided effect artifact", "Record effect toolchain identity",
+    "Inspect old S3 state/lock and Cloudflare world",
+]
+# Outside the shared consumer, nothing in the inspect job may print, export or keep a value, or gain a write.
+RENT_INSPECT_FORBIDDEN = ("echo", "printf", "GITHUB_OUTPUT", "GITHUB_STEP_SUMMARY", "outputs:", "upload-artifact",
+                          "actions/cache", "add-mask", "set-output", "write", '"$tool/', "tee ")
 # The locked nixpkgs Python with PyNaCl, from the existing lock and nothing else; the same expression tests it in check.
 RELOCATION_NIXPKGS = "test \"$(nix eval --impure --raw --expr \"($flake).inputs.nixpkgs.rev\")\" = f9948418dc8628ac02b6d6337e191ade9429d59d"
 RELOCATION_PYTHON = ('python="$(nix build --impure --no-link --print-out-paths --expr '
@@ -844,20 +853,49 @@ def check_workflows(root: Path, environments: dict[str, dict[str, Any]],
     check_author_targets(texts["author-dev-jev-api.yml"], author_targets)
     require(f"{EFFECT_ENTRY} project" in texts["project-dev-jev-api.yml"], "project workflow entry call missing")
     rent = texts["project-dev-rent-tunnel.yml"]
-    # S2: the selected whole-job if is literal false, before Environment
-    # resolution, consumer/artifact, inspect, apply, ciphertext or PR handoff.
+    # The apply/handoff job keeps its whole-job literal false, before Environment resolution, consumer/artifact,
+    # apply, ciphertext or PR handoff. The only active selector is a second, repository-read-only job: the native
+    # caller gate (repository, ref, event, accepted SHA, first attempt, controller) precedes its Environment, and it
+    # admits the inspect entry alone.
     rent_guard = ("    if: ${{ false && github.repository == 'roccho-org/envs' "
                   "&& github.ref_name == 'proposals' }}")
-    require(rent.count(rent_guard) == 1 and
-            rent.find(rent_guard) < rent.find("    runs-on:") < rent.find("    environment:"),
+    require(rent.count("\njobs:\n") == 1, "rent workflow must declare one jobs block")
+    jobs = rent[rent.index("\njobs:\n"):]
+    require(re.findall(r"(?m)^  ([A-Za-z0-9_-]+):$", jobs) == ["project", "inspect"],
+            "rent workflow must hold the hard-inactive project job, then the inspect job")
+    project = jobs[jobs.index("\n  project:\n"):jobs.index("\n  inspect:\n")]
+    inspect_job = jobs[jobs.index("\n  inspect:\n"):]
+    require(rent.count(rent_guard) == 1 and project.count(rent_guard) == 1 and
+            project.find(rent_guard) < project.find("    runs-on:") < project.find("    environment:"),
             "selected rent workflow must remain source-hard-inactive before Environment")
     inspect_entry = f"run: '{EFFECT_ENTRY} rent-root-inspect'"
     apply_entry = f"run: '{EFFECT_ENTRY} rent-root'"
-    require(rent.count(inspect_entry) == 1 and rent.count(apply_entry) == 1 and
-            rent.count(f"{EFFECT_ENTRY} rent-") == 2 and
-            rent.find("Record effect toolchain identity") < rent.find(inspect_entry) < rent.find(apply_entry)
-            < rent.find("Open ciphertext handoff PR"),
-            "rent must select inspect before apply/handoff, all under one hard-inactive job")
+    require(rent.count(f"{EFFECT_ENTRY} rent-") == 2 and project.count(apply_entry) == 1
+            and inspect_entry not in project
+            and project.find("Record effect toolchain identity") < project.find(apply_entry)
+            < project.find("Open ciphertext handoff PR"),
+            "rent apply and handoff must stay only in the hard-inactive project job")
+    require("on:\n  workflow_dispatch:\n    inputs:\n      expected_source_sha:\n" in rent
+            and "        type: string\n        required: true\n\npermissions:\n" in rent
+            and set(re.findall(r"(?<![).\w])inputs\.([A-Za-z0-9_]+)", rent)) == {"expected_source_sha"}
+            and rent.count("inputs.expected_source_sha") == 1,
+            "rent dispatch must take only the accepted canonical SHA, used by the inspect gate alone")
+    require(inspect_job.count(RENT_INSPECT_GATE) == 1
+            and inspect_job.find(RENT_INSPECT_GATE) < inspect_job.find("    runs-on:")
+            < inspect_job.find("    environment: dev-projection\n")
+            < inspect_job.find("    permissions:\n      actions: read\n      contents: read\n    steps:\n"),
+            "rent inspect job must hold the native caller gate, then repository read-only permissions")
+    require(re.findall(r"(?m)^      - name: (.+)$", inspect_job) == RENT_INSPECT_STEPS
+            and inspect_job.count(inspect_entry) == 1 and apply_entry not in inspect_job,
+            "rent inspect job runs only checkout, the provided artifact, toolchain identity and inspect")
+    # Privacy on the public log: the runner already shows the step env (the four Secrets masked, the nine
+    # non-secret variables in plain text); the job adds no copy, output, artifact, cache or write of its own, and
+    # maps the Environment inputs on the inspect step alone.
+    private_rest = inspect_job.replace(canonical, "")
+    require(not any(token in private_rest for token in RENT_INSPECT_FORBIDDEN)
+            and private_rest.find("${{ secrets.") > private_rest.find(f"- name: {RENT_INSPECT_STEPS[-1]}\n")
+            and private_rest.find("${{ vars.") > private_rest.find(f"- name: {RENT_INSPECT_STEPS[-1]}\n"),
+            "rent inspect job may print only the closed receipt and maps inputs only on the inspect step")
     require('"$tool/git" add ciphertexts/dev-rent-tunnel.sops.yaml ciphertexts/dev-rent-client.sops.yaml '
             'contracts/environments.jsonl\n' in rent and rent.count('"$tool/git" add ') == 1,
             "rent handoff must stage only both ciphertexts and plane state")
@@ -1069,20 +1107,23 @@ def check_toolchain(root: Path, adapter) -> None:
     check_root_source_gates(source)
 
 
-# S2: every rent-root entry that could read the root's secrets, spawn a child or act on a backend is closed in source.
-# Each gate is one literal False, and the entry's first statement after naming its stage is that gate.
+# S2: every rent-root entry that could read the root's secrets, spawn a child or act on a backend is gated in source.
+# Each gate is one literal, and the entry's first statement after naming its stage is that gate. The readiness grant
+# opens only the read-only inspect entry; apply, backend migration and the backend-only plan stay literal False.
 ROOT_SOURCE_GATES = {
     "ROOT_INSPECT_SOURCE_ACTIVE": "def rent_root_inspect(",
     "ROOT_APPLY_SOURCE_ACTIVE": "def rent_root(",
     "ROOT_MIGRATE_SOURCE_ACTIVE": "def rent_root_migrate(",
     "ROOT_PLAN_SOURCE_ACTIVE": "def rent_root_plan(",
 }
+ROOT_OPEN_GATES = frozenset({"ROOT_INSPECT_SOURCE_ACTIVE"})
 
 
 def check_root_source_gates(source: str) -> None:
     for gate, entry in ROOT_SOURCE_GATES.items():
-        require(source.count(f"\n{gate} = False\n") == 1 and source.count(f"{gate} =") == 1,
-                f"{gate} must be one literal source-hard-inactive gate")
+        literal, meaning = ("True", "readiness-open") if gate in ROOT_OPEN_GATES else ("False", "source-hard-inactive")
+        require(source.count(f"\n{gate} = {literal}\n") == 1 and source.count(f"{gate} =") == 1,
+                f"{gate} must be one literal {meaning} gate")
         require(source.count(entry) == 1, f"rent-root entry missing: {entry}")
         body = source[source.find(entry):]
         body = body[:body.find("\ndef ", 1)]

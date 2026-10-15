@@ -433,23 +433,35 @@ nix build .#check-age --no-update-lock-file                             # check-
 
 The repository oracle calculates accepted structure and state. Its tests deliberately create invalid states and require RED rather than repeating only happy-path execution.
 
-### GitHub-ref transition: S2 SOURCE only (not activated)
+### GitHub-ref transition: inspect only (caller-gated)
 
-The existing `dev.rent-root` effect workflow is **source-hard-inactive at its job
+The `dev.rent-root` apply/handoff job stays **source-hard-inactive at its job
 admission guard** (`false && roccho-org/envs && proposals`), before any
-Environment secret, artifact/child, old S3/Cloudflare inspect, native apply,
-ciphertext write or Git/PR handoff. All other five effect workflows and the
-independent R2 state proof retain their prior source and ownership.
+Environment secret, artifact/child, native apply, ciphertext write or Git/PR
+handoff. All other five effect workflows and the independent R2 state proof
+retain their prior source and ownership.
 
-The `envs-effect rent-root-inspect` entry has a bounded, read-only
-implementation for the **future** approved I/B/K/G process: old R2 S3
-state/lock HEAD observations, native encrypted state pull and Cloudflare
-GET-only finite page inventory, returning public counts but **NOT_PROVEN**
-world/state equivalence. It currently refuses at `source_guard` before
-looking at any secret or spawning any child. CI simulates the read path with
-fixture tools; it never performs real inspection. No key/ref/backend migration,
-activation, provider apply, transport or credential change is authorized by
-this source.
+A separate `inspect` job in the same workflow runs the bounded, read-only
+`envs-effect rent-root-inspect` entry, and only when its caller gate holds before
+the Environment: repository `roccho-org/envs` (id 1391871347), ref
+`refs/heads/proposals`, a `workflow_dispatch` whose `expected_source_sha` input
+equals the dispatched SHA, the first run attempt, and actor and triggering actor
+`roccho-dev` (id 40359643). Its job permissions are repository read only. The
+source cannot bound how often it is dispatched: one dispatch per explicit
+operator grant is an operator rule, not something this source enforces.
+
+The entry classifies the old R2 S3 state and its lock PRESENT/ABSENT from HEAD
+observations, pulls the native encrypted state into memory only when it is
+present and unlocked, and counts the Cloudflare world with GET-only finite pages;
+an unanswerable read is RED at its stage. Its receipt carries that
+classification, the state's lineage and serial and the counts, with
+**NOT_PROVEN** world/state equivalence. The runner prints each step's env in the
+public job log: the four Secrets are masked there, while the nine non-sensitive
+configuration variables appear in plain text. The entry itself prints only the
+closed receipt, or a closed failure kind and stage. CI simulates the read path
+with fixture tools; it never performs real inspection. No key/ref/backend
+migration, provider apply, transport or credential change is authorized by this
+source.
 
 The effect toolchain carries the same pinned upstream `terraform-backend-git`
 v0.1.12 release binary as windows `infra/git-state` (manifest tool
@@ -469,16 +481,16 @@ HTTPS authentication requires beside a token.
 The rent-root flow above, with `-backend-config` bucket and key, is the
 **former R2 S3 era**: that apply (`rent-root`) is now closed in source.
 
-Two future entries are composed but closed in source, like inspect:
+Two future entries are composed but closed in source:
 `envs-effect rent-root-migrate` (standard `tofu init -migrate-state` from the
 former S3 backend, read through a source-declared legacy root, onto the empty
 GitHub ref, holding both locks; it requires the same lineage and resources and
 at most one serial step, and retains the former object) and
 `envs-effect rent-root-plan` (the unchanged root planned against the existing
 GitHub-ref state must be empty; any change refuses, nothing is applied or
-saved). `rent-root`, `rent-root-inspect`, `rent-root-migrate` and
-`rent-root-plan` each refuse at `source_guard` before any contract, tool, secret
-or child. No workflow selects migrate or plan yet; activation, real transport,
+saved). `rent-root`, `rent-root-migrate` and `rent-root-plan` each refuse at
+`source_guard` before any contract, tool, secret or child.
+No workflow selects migrate or plan yet; activation, real transport,
 custody and every live effect need their own later phase grants.
 
 ## Family calendar Cloudflare Pages (bounded exception)

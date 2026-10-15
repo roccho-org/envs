@@ -61,10 +61,9 @@ RETIRED_ENVIRONMENTS = ("dev-rent-tunnel", "dev-rent-client", "dev-rent-access-p
 ROOT_SECRETS = ("RENT_CLOUDFLARE_API_TOKEN", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "RENT_STATE_PASSPHRASE")
 # One key provider and method name for the state's life (a rotation would add a new name with this one as fallback).
 ROOT_KEY_NAME = "k0"
-# S2 registers a real read-only inspect implementation, but makes live admission
-# impossible from this SOURCE commit. A separately reviewed readiness source
-# grant is required before any caller may read Environment secrets or spawn.
-ROOT_INSPECT_SOURCE_ACTIVE = False
+# The reviewed readiness source grant opens only the read-only inspect entry; its workflow job admits one dispatch by
+# the declared caller on the accepted canonical SHA. Apply, backend migration and the backend-only plan stay closed.
+ROOT_INSPECT_SOURCE_ACTIVE = True
 ROOT_INSPECT_RESOURCE_TYPES = frozenset({
     "cloudflare_zero_trust_tunnel_cloudflared",
     "cloudflare_zero_trust_tunnel_cloudflared_config",
@@ -74,6 +73,8 @@ ROOT_INSPECT_RESOURCE_TYPES = frozenset({
     "cloudflare_zero_trust_access_application",
 })
 ROOT_INSPECT_STATE_LIMIT = 1048576
+# OpenTofu writes a state lineage as a UUID; the inspect receipt carries it only in that closed shape.
+ROOT_STATE_LINEAGE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 # S2 moves the declared root to the standard HTTP backend, served for one operation by a transient loopback
 # terraform-backend-git child that keeps the state on the GitHub ref below. No source path may plan, apply or create
 # against that backend before a separately reviewed activation grant: apply, backend migration and the backend-only
@@ -1599,19 +1600,24 @@ def rent_root_inspect(root: Path = ROOT, *, runner: Runner = default_runner,
     require(key.startswith("state/") and key.endswith(".tfstate") and ".." not in key,
             "rent-root inspect requires the declared old-S3 state key")
 
+    # The old S3 state and its native lock are each classified PRESENT or ABSENT; only an unanswerable HEAD is
+    # UNKNOWN and stops red here. An absent state or a held lock is reported, and the state is then not read.
     progress["stage"] = "s3_head"
-    require(rent_inspect_head(tools, inputs, runner, key) == "PRESENT",
-            "rent-root old-S3 state missing or UNKNOWN")
-    require(rent_inspect_head(tools, inputs, runner, key + ".tflock") == "ABSENT",
-            "rent-root old-S3 lock present or UNKNOWN")
-
-    # Existing RootRunner/standard OpenTofu, in an owner-only scratch: init
-    # configures ONLY old S3 and state pull reads it; no plan/apply/import/write.
-    # State plaintext remains in process memory, never a file, log or receipt.
-    progress["stage"] = "state_read"
-    home, work = root_scratch("envs-rent-inspect-")
-    state = legacy_root_state(tools, inputs, work, legacy_root_env(tools, inputs, home), runner)
-    managed = [item for item in state["resources"] if item.get("mode") == "managed"]
+    old_state = rent_inspect_head(tools, inputs, runner, key)
+    old_lock = rent_inspect_head(tools, inputs, runner, key + ".tflock")
+    identity: dict[str, Any] = {"old_state_read": "NOT_READ", "lineage": None, "serial": None,
+                                "managed_root_resources": None}
+    if old_state == "PRESENT" and old_lock == "ABSENT":
+        # Existing RootRunner/standard OpenTofu, in an owner-only scratch: init
+        # configures ONLY old S3 and state pull reads it; no plan/apply/import/write.
+        # State plaintext remains in process memory; the receipt carries only its identity.
+        progress["stage"] = "state_read"
+        home, work = root_scratch("envs-rent-inspect-")
+        state = legacy_root_state(tools, inputs, work, legacy_root_env(tools, inputs, home), runner)
+        require(ROOT_STATE_LINEAGE.fullmatch(state["lineage"]) is not None, "rent-root state lineage UNKNOWN")
+        managed = [item for item in state["resources"] if item.get("mode") == "managed"]
+        identity = {"old_state_read": "ENCRYPTED_READ", "lineage": state["lineage"], "serial": state["serial"],
+                    "managed_root_resources": len(managed)}
 
     # Cloudflare GET-only bounded pages. Counts intentionally do not claim
     # object identity, equality to state, complete Q or an accepted delta.
@@ -1637,8 +1643,7 @@ def rent_root_inspect(root: Path = ROOT, *, runner: Runner = default_runner,
     progress["stage"] = "complete"
     return {
         "kind": "envs.rentRootInspect.v1", "status": "BOUNDED_READ_ONLY",
-        "old_state": "PRESENT_ENCRYPTED_READ", "old_lock": "ABSENT",
-        "managed_root_resources": len(managed), "cloudflare_counts": counts,
+        "old_state": old_state, "old_lock": old_lock, **identity, "cloudflare_counts": counts,
         "world_state_equivalence": "NOT_PROVEN", "provider_delta_F": "NOT_PROVEN",
         "native_migration": "NOT_RUN", "effect": "NONE",
     }
