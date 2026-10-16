@@ -67,6 +67,9 @@ jobs:
       - name: Test frozen v6 F1/F2 actual CI attempts and false-GREEN refusals (offline)
         run: python3 checks/test_host_tool_v6_source_gate.py
 
+      - name: Test latest noncircular v6 P1/P2/P3 and all SOURCE review refusals (offline)
+        run: python3 checks/test_host_tool_v6_latest_gate.py
+
       - name: Test cross-repo public SOURCE provenance refusal (offline)
         run: python3 checks/test_host_tool_source_provenance.py
 
@@ -788,6 +791,15 @@ jobs:
 
       - name: Test v6 F1/F2 CI-attempt and binding negative cases at exact head
         run: python3 checks/test_host_tool_v6_source_gate.py
+
+      - name: Test latest P1/P2/P3 SOURCE identity and R/CI refusals at exact head
+        run: python3 checks/test_host_tool_v6_latest_gate.py
+
+      # Noncircular P4: read ONLY older completed SOURCE runs and fixed R reviews.
+      # No new token, Target route, actor, workflow permission or deployment action.
+      - name: Verify latest P1/P2/P3 and prior v6 public SOURCE evidence
+        if: github.event_name == 'pull_request' && github.head_ref == 'codex/host-common-v6-current-src4-20261016'
+        run: python3 checks/host_tool_v6_latest_gate.py --snapshot checks/fixtures/host-tool-v6-latest-src4.json
 
       # SOURCE-only public GET; current PR CI never proves itself.
       # Only this isolated unadmitted v6 verification branch performs live reads.
