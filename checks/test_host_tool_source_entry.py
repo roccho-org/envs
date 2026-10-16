@@ -225,7 +225,7 @@ class EntryCases(unittest.TestCase):
         self.assertEqual(self.port.records, 1)
         copied = self.call("ROLLBACK", overrides={"previous": confirmed,
                                                   "receipt": copy.deepcopy(issued)})
-        self.assertEqual(copied["stage"], "SYNTHETIC_EFFECT_UNKNOWN_NO_REPLAY")
+        self.assertEqual(copied["stage"], "REFUSED_PORT_PRECONDITION")
         self.assertEqual(self.port.host.observe(), ("SELECTED", STORE0))
         oldq = self.call("ROLLBACK", overrides={"previous": confirmed, "receipt": issued,
                                                 "current_q": "ci-old"})
