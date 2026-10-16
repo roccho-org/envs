@@ -230,7 +230,10 @@ def source_step(
                 "missing exact test receipt")
         try:
             if action == "RECORD":
-                output = port.record(receipt)
+                # The injected SOURCE issuer must attest the revision that
+                # actually minted this receipt. Caller-provided previous.q
+                # and the synthetically current D are not issuer evidence.
+                output = port.record(receipt, desired["revision"])
             else:
                 output = port.rollback(receipt, request["attempt_ref"], desired)
         except ValueError:
