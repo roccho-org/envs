@@ -52,7 +52,8 @@ class Port:
                                             crash_after_selector=self.crash)
 
     def record(self, receipt, current_revision):
-        self.records += 1  # attempted Port calls, NEVER a confirmed record/effect
+        # records counts only completed synthetic RECORD candidates; a refused
+        # Port precondition must have ZERO record effect as well as ZERO SELECT.
         if type(receipt) is not dict:
             raise ValueError("not a returned SOURCE receipt")
         attempt = receipt.get("attempt")
@@ -67,6 +68,7 @@ class Port:
                 or self.host.number != issued[2]
                 or self.host.observe() != ("SELECTED", issued[1]["selected"])):
             raise ValueError("not the current Port-issued SOURCE receipt")
+        self.records += 1
         return "SYNTHETIC_RECORD_ONLY"
 
     def rollback(self, receipt, attempt, desired):
@@ -239,7 +241,7 @@ class EntryCases(unittest.TestCase):
         result = self.call("RECORD", overrides={
             "previous": claimed, "receipt": old_receipt})
         self.assertEqual(result["stage"], "REFUSED_PORT_PRECONDITION")
-        self.assertEqual(self.port.records, 1)
+        self.assertEqual(self.port.records, 0)
         self.assertEqual(self.port.changes, 0)
         self.assertIsNone(result["issued_receipt"])
         self.assertEqual((self.port.host.effect_count, self.port.host.number,
@@ -297,6 +299,7 @@ class EntryCases(unittest.TestCase):
         refused = self.call("RECORD", overrides={
             "previous": claimed, "receipt": stale})
         self.assertEqual(refused["stage"], "REFUSED_PORT_PRECONDITION")
+        self.assertEqual(self.port.records, 0)  # no accepted RECORD effect
         self.assertIsNone(refused["issued_receipt"])
         self.assertEqual((self.port.host.effect_count, self.port.host.number,
                           self.port.host.observe(), self.port.host.snapshot(),
@@ -311,6 +314,7 @@ class EntryCases(unittest.TestCase):
         current = self.call("RECORD", request=current_request, overrides={
             "authority": current_auth, "previous": claimed, "receipt": latest})
         self.assertEqual(current["stage"], "SYNTHETIC_RECORD_ONLY_CANDIDATE")
+        self.assertEqual(self.port.records, 1)
         self.assertEqual((self.port.host.effect_count, self.port.host.number,
                           self.port.host.observe(), self.port.host.snapshot(),
                           self.port.host._issued, self.port.changes, self.port.rollbacks),
