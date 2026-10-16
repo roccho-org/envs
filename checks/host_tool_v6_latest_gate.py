@@ -73,6 +73,10 @@ P1_SOURCE_BLOB = "758a0b8954719994f03c01c459f68e0ea9bf59e3"
 P2_RECEIVER_BLOB = "b60326684befd94bbc91bdc34d5ebaf7988d7fce"
 P3_CALLER_BLOB = "46b9487ccb80a5f5c08af22ddc7b29e96e3eb873"
 P3_NATIVE_BLOB = "714ee2b54fe43c542ea9213b050656cd18fc99ed"
+# X #92 independently reviewed this exact full Markdown SOURCE mapping blob.
+# Pin the *whole* input, not just "UNPROVEN" labels or its 64 row IDs.
+# Any future status/provenance modification requires a new SOURCE head + R review.
+X92_COVERAGE_BLOB = "78e716afe27c3849078ab12d0b8ac3a6752917cf"
 
 # Full reviewed SOURCE identities are immutable for these historical roles.
 # They intentionally reuse prior R acceptance instead of spending further
@@ -163,6 +167,11 @@ def verify_latest(snapshot: dict[str, Any], frozen: dict[str, Any],
         require(all(roles[role][field] == value
                     for field, value in expected.items()),
                 f"{role}: reviewed immutable prior SOURCE identity changed")
+    # R2-new: fail closed *before public GET* for any change to X #92's
+    # independently reviewed complete mapping (forged SUCCESS, missing SOURCE
+    # labels, altered S4/A1/S2 classifications, even with 64 IDs/UNPROVEN).
+    require(type(coverage) is str and git_blob(coverage) == X92_COVERAGE_BLOB,
+            "P4 v6 64-case frozen X SOURCE coverage blob changed")
     require(roles["F2"]["run_attempt"] == 2
             and all(roles[r]["run_attempt"] == 1 for r in roles if r != "F2")
             and roles["P2"]["base"] == roles["F2"]["head"]
