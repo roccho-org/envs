@@ -74,6 +74,27 @@ P2_RECEIVER_BLOB = "b60326684befd94bbc91bdc34d5ebaf7988d7fce"
 P3_CALLER_BLOB = "46b9487ccb80a5f5c08af22ddc7b29e96e3eb873"
 P3_NATIVE_BLOB = "714ee2b54fe43c542ea9213b050656cd18fc99ed"
 
+# Full reviewed SOURCE identities are immutable for these historical roles.
+# They intentionally reuse prior R acceptance instead of spending further
+# unauthenticated GitHub REST requests. PR/run/review are checked separately.
+HISTORICAL_PINS = {
+    "X": {
+        "head": "9caeed95041f2fb6014da364656383b83882897a",
+        "tree": "79d1b036d8069393c90ba6f9572fefbfec3666f1",
+        "base": "5961d48cced70b31e734e69ce5001b872c9c33ad",
+    },
+    "BOUND": {
+        "head": "db66a9357d85325e8680bf6700f64078f5bb5990",
+        "tree": "b94a856fa30388d5e1c412cd6fab734da9be075b",
+        "base": "5961d48cced70b31e734e69ce5001b872c9c33ad",
+    },
+    "SRC3": {
+        "head": "1d098d1951f8c9b97e716652d8ffd122ea565bff",
+        "tree": "df9e2047ea3769281044d3bd6024b8cdb972c267",
+        "base": "4bfa37a99d82eac940b1e6bedac16ec16e0a32b8",
+    },
+}
+
 
 def real_file(repo: str, head: str, path: str,
               _get: Callable[[str], dict[str, Any]],
@@ -135,6 +156,13 @@ def verify_latest(snapshot: dict[str, Any], frozen: dict[str, Any],
         require(type(old) is dict and all(row[key] == old[key] for key in
                 ("pr", "head", "tree", "base", "run_id", "run_attempt")),
                 f"{role}: frozen reviewed F1/F2/relation identity changed")
+    # R1: Old X/BOUND/SRC3 were R-reviewed at these exact head/tree/base
+    # triples. Reject a forged *valid-looking* 40-hex tree or base BEFORE
+    # performing public GETs or constructing a SOURCE-success response.
+    for role, expected in HISTORICAL_PINS.items():
+        require(all(roles[role][field] == value
+                    for field, value in expected.items()),
+                f"{role}: reviewed immutable prior SOURCE identity changed")
     require(roles["F2"]["run_attempt"] == 2
             and all(roles[r]["run_attempt"] == 1 for r in roles if r != "F2")
             and roles["P2"]["base"] == roles["F2"]["head"]
@@ -276,7 +304,8 @@ def verify_latest(snapshot: dict[str, Any], frozen: dict[str, Any],
             and '"P2_ACTUAL": port, "P2_RECEIVER": receiver' in native,
             "P4 actual P1/P2/P3 SOURCE not bound to the same receiver/Port")
 
-    ids = set(re.findall(r"(?m)^\| (V\d{2}|[SBGHA]\d|L\d{2}) \|", coverage))
+    case_lines = [line for line in coverage.splitlines() if V6_CASE.match(line)]
+    ids = [V6_CASE.match(line).group(1) for line in case_lines]
     required_ids = ({f"V{i:02}" for i in range(1, 15)}
                     | {f"S{i}" for i in range(1, 5)}
                     | {f"B{i}" for i in range(1, 6)}
@@ -284,10 +313,23 @@ def verify_latest(snapshot: dict[str, Any], frozen: dict[str, Any],
                     | {f"H{i}" for i in range(1, 5)}
                     | {f"A{i}" for i in range(1, 4)}
                     | {f"L{i:02}" for i in range(1, 29)})
-    require(ids == required_ids and len(ids) == 64
+    # R2: Checking a set alone silently permits 65 rows with one duplicated
+    # ID. Likewise, one "UNPROVEN" elsewhere in the document cannot protect
+    # V11 (or any other row) after a single-row false Target-success edit.
+    def explicitly_unproven(line: str) -> bool:
+        columns = line.split("|")
+        if len(columns) != 7:
+            return False
+        labels = [label.strip() for label in columns[5].split(";")]
+        return (labels.count("REAL_TARGET_UNPROVEN") == 1
+                and "REAL_TARGET_PROVEN" not in line
+                and line.count("REAL_TARGET_UNPROVEN") == 1)
+
+    require(len(case_lines) == 64 and len(set(ids)) == 64
+            and set(ids) == required_ids
+            and all(explicitly_unproven(line) for line in case_lines)
             and coverage.count("| S2 |") == 1
             and "SOURCE-proven:R" in coverage
-            and "REAL_TARGET_UNPROVEN" in coverage
             and "D_ADMITTED=false" in coverage,
             "P4 v6 64-case SOURCE versus REAL_TARGET_UNPROVEN evidence map missing")
 
