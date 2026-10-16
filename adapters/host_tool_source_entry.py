@@ -14,15 +14,18 @@ from host_tool_continuation import evaluate
 from host_tool_guard import judge, STORE
 
 REQUEST_KEYS = {"kind", "action", "target_ref", "host_ref", "unit_ref", "scope",
-                "actor_ref", "work_ref", "attempt_ref", "proposed_q",
+                "route_ref", "actor_ref", "work_ref", "attempt_ref", "proposed_q",
                 "requested_store"}
-AUTH_KEYS = {"kind", "target_ref", "host_ref", "unit_ref", "scope",
+AUTH_KEYS = {"kind", "target_ref", "host_ref", "unit_ref", "scope", "route_ref",
              "actor_ref", "work_ref", "attempt_ref", "read", "change",
-             "quiet", "single_writer", "recovery", "route"}
+             "record", "rollback", "quiet", "single_writer", "recovery", "route"}
+GRANT_KEYS = {"kind", "target_ref", "host_ref", "unit_ref", "scope", "route_ref",
+              "actor_ref", "work_ref", "attempt_ref", "step", "permit",
+              "issuer_fixture"}
 O_KEYS = {"kind", "target_ref", "host_ref", "unit_ref", "scope", "state",
           "store_path", "identity", "fresh", "closure_valid"}
 STEPS = {"READ": "READ", "CHANGE": "TOOL_CHANGE",
-         "RECORD": "RECORD", "ROLLBACK": "TOOL_CHANGE"}
+         "RECORD": "RECORD", "ROLLBACK": "ROLLBACK"}
 
 
 def verdict(stage: str, *, observation=None, receipt=None) -> dict[str, Any]:
@@ -35,8 +38,21 @@ def verdict(stage: str, *, observation=None, receipt=None) -> dict[str, Any]:
     }
 
 
+def _stage_grant(grant: Any, request: dict[str, Any], step: str) -> None:
+    """Independent CI-only issuer fixture: no real Target permit is granted."""
+    g = exact_object(grant, GRANT_KEYS, "SOURCE stage grant")
+    require(g["kind"] == "envs.syntheticStageGrant.v0"
+            and g["step"] == step and type(g["permit"]) is bool
+            and g["permit"] is True
+            and g["issuer_fixture"] == "ci-independent-source-issuer"
+            and all(g[key] == request[key] for key in
+                    ("target_ref", "host_ref", "unit_ref", "scope", "route_ref",
+                     "actor_ref", "work_ref", "attempt_ref")),
+            "missing or foreign stage-specific SOURCE permit")
+
+
 def _preflight(req: Any, binding: dict[str, Any], authority: Any,
-               read_facts: Any, port: Any) -> dict[str, Any]:
+               read_grant: Any, read_facts: Any, port: Any) -> dict[str, Any]:
     request = exact_object(req, REQUEST_KEYS, "SOURCE request")
     require(request["kind"] == "envs.syntheticHostSourceRequest.v0"
             and request["action"] in STEPS, "unsupported SOURCE action")
@@ -44,10 +60,10 @@ def _preflight(req: Any, binding: dict[str, Any], authority: Any,
         require(request[field] == binding[field], "foreign Host/Target/Unit/scope")
     require(request["proposed_q"] == binding["proposed_q"],
             "foreign or old PROPOSED q")
-    for field in ("actor_ref", "work_ref", "attempt_ref"):
+    for field in ("actor_ref", "work_ref", "attempt_ref", "route_ref"):
         require(type(request[field]) is str and request[field].startswith("ci-")
                 and 4 <= len(request[field]) <= 100,
-                "SOURCE subject is not an explicit ci-only identity")
+                "SOURCE subject and route must be explicit ci-only identities")
     # A selector path must never be inferred from the caller or accepted contract.
     if request["action"] == "READ":
         require(request["requested_store"] is None, "READ includes mutation material")
@@ -58,10 +74,11 @@ def _preflight(req: Any, binding: dict[str, Any], authority: Any,
     access = exact_object(authority, AUTH_KEYS, "SOURCE scoped authority")
     require(access["kind"] == "envs.syntheticScopedAuthority.v0"
             and all(access[key] == request[key] for key in
-                    ("target_ref", "host_ref", "unit_ref", "scope",
+                    ("target_ref", "host_ref", "unit_ref", "scope", "route_ref",
                      "actor_ref", "work_ref", "attempt_ref"))
             and all(type(access[key]) is bool for key in
-                    ("read", "change", "quiet", "single_writer", "recovery", "route")),
+                    ("read", "change", "record", "rollback",
+                     "quiet", "single_writer", "recovery", "route")),
             "SOURCE scoped authority absent or foreign")
     require(getattr(port, "kind", None) == "envs.syntheticDisposableTargetPort.v0"
             and getattr(port, "fixture_only", None) is True
@@ -69,6 +86,7 @@ def _preflight(req: Any, binding: dict[str, Any], authority: Any,
                     ("observe", "select", "record", "rollback")),
             "no explicitly injected disposable Target port")
     require(access["read"] and access["route"], "no scoped READ or route")
+    _stage_grant(read_grant, request, "READ")
     read = exact_object(read_facts, set(read_facts) if type(read_facts) is dict
                         else set(), "read facts")
     require(all(read.get(key) == request[key] for key in
@@ -114,6 +132,7 @@ def source_step(
     request: dict[str, Any], *, binding_source: dict[str, Any],
     proposals: list[dict[str, Any]], targets: list[dict[str, Any]],
     relation_project: Callable, authority: dict[str, Any] | None,
+    read_grant: dict[str, Any] | None, stage_grant: dict[str, Any] | None,
     read_facts: dict[str, Any] | None, change_facts: dict[str, Any] | None,
     current_q: str | None, desired: dict[str, Any] | None,
     previous: dict[str, Any] | None, port: Any, receipt: dict[str, Any] | None = None,
@@ -125,7 +144,7 @@ def source_step(
     """
     try:
         binding = bind(binding_source, proposals, targets, relation_project)
-        auth = _preflight(request, binding, authority, read_facts, port)
+        auth = _preflight(request, binding, authority, read_grant, read_facts, port)
         proposal = project(proposals, targets)[0]
         read_gate = judge(proposal, desired=None, authority={
             "kind": "envs.syntheticAuthority.v0",
@@ -143,8 +162,19 @@ def source_step(
             observation = _observation(port.observe(), request)
             return verdict("SYNTHETIC_READ_OBSERVED", observation=observation)
 
-        require(auth["change"] and auth["quiet"] and auth["single_writer"]
-                and auth["recovery"], "CHANGE/RECORD/ROLLBACK authority incomplete")
+        # Per-step grant is independent of StageFacts.step_authority and
+        # the other permissions; passing a different grant is never sufficient.
+        _stage_grant(stage_grant, request, STEPS[action])
+        if action == "CHANGE":
+            require(auth["change"] and auth["quiet"] and auth["single_writer"]
+                    and auth["recovery"], "TOOL_CHANGE-specific permit incomplete")
+        elif action == "RECORD":
+            # An already executed Tool may be recorded even after CHANGE/quiet
+            # rights lapse, but only with its own valid RECORD grant and receipt.
+            require(auth["record"], "RECORD-specific permit absent")
+        else:
+            require(auth["rollback"] and auth["quiet"] and auth["single_writer"]
+                    and auth["recovery"], "ROLLBACK-specific permit incomplete")
         require(type(desired) is dict and type(current_q) is str
                 and desired.get("target_ref") == binding["target_ref"]
                 and desired.get("proposed_q") == binding["proposed_q"]
