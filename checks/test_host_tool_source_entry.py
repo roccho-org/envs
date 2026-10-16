@@ -51,11 +51,14 @@ class Port:
         return self.host.native_set_fixture(store, attempt, desired_revision=rev,
                                             crash_after_selector=self.crash)
 
-    def record(self, receipt):
+    def record(self, receipt, current_revision):
         self.records += 1
         issued = self.host._issued.get(receipt.get("attempt"))
-        if not issued or issued[0] is not receipt or issued[1] != receipt:
-            raise ValueError("not a returned SOURCE receipt")
+        # The issuer-owned revision (issued[3]), not the caller's previous
+        # CONFIRMED/current-q assertion, must match this checked SOURCE D.
+        if (not issued or issued[0] is not receipt or issued[1] != receipt
+                or issued[3] != current_revision):
+            raise ValueError("not a returned SOURCE receipt for current q")
         return "SYNTHETIC_RECORD_ONLY"
 
     def rollback(self, receipt, attempt, desired):
@@ -212,6 +215,53 @@ class EntryCases(unittest.TestCase):
         self.assertEqual(self.call("READ", overrides={"previous": unknown,
                                                       "desired": None})["stage"],
                          "SYNTHETIC_READ_OBSERVED")
+
+    def test_record_refuses_genuine_receipt_issued_under_old_q(self):
+        # Fixed-R R1: O is selected T0 and previous claims the current q,
+        # but THIS SAME disposable issuer actually minted receipt under ci-old.
+        self.seed()
+        old_receipt = self.port.host.native_set_fixture(
+            STORE0, self.req["attempt_ref"], desired_revision="ci-old")
+        self.assertIs(self.port.host._issued[self.req["attempt_ref"]][0], old_receipt)
+        self.assertEqual(self.port.host._issued[self.req["attempt_ref"]][3], "ci-old")
+        self.assertNotEqual("ci-old", self.q)
+        claimed = dict(self.e, state="CONFIRMED", revision=self.q, store_path=STORE0)
+        before = (self.port.host.effect_count, self.port.host.number,
+                  self.port.host.observe(), self.port.host.snapshot())
+        result = self.call("RECORD", overrides={
+            "previous": claimed, "receipt": old_receipt})
+        self.assertEqual(result["stage"], "REFUSED_PORT_PRECONDITION")
+        self.assertEqual(self.port.records, 1)
+        self.assertEqual(self.port.changes, 0)
+        self.assertIsNone(result["issued_receipt"])
+        self.assertEqual((self.port.host.effect_count, self.port.host.number,
+                          self.port.host.observe(), self.port.host.snapshot()), before)
+        self.inert(result)
+
+    def test_record_rejects_copied_or_forged_receipt_but_allows_current_issuer_q(self):
+        self.seed()
+        changed = self.call("CHANGE")
+        self.assertEqual(changed["stage"], "SYNTHETIC_READBACK_CANDIDATE_NOT_SUCCESS")
+        issued = changed["issued_receipt"]
+        self.assertEqual(self.port.host._issued[issued["attempt"]][3], self.q)
+        claimed = dict(self.e, state="CONFIRMED", revision=self.q, store_path=STORE0)
+        before = (self.port.host.effect_count, self.port.host.number,
+                  self.port.host.observe(), self.port.host.snapshot())
+        for forged in (copy.deepcopy(issued),
+                       dict(issued, preimage=None),
+                       dict(issued, attempt="ci-not-issued")):
+            result = self.call("RECORD", overrides={
+                "previous": claimed, "receipt": forged})
+            self.assertIn(result["stage"],
+                          {"REFUSED_SOURCE_OR_AUTHORITY", "REFUSED_PORT_PRECONDITION"})
+            self.assertEqual((self.port.host.effect_count, self.port.host.number,
+                              self.port.host.observe(), self.port.host.snapshot()), before)
+            self.inert(result)
+        valid = self.call("RECORD", overrides={"previous": claimed, "receipt": issued})
+        self.assertEqual(valid["stage"], "SYNTHETIC_RECORD_ONLY_CANDIDATE")
+        self.assertEqual((self.port.host.effect_count, self.port.host.number,
+                          self.port.host.observe(), self.port.host.snapshot()), before)
+        self.inert(valid)
 
     def test_record_only_and_issued_rollback_are_separate(self):
         self.seed()
