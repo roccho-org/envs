@@ -16,6 +16,7 @@ from host_tool_v6_source_gate import git_blob  # noqa: E402
 from host_tool_v6_latest_gate import (OWNER, REQUIRED, REVIEW, SKIPPED, STEPS,
                                       P1_SOURCE_BLOB, P2_RECEIVER_BLOB,
                                       P3_CALLER_BLOB, P3_NATIVE_BLOB,
+                                      V6_CASE, X92_COVERAGE_BLOB,
                                       verify_latest)  # noqa: E402
 from test_host_tool_v6_source_gate import records, files  # noqa: E402
 
@@ -248,6 +249,49 @@ class LatestP4Cases(unittest.TestCase):
                             "historical identity should refuse before any public GET")):
                         self.refuse(f"{role}: reviewed immutable prior SOURCE identity changed")
                     row[field] = old
+
+    def test_R2_new_V11_extra_REAL_TARGET_SUCCESS_refuses_before_public_GET(self):
+        # Keep the original 64 IDs and UNPROVEN status, while forging success
+        # with a second, previously unrecognized spelling.
+        original = self.coverage
+        self.assertEqual(git_blob(original), X92_COVERAGE_BLOB)
+        row = next(line for line in original.splitlines()
+                   if line.startswith("| V11 |"))
+        columns = row.split("|")
+        self.assertEqual(len(columns), 7)
+        self.assertEqual(columns[5].count("REAL_TARGET_UNPROVEN"), 1)
+        columns[5] = columns[5].rstrip() + " ; REAL_TARGET_SUCCESS "
+        self.coverage = original.replace(row, "|".join(columns))
+        self.assertEqual(len(V6_CASE.findall(self.coverage)), 64)
+        self.assertEqual(self.coverage.count("| S2 |"), 1)
+        with patch.object(self, "get", side_effect=AssertionError(
+                "forged coverage must be refused before public GET")):
+            self.refuse("P4 v6 64-case frozen X SOURCE coverage blob changed")
+        self.coverage = original
+
+    def test_R2_new_63_missing_SOURCE_proven_classifications_refuse_before_GET(self):
+        # S2 retains SOURCE-proven:R and every case retains UNPROVEN, but
+        # all other 63 SOURCE evidence classifications were silently removed.
+        original = self.coverage
+        self.assertEqual(git_blob(original), X92_COVERAGE_BLOB)
+        altered, removed = [], 0
+        for line in original.splitlines():
+            if V6_CASE.match(line) and not line.startswith("| S2 |"):
+                cells = line.split("|")
+                self.assertEqual(len(cells), 7)
+                self.assertIn("REAL_TARGET_UNPROVEN", cells[5])
+                cells[5] = " SYNTHETIC ; REAL_TARGET_UNPROVEN "
+                line = "|".join(cells)
+                removed += 1
+            altered.append(line)
+        self.assertEqual(removed, 63)
+        self.coverage = "\n".join(altered) + ("\n" if original.endswith("\n") else "")
+        self.assertEqual(len(V6_CASE.findall(self.coverage)), 64)
+        self.assertIn("SOURCE-proven:R", self.coverage)
+        with patch.object(self, "get", side_effect=AssertionError(
+                "missing SOURCE labels must be refused before public GET")):
+            self.refuse("P4 v6 64-case frozen X SOURCE coverage blob changed")
+        self.coverage = original
 
     def test_R2_single_V11_false_target_success_and_duplicate_case_refuse(self):
         original = self.coverage
