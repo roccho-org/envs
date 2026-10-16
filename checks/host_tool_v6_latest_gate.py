@@ -8,6 +8,7 @@ no Target/actor rights, real D admission, product effect, merge or deployment.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -18,7 +19,7 @@ from typing import Any, Callable
 
 from host_tool_source_provenance import (API, ProvenanceError, fields, public_get,
                                          require, sha)
-from host_tool_v6_source_gate import git_blob, verify as verify_frozen
+from host_tool_v6_source_gate import git_blob
 
 KIND = "envs.hostCommonV6LatestSRC4Candidate.v0"
 REQUIRED = {
@@ -147,17 +148,49 @@ def verify_latest(snapshot: dict[str, Any], frozen: dict[str, Any],
             seen[url] = get(url)
         return seen[url]
 
-    # Reuse the already independent-R accepted frozen F1/F2/Relation *code*,
-    # including actual public blob, immutable proposed q, failed-attempt history.
-    previous = verify_frozen(frozen, cached)
-    require(previous["stage"] == "V6_F1_F2_DISPOSABLE_SOURCE_EVIDENCE_VERIFIED"
-            and previous["admission"] == "NOT_ADMITTED"
-            and previous["effect"] == "FORBIDDEN",
-            "old immutable F1/F2 proof not accepted")
+    # The previous frozen F1/F2/X/Relation proof already passed exact CI and
+    # independent R. Read their exact public run + R records; do NOT repeat
+    # dozens of unauthenticated REST calls until a rate limit masks P1/P2/P3.
+    # The PROPOSED q/blob is still locally recomputed from pinned SOURCE bytes.
+    f1_path = Path("checks/fixtures/host-tool-functional-binding.json")
+    f1_text = f1_path.read_text(encoding="utf-8")
+    require(git_blob(f1_text) == frozen["binding"]["blob"],
+            "frozen approved SOURCE binding Git blob changed")
+    binding = json.loads(f1_text)
+    require(type(binding) is dict and binding.get("kind")
+            == "envs.hostToolFunctionalBindingProposal.v0"
+            and binding.get("admission") == "NOT_ADMITTED"
+            and binding.get("target_ref") == "pc7337-rent"
+            and binding.get("host_ref") == "ci-host-rent-1"
+            and binding.get("unit_ref") == "ci-rent-oci-unit-1"
+            and binding.get("material") == {
+                "repository": "roccho-dev/windows",
+                "source_commit": frozen["producer"]["head"],
+                "flake_output": "packages.x86_64-linux.rent-tool-profile",
+            }, "frozen F1 proposed identity/Tool changed")
+    canon = json.dumps({"target_ref": binding["target_ref"],
+                        "material": binding["material"]},
+                       sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    proposed_q = "sha256:" + hashlib.sha256(canon.encode()).hexdigest()
+    require(binding.get("proposed_q") == proposed_q,
+            "frozen q is not the pinned material digest")
 
     for role, row in roles.items():
         root = f"{API}/repos/{row['repository']}"
-        if role not in ("F1", "F2", "RELATION"):
+        if role not in ("P1", "P2", "P3"):
+            # Earlier R-reviewed F1/F2/X/Bound/SRC3/relation: their immutable
+            # full CI and counterexamples were independently attested already.
+            # Reconfirm the exact terminal run and its matching R below, but
+            # do NOT claim a fresh live step-level recheck for these six roles.
+            old_run = cached(f"{root}/actions/runs/{row['run_id']}")
+            require(old_run.get("id") == row["run_id"]
+                    and old_run.get("head_sha") == row["head"]
+                    and old_run.get("run_attempt") == row["run_attempt"]
+                    and old_run.get("event") == "pull_request"
+                    and old_run.get("status") == "completed"
+                    and old_run.get("conclusion") == "success",
+                    f"{role}: previously R-reviewed SOURCE run no longer terminal")
+        else:
             pr = cached(f"{root}/pulls/{row['pr']}")
             require(pr.get("number") == row["pr"] and pr.get("state") == "open"
                     and pr.get("draft") is True and pr.get("merged") is False
@@ -266,8 +299,9 @@ def verify_latest(snapshot: dict[str, Any], frozen: dict[str, Any],
                      "head": row["head"], "tree": row["tree"],
                      "run_id": row["run_id"], "review_id": row["review_id"]}
                     for role, row in sorted(roles.items())],
-        "f1_proposed_q": previous["proposed_q"],
-        "source_steps_and_reviews_verified": True,
+        "f1_proposed_q": proposed_q,
+        "latest_P1_P2_P3_steps_and_all_R_records_verified": True,
+        "prior_six_step_details": "PREVIOUS_INDEPENDENT_R_ACCEPTANCE_NOT_REATTESTED",
         "v6_64_case_structure": "SOURCE_REFERENCED_REAL_TARGET_UNPROVEN",
         "admission": "NOT_ADMITTED", "accepted_q": None,
         "target_observation": "NOT_READ", "target_noop": "UNPROVEN",
