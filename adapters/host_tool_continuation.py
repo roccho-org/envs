@@ -11,7 +11,8 @@ from typing import Any
 from host_tool_selection import ProposalError, exact_object, require
 
 KIND = "envs.syntheticHostStep.v0"
-STAGES = ("READ", "SOURCE_FIX", "TOOL_CHANGE", "RECORD", "ROUTE_RECOVERY")
+STAGES = ("READ", "SOURCE_FIX", "TOOL_CHANGE", "RECORD", "ROLLBACK",
+          "ROUTE_RECOVERY")
 FACT_FIELDS = {
     "kind", "target_ref", "actor_ref", "work_ref", "attempt_ref", "step",
     "identity_current", "step_authority", "route_usable", "safe_boundary",
@@ -83,6 +84,13 @@ def evaluate(facts: dict[str, Any]) -> dict[str, Any]:
         required += ("affected_effects_resolved", "result_confirmed",
                      "inputs_current", "stage_checks", "no_implicit_replay")
         # No requirement that the Tool be changed again: only record missing E.
+    elif f["step"] == "ROLLBACK":
+        # Distinct permit is checked by the caller; here validate post-read
+        # stage facts. A valid receipt/preimage is checked by the receiver.
+        required += ("affected_effects_resolved", "inputs_current",
+                     "stage_checks", "desired_current", "observation_fresh",
+                     "tool_compatible", "one_writer", "quiet_held",
+                     "recovery_available", "no_implicit_replay")
     elif f["step"] == "ROUTE_RECOVERY":
         required += ("affected_effects_resolved", "inputs_current",
                      "stage_checks", "one_writer", "no_implicit_replay")
@@ -95,7 +103,7 @@ def evaluate(facts: dict[str, Any]) -> dict[str, Any]:
             failed.append(key)
     # Unknown write result is not an input to READ/SOURCE_FIX; it blocks
     # potentially equivalent mutations while they remain unresolved.
-    if f["step"] in ("TOOL_CHANGE", "RECORD", "ROUTE_RECOVERY"):
+    if f["step"] in ("TOOL_CHANGE", "RECORD", "ROLLBACK", "ROUTE_RECOVERY"):
         if f["write_unresolved"] is not False:
             failed.append("write_unresolved")
     ready = not failed
