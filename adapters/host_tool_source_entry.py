@@ -200,11 +200,14 @@ def source_step(
                                      desired["revision"])
             except Exception:
                 return verdict("SYNTHETIC_EFFECT_UNKNOWN_NO_REPLAY")
-            require(type(issued) is dict and issued.get("attempt") == request["attempt_ref"]
-                    and issued.get("selected") == request["requested_store"]
-                    and issued.get("effect") == "SYNTHETIC_ONLY"
-                    and issued.get("preimage") == obs["store_path"],
-                    "unverified disposable receipt")
+            # The effect may already have occurred. An invalid/undelivered
+            # receipt is UNKNOWN, never a pre-effect REFUSED or real SUCCESS.
+            if (type(issued) is not dict
+                    or issued.get("attempt") != request["attempt_ref"]
+                    or issued.get("selected") != request["requested_store"]
+                    or issued.get("effect") != "SYNTHETIC_ONLY"
+                    or issued.get("preimage") != obs["store_path"]):
+                return verdict("SYNTHETIC_EFFECT_UNKNOWN_NO_REPLAY")
             try:
                 final = _observation(port.observe(), request)
             except Exception:
@@ -230,10 +233,14 @@ def source_step(
                 output = port.record(receipt)
             else:
                 output = port.rollback(receipt, request["attempt_ref"], desired)
+        except ValueError:
+            # DisposablePort contract: ValueError is a verified pre-write
+            # refusal (invalid/non-issued receipt). It grants no retry.
+            return verdict("REFUSED_PORT_PRECONDITION")
         except Exception:
             return verdict("SYNTHETIC_EFFECT_UNKNOWN_NO_REPLAY")
-        require(output in ("SYNTHETIC_RECORD_ONLY", "SYNTHETIC_ROLLBACK_NOT_NEW_D_SUCCESS"),
-                "port returned unknown mutation result")
+        if output not in ("SYNTHETIC_RECORD_ONLY", "SYNTHETIC_ROLLBACK_NOT_NEW_D_SUCCESS"):
+            return verdict("SYNTHETIC_EFFECT_UNKNOWN_NO_REPLAY")
         return verdict("SYNTHETIC_RECORD_ONLY_CANDIDATE" if action == "RECORD"
                        else "SYNTHETIC_ROLLBACK_READBACK_REQUIRED")
     except (ValueError, TypeError, KeyError, AttributeError):
