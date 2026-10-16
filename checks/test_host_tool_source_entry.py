@@ -52,13 +52,21 @@ class Port:
                                             crash_after_selector=self.crash)
 
     def record(self, receipt, current_revision):
-        self.records += 1
-        issued = self.host._issued.get(receipt.get("attempt"))
-        # The issuer-owned revision (issued[3]), not the caller's previous
-        # CONFIRMED/current-q assertion, must match this checked SOURCE D.
+        self.records += 1  # attempted Port calls, NEVER a confirmed record/effect
+        if type(receipt) is not dict:
+            raise ValueError("not a returned SOURCE receipt")
+        attempt = receipt.get("attempt")
+        issued = self.host._issued.get(attempt)
+        # Check the Port's OWN actual issuance, rather than a claimed previous
+        # or current q. R2: issuer q alone cannot attest a later attempt.
+        # Even if the selector revisits the same store under the same q,
+        # this receipt must be from the latest actual generation/attempt.
         if (not issued or issued[0] is not receipt or issued[1] != receipt
-                or issued[3] != current_revision):
-            raise ValueError("not a returned SOURCE receipt for current q")
+                or issued[3] != current_revision
+                or self.host._last_attempt != attempt
+                or self.host.number != issued[2]
+                or self.host.observe() != ("SELECTED", issued[1]["selected"])):
+            raise ValueError("not the current Port-issued SOURCE receipt")
         return "SYNTHETIC_RECORD_ONLY"
 
     def rollback(self, receipt, attempt, desired):
