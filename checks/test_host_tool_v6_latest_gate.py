@@ -234,6 +234,40 @@ class LatestP4Cases(unittest.TestCase):
         self.refuse("frozen approved SOURCE binding Git blob changed")
         self.frozen["binding"]["blob"] = old_blob
 
+    def test_R1_X_BOUND_SRC3_immutable_full_head_tree_base_refuse(self):
+        # Earlier R-reviewed roles skip costly current PR/commit GETs.
+        # Their *full* original identities must therefore remain immutable,
+        # rather than accepting arbitrary valid-looking 40-hex tree/base.
+        for role in ("X", "BOUND", "SRC3"):
+            row = self.row(role)
+            for field in ("head", "tree", "base"):
+                with self.subTest(role=role, field=field):
+                    old = row[field]
+                    row[field] = "f" * 40
+                    with patch.object(self, "get", side_effect=AssertionError(
+                            "historical identity should refuse before any public GET")):
+                        self.refuse(f"{role}: reviewed immutable prior SOURCE identity changed")
+                    row[field] = old
+
+    def test_R2_single_V11_false_target_success_and_duplicate_case_refuse(self):
+        original = self.coverage
+        row = next(line for line in original.splitlines()
+                   if line.startswith("| V11 |"))
+        self.assertEqual(row.count("REAL_TARGET_UNPROVEN"), 1)
+        # 64 IDs, the remaining 63 UNPROVEN rows, and other R markers stay valid.
+        self.coverage = original.replace(
+            row, row.replace("REAL_TARGET_UNPROVEN", "REAL_TARGET_PROVEN"))
+        self.refuse("P4 v6 64-case")
+        # One ordinary additional V11 would be invisible to a set-only ID test.
+        self.coverage = original.replace(row, row + "\n" + row)
+        self.refuse("P4 v6 64-case")
+        # Nor may the status column claim both PROVEN and UNPROVEN.
+        self.coverage = original.replace(
+            row, row.replace("REAL_TARGET_UNPROVEN",
+                             "REAL_TARGET_PROVEN ; REAL_TARGET_UNPROVEN"))
+        self.refuse("P4 v6 64-case")
+        self.coverage = original
+
     def test_64_CASES_source_map_preserved_but_no_real_target(self):
         original = self.coverage
         self.coverage = self.coverage.replace("REAL_TARGET_UNPROVEN", "REAL_TARGET_PROVEN")
