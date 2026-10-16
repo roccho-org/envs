@@ -1,0 +1,106 @@
+{
+  "kind": "envs.hostCommonV6LatestSRC4Candidate.v0",
+  "admission": "NOT_ADMITTED",
+  "frozen": "checks/fixtures/host-tool-v6-source-set.json",
+  "entries": [
+    {
+      "role": "F1",
+      "repository": "roccho-org/envs",
+      "pr": 90,
+      "head": "dda51699ff6b6892f11b8f1a46153047e5ffb74f",
+      "tree": "810501fafe4771d94440718c5cc0ef6c2371b999",
+      "base": "24e79a7ceb83337d71c8a03bf0dbc75c7fa4c72f",
+      "run_id": 38634669573,
+      "run_attempt": 1,
+      "review_id": 5524498474
+    },
+    {
+      "role": "F2",
+      "repository": "roccho-dev/windows",
+      "pr": 93,
+      "head": "4fc9548d81d6a724ffbf1e8a24c5936e48a70f10",
+      "tree": "10fb840d4c412670ab78a94da672d02e3937e057",
+      "base": "355b038bcbe2b24a8ad0121f79b7cc4c72b76b3f",
+      "run_id": 38637482002,
+      "run_attempt": 2,
+      "review_id": 5525335505
+    },
+    {
+      "role": "RELATION",
+      "repository": "roccho-dev/resources",
+      "pr": 19,
+      "head": "5746f46b149c15d57a6ea006f4b79cff60dbf83b",
+      "tree": "bbdb1db54d59bc89e24cf535632e03e9d6a7ffd9",
+      "base": "d5cfc205ef718473a615b2606b61eb35402c9d59",
+      "run_id": 38599405139,
+      "run_attempt": 1,
+      "review_id": 5521439539
+    },
+    {
+      "role": "X",
+      "repository": "roccho-org/envs",
+      "pr": 92,
+      "head": "9caeed95041f2fb6014da364656383b83882897a",
+      "tree": "79d1b036d8069393c90ba6f9572fefbfec3666f1",
+      "base": "5961d48cced70b31e734e69ce5001b872c9c33ad",
+      "run_id": 38657468195,
+      "run_attempt": 1,
+      "review_id": 5526358929
+    },
+    {
+      "role": "BOUND",
+      "repository": "roccho-org/envs",
+      "pr": 94,
+      "head": "db66a9357d85325e8680bf6700f64078f5bb5990",
+      "tree": "b94a856fa30388d5e1c412cd6fab734da9be075b",
+      "base": "5961d48cced70b31e734e69ce5001b872c9c33ad",
+      "run_id": 38666426003,
+      "run_attempt": 1,
+      "review_id": 5527051531
+    },
+    {
+      "role": "SRC3",
+      "repository": "roccho-org/envs",
+      "pr": 102,
+      "head": "1d098d1951f8c9b97e716652d8ffd122ea565bff",
+      "tree": "df9e2047ea3769281044d3bd6024b8cdb972c267",
+      "base": "4bfa37a99d82eac940b1e6bedac16ec16e0a32b8",
+      "run_id": 38881233086,
+      "run_attempt": 1,
+      "review_id": 5545987340
+    },
+    {
+      "role": "P1",
+      "repository": "roccho-org/envs",
+      "pr": 103,
+      "head": "3beabaa50a60adc6ce93f65af8820aad5efe0716",
+      "tree": "d4a9864198f9a2f361bce1754dd0fdac164cceef",
+      "base": "4bfa37a99d82eac940b1e6bedac16ec16e0a32b8",
+      "run_id": 38890969162,
+      "run_attempt": 1,
+      "review_id": 5547041299
+    },
+    {
+      "role": "P2",
+      "repository": "roccho-dev/windows",
+      "pr": 97,
+      "head": "6819abe8573a5cbd50c4962f4f3efd2a7481454c",
+      "tree": "91a6c9213379d918fd10dd48fdc320585167295b",
+      "base": "4fc9548d81d6a724ffbf1e8a24c5936e48a70f10",
+      "run_id": 38898071260,
+      "run_attempt": 1,
+      "review_id": 5547985960
+    },
+    {
+      "role": "P3",
+      "repository": "roccho-dev/windows",
+      "pr": 98,
+      "head": "fa39abd4be45a1c43bda785dcf03ca207bc39e2f",
+      "tree": "443b1f322b6621b435b562d7447ee6da69b321fb",
+      "base": "6819abe8573a5cbd50c4962f4f3efd2a7481454c",
+      "run_id": 38907544038,
+      "run_attempt": 1,
+      "review_id": 5548673957
+    }
+  ]
+}
