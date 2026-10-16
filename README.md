@@ -94,6 +94,7 @@ THIRD_PARTY_NOTICES.md
 |---|---|---|---|
 | `dev-authoring/JEV_API_KEY` | secret | opaque | one_shot_ingress |
 | `dev-authoring/OPENCODE_API_KEY` | secret | opaque | one_shot_ingress |
+| `dev-authoring/TYPELLM_API_KEY` | secret | opaque | one_shot_ingress |
 | `dev-authoring/SOPS_AGE_RECIPIENTS` | variable | age_recipient_list | persistent |
 | `dev-authoring/OCI_DEV_AGE_RECIPIENT` | variable | age_recipient | persistent |
 | `dev-authoring/VERSAPRO_OWN_OCI_AGE_RECIPIENT` | variable | age_recipient | persistent |
@@ -173,6 +174,63 @@ dev-authoring/JEV_API_KEY + dev-authoring/OCI_DEV_AGE_RECIPIENT
 - `checks/test_jev_api.py` proves the gates with fake sops, and in `check` it runs the real locked sops with check-only `age-keygen` identities: the target identity decrypts, and another identity or a tampered ciphertext is RED.
 
 Not proven here, and not owned by envs: the target's identity, applying the ciphertext on the target, the launcher, application runtime acceptance, and any deployment. Source and CI PASS is not a real authoring PASS.
+
+## Dev TypeLLM OCI authoring (apps #94)
+
+`typellm-api.oci-dev` reuses the existing target-selected authoring entry and the
+OCI dev target's existing recipient. The owner enters the API key directly as
+`dev-authoring/TYPELLM_API_KEY`; no plaintext value goes into Git, a command,
+chat, a PR or a local `.env` file.
+
+```text
+dev-authoring/TYPELLM_API_KEY + dev-authoring/OCI_DEV_AGE_RECIPIENT
+→ author-dev-jev-api, `author --target typellm-api.oci-dev`
+→ ciphertexts/dev-typellm-api.oci-dev.sops.yaml
+→ ciphertext-only PR → accepted exact proposals revision
+```
+
+After the source and its own canonical `check` artifact are available, dispatch
+the existing workflow once on `proposals`, selecting only this target:
+
+```sh
+gh workflow run author-dev-jev-api.yml --repo roccho-org/envs --ref proposals \
+  -f target=typellm-api.oci-dev
+```
+
+The literal TypeLLM step receives only `TYPELLM_API_KEY` and the one
+`OCI_DEV_AGE_RECIPIENT`; it never reads Jev, Go or Cloudflare credentials.
+The locked SOPS child receives the source on stdin and returns an envelope
+containing exactly `TYPELLM_API_KEY` and SOPS metadata, encrypted to that one
+recipient. Missing input, a wrong recipient, another source field or plaintext
+in the repository refuses authoring. The result records target application and
+application runtime as `NOT_RUN`; the source plane stays `NOT_CONFIGURED`, as
+with Go. Ciphertext availability is checked at an exact Git revision.
+
+### Local use and the remaining consumer connection
+
+The existing local pattern is documented in
+[windows #22](https://github.com/roccho-dev/windows/issues/22) and implemented by
+[oci/dev/nix.nix](https://github.com/roccho-dev/windows/blob/proposals/oci/dev/nix.nix):
+resolve/build the exact app before decryption, use the target's own
+`/work/repos/.auth/roccho-dev/age/oci-dev.key`, decrypt in memory and pass the key
+only to the foreground application child. The private identity stays on the
+target. The application uses target-native auth and never starts or waits for
+an envs authoring workflow.
+
+`voice-ui-jev-dev` currently accepts only the Jev ciphertext and `JEV_API_KEY`.
+TypeLLM authoring does not make that launcher or voice-ui consume the new key.
+The target-owned launcher must explicitly accept this binding and deliver
+`TYPELLM_API_KEY` to the server; the app/provider owner must connect it to
+[TypeLLM's hosted API](https://typellm.ai/docs/api). Browser code receives no key.
+No new identity or GPU server is needed for that hosted API connection.
+
+The consumer outcome to verify is: determine whether existing parts suffice;
+when they do, select and draw them with the required quality; when they do not,
+prepare the missing candidate data through TypeLLM, validate it and return it to
+the same drawing loop. Unknown executable operations still require real
+implementation. Key presence, an authored envelope or an HTTP response alone
+does not establish that outcome. [apps #94](https://github.com/roccho-dev/apps/issues/94)
+owns the comparison and app integration.
 
 ## Dev OpenCode Go OCI authoring (ADRS #530)
 
