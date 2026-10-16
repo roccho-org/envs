@@ -1,0 +1,1 @@
+{"id":"pc7337-rent.host-tool-selection","kind":"envs.hostToolSelectionProposal.v0","admission":"NOT_ADMITTED","target_ref":"pc7337-rent","material":{"repository":"roccho-dev/windows","source_commit":"355b038bcbe2b24a8ad0121f79b7cc4c72b76b3f","flake_output":"packages.x86_64-linux.rent-tool-profile"}}
