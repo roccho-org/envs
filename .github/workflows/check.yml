@@ -61,6 +61,9 @@ jobs:
       - name: Exercise F1 q/Host/Unit to disposable Target receive, O, receipt and UNKNOWN
         run: python3 checks/test_host_tool_v6_bound_lifecycle.py
 
+      - name: Test inactive SOURCE entry with explicit scoped authority and disposable Target
+        run: python3 checks/test_host_tool_source_entry.py
+
       - name: Test frozen v6 F1/F2 actual CI attempts and false-GREEN refusals (offline)
         run: python3 checks/test_host_tool_v6_source_gate.py
 
@@ -781,6 +784,9 @@ jobs:
 
       - name: Exercise F1 to disposable Target lifecycle on exact SOURCE head
         run: python3 checks/test_host_tool_v6_bound_lifecycle.py
+
+      - name: Test inactive SOURCE-entry read/change/receipt at exact head
+        run: python3 checks/test_host_tool_source_entry.py
 
       - name: Test v6 F1/F2 CI-attempt and binding negative cases at exact head
         run: python3 checks/test_host_tool_v6_source_gate.py
