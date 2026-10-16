@@ -11,12 +11,14 @@ import argparse
 import json
 import re
 import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any, Callable
 
 from host_tool_source_provenance import (API, ProvenanceError, fields, public_get,
                                          require, sha)
-from host_tool_v6_source_gate import real_file, verify as verify_frozen
+from host_tool_v6_source_gate import git_blob, verify as verify_frozen
 
 KIND = "envs.hostCommonV6LatestSRC4Candidate.v0"
 REQUIRED = {
@@ -70,6 +72,35 @@ P1_SOURCE_BLOB = "758a0b8954719994f03c01c459f68e0ea9bf59e3"
 P2_RECEIVER_BLOB = "b60326684befd94bbc91bdc34d5ebaf7988d7fce"
 P3_CALLER_BLOB = "46b9487ccb80a5f5c08af22ddc7b29e96e3eb873"
 P3_NATIVE_BLOB = "714ee2b54fe43c542ea9213b050656cd18fc99ed"
+
+
+def real_file(repo: str, head: str, path: str,
+              _get: Callable[[str], dict[str, Any]],
+              blob: str | None = None) -> str:
+    """Reuse P3's immutable GitHub RAW/verified-Git-blob SOURCE read.
+
+    The GitHub REST API is used for PR/run/job/review metadata; source bytes
+    use the already reviewed P3 RAW transport, saving scarce unauthenticated
+    REST reads. No token and no Target/system action. Offline tests inject it.
+    """
+    require(repo in ("roccho-org/envs", "roccho-dev/windows") and sha(head)
+            and bool(re.fullmatch(r"[A-Za-z0-9_./-]+", path))
+            and ".." not in path.split("/")
+            and blob is not None and sha(blob), "unsafe P4 source/blob locator")
+    url = f"https://raw.githubusercontent.com/{repo}/{head}/{path}"
+    request = urllib.request.Request(url, headers={
+        "User-Agent": "host-common-v6-p4-frozen-source-proof",
+    }, method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=25) as response:
+            require(response.status == 200, "public immutable RAW GET did not succeed")
+            raw = response.read(200_001)
+            require(len(raw) <= 200_000, "immutable RAW file too large")
+            content = raw.decode("utf-8")
+    except (urllib.error.URLError, TimeoutError, ValueError, UnicodeError) as ex:
+        raise ProvenanceError("public immutable SOURCE unavailable") from ex
+    require(git_blob(content) == blob, "P4 SOURCE Git blob differs from reviewed file")
+    return content
 
 
 def verify_latest(snapshot: dict[str, Any], frozen: dict[str, Any],
