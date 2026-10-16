@@ -1,0 +1,50 @@
+{
+  "kind": "envs.hostToolFunctionalBindingProposal.v0",
+  "admission": "NOT_ADMITTED",
+  "target_ref": "pc7337-rent",
+  "host_ref": "ci-host-rent-1",
+  "parent_ref": "ci-host-parent-1",
+  "unit_ref": "ci-rent-oci-unit-1",
+  "scope": "ci-session-1",
+  "selector": "/nix/var/nix/profiles/rent-dev",
+  "desired_output": "rent-tool-profile",
+  "proposed_q": "sha256:f531f4c49182a8cf15475103c1890475cefbb634512baf3d3b2fd9369da445a4",
+  "material": {
+    "repository": "roccho-dev/windows",
+    "source_commit": "355b038bcbe2b24a8ad0121f79b7cc4c72b76b3f",
+    "flake_output": "packages.x86_64-linux.rent-tool-profile"
+  },
+  "hosts": [
+    {
+      "id": "ci-host-parent-1",
+      "implementation_ref": "ci:windows-parent"
+    },
+    {
+      "id": "ci-host-rent-1",
+      "implementation_ref": "ci:windows-rent-oci"
+    }
+  ],
+  "relations": [
+    {
+      "kind": "contains",
+      "parent": "ci-host-parent-1",
+      "child": "ci-host-rent-1",
+      "scope": "ci-session-1",
+      "wrap": "OCI"
+    },
+    {
+      "kind": "manages",
+      "parent": "ci-host-parent-1",
+      "child": "ci-host-rent-1",
+      "scope": "ci-session-1",
+      "wrap": null
+    }
+  ],
+  "identity": {
+    "base": "ci:rent-base-only-B0",
+    "tool": "ci:rent-tool-T0",
+    "launch": "ci:rent-start-S0",
+    "config_binding": "ci:rent-binding-C0",
+    "state_contract": "ci:rent-state-K0"
+  }
+}
