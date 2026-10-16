@@ -271,6 +271,74 @@ class EntryCases(unittest.TestCase):
                           self.port.host.observe(), self.port.host.snapshot()), before)
         self.inert(valid)
 
+    def test_record_refuses_stale_same_q_attempt_after_revisiting_same_tool(self):
+        # Fixed R2 #5545384191: A issued current q / selected STORE0, then
+        # B and C changed the same disposable selector under the SAME q.
+        # C returns to STORE0, so current O and previous.CONFIRMED both look
+        # compatible with A. A must NOT be treated as the latest effect.
+        self.seed()  # STORE1 with a different, earlier attempt
+        stale = self.port.host.native_set_fixture(
+            STORE0, self.req["attempt_ref"], desired_revision=self.q)
+        later_b = self.port.host.native_set_fixture(
+            STORE1, "ci-newer-1", desired_revision=self.q)
+        latest = self.port.host.native_set_fixture(
+            STORE0, "ci-newer-2", desired_revision=self.q)
+        self.assertEqual(stale["selected"], latest["selected"])
+        self.assertEqual(self.port.host._issued[stale["attempt"]][3], self.q)
+        self.assertEqual(self.port.host._issued[latest["attempt"]][3], self.q)
+        self.assertEqual(later_b["selected"], STORE1)
+        self.assertEqual(self.port.host._last_attempt, "ci-newer-2")
+        self.assertEqual(self.port.host.observe(), ("SELECTED", STORE0))
+        claimed = dict(self.e, state="CONFIRMED", revision=self.q, store_path=STORE0)
+        before = (self.port.host.effect_count, self.port.host.number,
+                  self.port.host.observe(), self.port.host.snapshot(),
+                  copy.deepcopy(self.port.host._issued),
+                  self.port.changes, self.port.rollbacks)
+        refused = self.call("RECORD", overrides={
+            "previous": claimed, "receipt": stale})
+        self.assertEqual(refused["stage"], "REFUSED_PORT_PRECONDITION")
+        self.assertIsNone(refused["issued_receipt"])
+        self.assertEqual((self.port.host.effect_count, self.port.host.number,
+                          self.port.host.observe(), self.port.host.snapshot(),
+                          self.port.host._issued, self.port.changes, self.port.rollbacks),
+                         before)
+        self.inert(refused)
+
+        # The real latest issued attempt, scoped to its own actor/work/attempt
+        # and authority, remains a finite RECORD candidate with NO selector write.
+        current_request = {"attempt_ref": "ci-newer-2"}
+        current_auth = dict(self.access, attempt_ref="ci-newer-2")
+        current = self.call("RECORD", request=current_request, overrides={
+            "authority": current_auth, "previous": claimed, "receipt": latest})
+        self.assertEqual(current["stage"], "SYNTHETIC_RECORD_ONLY_CANDIDATE")
+        self.assertEqual((self.port.host.effect_count, self.port.host.number,
+                          self.port.host.observe(), self.port.host.snapshot(),
+                          self.port.host._issued, self.port.changes, self.port.rollbacks),
+                         before)
+        self.inert(current)
+
+    def test_record_requires_issued_generation_even_if_attempt_and_q_match(self):
+        self.seed()
+        issued = self.port.host.native_set_fixture(
+            STORE0, self.req["attempt_ref"], desired_revision=self.q)
+        claimed = dict(self.e, state="CONFIRMED", revision=self.q, store_path=STORE0)
+        before = (self.port.host.effect_count, self.port.host.observe(),
+                  self.port.host.snapshot(), self.port.changes)
+        # SUT-only corruption fixture: the issued receipt claims an earlier
+        # generation despite the last attempt string remaining the same.
+        self.port.host.number += 1
+        refused = self.call("RECORD", overrides={"previous": claimed, "receipt": issued})
+        self.assertEqual(refused["stage"], "REFUSED_PORT_PRECONDITION")
+        self.assertEqual((self.port.host.effect_count, self.port.host.observe(),
+                          self.port.host.snapshot(), self.port.changes), before)
+        self.port.host.number -= 1
+        current = self.call("RECORD", overrides={"previous": claimed, "receipt": issued})
+        self.assertEqual(current["stage"], "SYNTHETIC_RECORD_ONLY_CANDIDATE")
+        self.assertEqual((self.port.host.effect_count, self.port.host.observe(),
+                          self.port.host.snapshot(), self.port.changes), before)
+        self.inert(refused)
+        self.inert(current)
+
     def test_record_only_and_issued_rollback_are_separate(self):
         self.seed()
         before = self.port.host.snapshot()
