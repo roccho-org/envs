@@ -106,18 +106,28 @@ class EntryCases(unittest.TestCase):
             **{k: self.bound[k] for k in ("target_ref", "host_ref", "unit_ref", "scope")},
             "actor_ref": "ci-fixed-W", "work_ref": "ci-source-work",
             "attempt_ref": "ci-attempt-one", "proposed_q": self.bound["proposed_q"],
-            "requested_store": None,
+            "route_ref": "ci-fixed-rent-route", "requested_store": None,
         }
         self.access = {
             "kind": "envs.syntheticScopedAuthority.v0",
             **{k: self.req[k] for k in ("target_ref", "host_ref", "unit_ref", "scope",
-                                        "actor_ref", "work_ref", "attempt_ref")},
-            "read": True, "change": True, "quiet": True, "single_writer": True,
-            "recovery": True, "route": True,
+                                        "route_ref", "actor_ref", "work_ref", "attempt_ref")},
+            "read": True, "change": True, "record": True, "rollback": True,
+            "quiet": True, "single_writer": True, "recovery": True, "route": True,
         }
 
     def tearDown(self):
         self.port.close()
+
+    @staticmethod
+    def grant(req, step):
+        return {
+            "kind": "envs.syntheticStageGrant.v0",
+            **{k: req[k] for k in ("target_ref", "host_ref", "unit_ref", "scope",
+                                   "route_ref", "actor_ref", "work_ref", "attempt_ref")},
+            "step": step, "permit": True,
+            "issuer_fixture": "ci-independent-source-issuer",
+        }
 
     def call(self, action="READ", *, request=None, overrides=None):
         req = dict(self.req, action=action,
@@ -126,11 +136,15 @@ class EntryCases(unittest.TestCase):
             req.update(request)
         read = facts("READ")
         read.update({k: req[k] for k in ("target_ref", "actor_ref", "work_ref", "attempt_ref")})
-        change = facts("RECORD" if action == "RECORD" else "TOOL_CHANGE")
+        stage_name = {"READ": "READ", "CHANGE": "TOOL_CHANGE",
+                      "RECORD": "RECORD", "ROLLBACK": "ROLLBACK"}.get(action, "UNKNOWN")
+        change = facts(stage_name if stage_name != "UNKNOWN" else "TOOL_CHANGE")
         change.update({k: req[k] for k in ("target_ref", "actor_ref", "work_ref", "attempt_ref")})
         params = dict(request=req, binding_source=copy.deepcopy(self.f1),
                       proposals=self.proposals, targets=self.targets,
                       relation_project=self.project, authority=copy.deepcopy(self.access),
+                      read_grant=self.grant(req, "READ"),
+                      stage_grant=None if action == "READ" else self.grant(req, stage_name),
                       read_facts=read, change_facts=change, current_q=self.q,
                       desired=copy.deepcopy(self.d), previous=copy.deepcopy(self.e),
                       port=self.port, receipt=None)
@@ -411,6 +425,113 @@ class EntryCases(unittest.TestCase):
         self.assertEqual(self.port.host.observe(), ("SELECTED", STORE1))
         self.assertEqual(self.port.host.snapshot(), before)
         self.inert(restored)
+
+    def test_four_step_grants_are_distinct_and_caller_boolean_never_authorizes(self):
+        # An allowed synthetic request/StageFacts/authority cannot replace a
+        # separately injected grant whose subject, route and step agree.
+        actions = ("READ", "CHANGE", "RECORD", "ROLLBACK")
+        for action in actions:
+            req = dict(self.req, action=action,
+                       requested_store=None if action == "READ" else STORE0)
+            stage = {"READ": "READ", "CHANGE": "TOOL_CHANGE",
+                     "RECORD": "RECORD", "ROLLBACK": "ROLLBACK"}[action]
+            for mutation in (
+                lambda g: g.update(permit=False),
+                lambda g: g.update(permit=None),
+                lambda g: g.update(permit="true"),
+                lambda g: g.update(step="TOOL_CHANGE" if stage != "TOOL_CHANGE" else "RECORD"),
+                lambda g: g.update(actor_ref="ci-foreign"),
+                lambda g: g.update(work_ref="ci-foreign"),
+                lambda g: g.update(attempt_ref="ci-old"),
+                lambda g: g.update(route_ref="ci-old-route"),
+                lambda g: g.update(issuer_fixture="ci-forged"),
+            ):
+                bad = self.grant(req, stage)
+                mutation(bad)
+                overrides = ({"read_grant": bad} if action == "READ"
+                             else {"stage_grant": bad})
+                before = (self.port.reads, self.port.changes,
+                          self.port.records, self.port.rollbacks)
+                result = self.call(action, overrides=overrides)
+                self.assertEqual(result["stage"], "REFUSED_SOURCE_OR_AUTHORITY")
+                self.assertEqual((self.port.reads, self.port.changes,
+                                  self.port.records, self.port.rollbacks), before)
+                self.inert(result)
+
+    def test_read_grant_is_independent_and_required_for_mutation_observation(self):
+        for action in ("READ", "CHANGE", "RECORD", "ROLLBACK"):
+            for wrong in (None, {}, self.grant(self.req, "TOOL_CHANGE"),
+                          dict(self.grant(self.req, "READ"), permit=False)):
+                result = self.call(action, overrides={"read_grant": wrong})
+                self.assertEqual(result["stage"], "REFUSED_SOURCE_OR_AUTHORITY")
+                self.assertEqual((self.port.reads, self.port.changes,
+                                  self.port.records, self.port.rollbacks), (0, 0, 0, 0))
+        # D/old-effect/quiet are not READ prerequisites in this synthetic caller.
+        self.seed()
+        denied_change = dict(self.access, change=False, record=False, rollback=False,
+                             quiet=False, single_writer=False, recovery=False)
+        got = self.call("READ", overrides={
+            "authority": denied_change, "desired": None, "current_q": None,
+            "previous": dict(self.e, state="UNKNOWN")})
+        self.assertEqual(got["stage"], "SYNTHETIC_READ_OBSERVED")
+        self.assertEqual(self.port.reads, 1)
+        self.assertEqual(self.port.changes, 0)
+
+    def test_record_only_survives_change_revocation_but_requires_record_grant(self):
+        self.seed()
+        changed = self.call("CHANGE")
+        issued = changed["issued_receipt"]
+        self.assertEqual(changed["stage"], "SYNTHETIC_READBACK_CANDIDATE_NOT_SUCCESS")
+        confirmed = dict(self.e, state="CONFIRMED", revision=self.q, store_path=STORE0)
+        restricted = dict(self.access, change=False, quiet=False,
+                          single_writer=False, recovery=False)
+        before = (self.port.changes, self.port.records, self.port.rollbacks,
+                  self.port.host.effect_count, self.port.host.snapshot())
+        got = self.call("RECORD", overrides={"authority": restricted,
+                                             "previous": confirmed, "receipt": issued})
+        self.assertEqual(got["stage"], "SYNTHETIC_RECORD_ONLY_CANDIDATE")
+        self.assertEqual(self.port.records, before[1] + 1)
+        self.assertEqual((self.port.changes, self.port.rollbacks,
+                          self.port.host.effect_count, self.port.host.snapshot()),
+                         (before[0], before[2], before[3], before[4]))
+        # A second record is never accepted under the same issuer/attempt/q.
+        again = self.call("RECORD", overrides={"authority": restricted,
+                                               "previous": confirmed, "receipt": issued})
+        self.assertEqual(again["stage"], "REFUSED_PORT_PRECONDITION")
+        self.assertEqual(self.port.records, before[1] + 1)
+        denied = dict(restricted, record=False)
+        no_record = self.call("RECORD", overrides={"authority": denied,
+                                                   "previous": confirmed, "receipt": issued})
+        self.assertEqual(no_record["stage"], "REFUSED_SOURCE_OR_AUTHORITY")
+        self.assertEqual(self.port.records, before[1] + 1)
+
+    def test_rollback_has_own_grant_and_quiet_not_change_right(self):
+        self.seed()
+        change = self.call("CHANGE")
+        receipt = change["issued_receipt"]
+        self.assertEqual(change["stage"], "SYNTHETIC_READBACK_CANDIDATE_NOT_SUCCESS")
+        confirmed = dict(self.e, state="CONFIRMED", revision=self.q, store_path=STORE0)
+        no_roll = dict(self.access, change=False, rollback=False)
+        before = (self.port.rollbacks, self.port.host.effect_count,
+                  self.port.host.observe())
+        refusal = self.call("ROLLBACK", overrides={"authority": no_roll,
+                                                  "previous": confirmed, "receipt": receipt})
+        self.assertEqual(refusal["stage"], "REFUSED_SOURCE_OR_AUTHORITY")
+        self.assertEqual((self.port.rollbacks, self.port.host.effect_count,
+                          self.port.host.observe()), before)
+        for key in ("quiet", "single_writer", "recovery"):
+            missing = dict(self.access, change=False, **{key: False})
+            got = self.call("ROLLBACK", overrides={"authority": missing,
+                                                  "previous": confirmed, "receipt": receipt})
+            self.assertEqual(got["stage"], "REFUSED_SOURCE_OR_AUTHORITY")
+            self.assertEqual(self.port.rollbacks, before[0])
+        # Permitting rollback separately does not require a CHANGE grant.
+        roll_only = dict(self.access, change=False)
+        got = self.call("ROLLBACK", overrides={"authority": roll_only,
+                                              "previous": confirmed, "receipt": receipt})
+        self.assertEqual(got["stage"], "SYNTHETIC_ROLLBACK_READBACK_REQUIRED")
+        self.assertEqual(self.port.host.observe(), ("SELECTED", STORE1))
+        self.inert(got)
 
     def test_production_projection_has_no_implicit_source_entry_import(self):
         for path in ("adapters/contract_projection.py", "adapters/jev_api.py"):
