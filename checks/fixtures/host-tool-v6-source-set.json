@@ -1,0 +1,47 @@
+{
+  "kind": "envs.hostCommonV6FrozenSourceCandidate.v0",
+  "admission": "NOT_ADMITTED",
+  "producer": {
+    "repository": "roccho-dev/windows",
+    "head": "355b038bcbe2b24a8ad0121f79b7cc4c72b76b3f"
+  },
+  "binding": {
+    "repository": "roccho-org/envs",
+    "path": "checks/fixtures/host-tool-functional-binding.json",
+    "blob": "cee080d45e3e7dea8d3c0a608dd2827659101d45"
+  },
+  "relation": {
+    "repository": "roccho-dev/resources",
+    "path": "nixos/tests/host_relation_source.py",
+    "blob": "4aa50be2c62c714def0b2aa97aa24573bd8b5344"
+  },
+  "entries": [
+    {
+      "repository": "roccho-dev/windows",
+      "pr": 93,
+      "head": "4fc9548d81d6a724ffbf1e8a24c5936e48a70f10",
+      "tree": "10fb840d4c412670ab78a94da672d02e3937e057",
+      "base": "355b038bcbe2b24a8ad0121f79b7cc4c72b76b3f",
+      "run_id": 38637482002,
+      "run_attempt": 2
+    },
+    {
+      "repository": "roccho-org/envs",
+      "pr": 90,
+      "head": "dda51699ff6b6892f11b8f1a46153047e5ffb74f",
+      "tree": "810501fafe4771d94440718c5cc0ef6c2371b999",
+      "base": "24e79a7ceb83337d71c8a03bf0dbc75c7fa4c72f",
+      "run_id": 38634669573,
+      "run_attempt": 1
+    },
+    {
+      "repository": "roccho-dev/resources",
+      "pr": 19,
+      "head": "5746f46b149c15d57a6ea006f4b79cff60dbf83b",
+      "tree": "bbdb1db54d59bc89e24cf535632e03e9d6a7ffd9",
+      "base": "d5cfc205ef718473a615b2606b61eb35402c9d59",
+      "run_id": 38599405139,
+      "run_attempt": 1
+    }
+  ]
+}
