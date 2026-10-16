@@ -88,14 +88,22 @@ def _observation(value: Any, req: dict[str, Any]) -> dict[str, Any]:
             and o["state"] in ("ABSENT", "SELECTED", "UNKNOWN")
             and all(type(o[k]) is bool for k in ("fresh", "closure_valid")),
             "observation does not match explicit Target/Unit")
-    if o["state"] != "SELECTED":
+    if o["state"] == "UNKNOWN":
         require(o["store_path"] is None and o["identity"] is None,
-                "unselected observation asserted Tool identity")
+                "unknown observation asserted a complete identity")
+    elif o["state"] == "ABSENT":
+        # Base can be observed independently from its absent Tool. A complete
+        # base/launch/config/state identity permits a first explicit T candidate;
+        # a geometry-only ABSENT without it remains READ-only.
+        require(o["store_path"] is None
+                and (o["identity"] is None or type(o["identity"]) is dict),
+                "absent Tool falsely asserted selected material")
     else:
         require(type(o["store_path"]) is str
                 and STORE.fullmatch(o["store_path"]) is not None
                 and type(o["identity"]) is dict,
                 "selected Target has malformed material or identity")
+    if type(o["identity"]) is dict:
         require(o["identity"].get("target_ref") == req["target_ref"]
                 and o["identity"].get("unit_ref") == req["unit_ref"],
                 "observation not for exact Target/Unit")
