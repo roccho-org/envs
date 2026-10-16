@@ -1,0 +1,19 @@
+{
+  "role": "own",
+  "site": "G6I3",
+  "expectHost": "G6I3",
+  "owner": "roccho-dev",
+  "session": "wslc-cli-resta",
+  "sshAlias": "g6i3-own",
+  "container": "windows-own",
+  "hostPort": 2223,
+  "volume": "windows-own-home",
+  "workVolume": "windows-own-work",
+  "nixVolume": "windows-own-nix",
+  "publicKeyFile": "%USERPROFILE%\\.ssh\\id_ed25519_windows_own_wslc.pub",
+  "privateKeyFile": "/work/repos/.auth/ssh/windows-own/id_ed25519",
+  "knownHostsFile": "%USERPROFILE%\\.ssh\\known_hosts_windows_own",
+  "windowsIdentityFile": "%USERPROFILE%\\.ssh\\id_ed25519_windows_own",
+  "image": "ghcr.io/roccho-dev/windows-own@sha256:f05864c899211e3939870a11bec8b2b9d5006519eb329ada6cbc120d9152dc26",
+  "imageFrom": "roccho-dev/windows run 38157344696 at facd0ba866ec4ecfa49b3324c70af2edf82d3e3e; workflow=ci; runAttempt=1; artifact=windows-own-tested-facd0ba866ec4ecfa49b3324c70af2edf82d3e3e; publisherJob=own / publish; publishRule=unchanged"
+}
