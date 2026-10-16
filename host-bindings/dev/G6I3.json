@@ -1,0 +1,10 @@
+{
+  "role": "dev",
+  "site": "G6I3",
+  "expectHost": "G6I3",
+  "nixVolume": "nix",
+  "workVolume": "work",
+  "baseSha": "0b9ffa24749b416fd39bfa49c0682b1f32711f02",
+  "gitNixpkgs": "35d3407a3816f3b341d8cf1d60abaf2b7b8166ac",
+  "toolsRev": "d70e909bc19814e675501804ceea904fc7367d39"
+}
