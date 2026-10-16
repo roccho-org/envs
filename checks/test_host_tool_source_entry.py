@@ -26,6 +26,10 @@ class Port:
         self.host = DisposableHost()
         self.binding = copy.deepcopy(binding)
         self.reads = self.changes = self.records = self.rollbacks = 0
+        # Ephemeral per-Port consumption marker, not a production ledger.
+        # Recording an issued receipt is at most once per disposable attempt;
+        # keep host._issued untouched because a separate rollback may follow.
+        self._recorded_attempts: set[str] = set()
         self.crash = False
 
     def close(self):
@@ -57,6 +61,8 @@ class Port:
         if type(receipt) is not dict:
             raise ValueError("not a returned SOURCE receipt")
         attempt = receipt.get("attempt")
+        if type(attempt) is not str:
+            raise ValueError("SOURCE receipt must name one exact attempt")
         issued = self.host._issued.get(attempt)
         # Check the Port's OWN actual issuance, rather than a claimed previous
         # or current q. R2: issuer q alone cannot attest a later attempt.
@@ -66,8 +72,10 @@ class Port:
                 or issued[3] != current_revision
                 or self.host._last_attempt != attempt
                 or self.host.number != issued[2]
-                or self.host.observe() != ("SELECTED", issued[1]["selected"])):
-            raise ValueError("not the current Port-issued SOURCE receipt")
+                or self.host.observe() != ("SELECTED", issued[1]["selected"])
+                or attempt in self._recorded_attempts):
+            raise ValueError("not a fresh, unrecorded Port-issued SOURCE receipt")
+        self._recorded_attempts.add(attempt)
         self.records += 1
         return "SYNTHETIC_RECORD_ONLY"
 
@@ -320,6 +328,44 @@ class EntryCases(unittest.TestCase):
                           self.port.host._issued, self.port.changes, self.port.rollbacks),
                          before)
         self.inert(current)
+
+    def test_record_same_current_receipt_twice_has_only_one_record_effect(self):
+        # Fixed R3 #5545651230: even the genuine most-current Port receipt
+        # cannot count as a SECOND record when all q/O/attempt facts still match.
+        self.seed()
+        changed = self.call("CHANGE")
+        self.assertEqual(changed["stage"], "SYNTHETIC_READBACK_CANDIDATE_NOT_SUCCESS")
+        receipt = changed["issued_receipt"]
+        self.assertIs(self.port.host._issued[receipt["attempt"]][0], receipt)
+        confirmed = dict(self.e, state="CONFIRMED",
+                         revision=self.q, store_path=STORE0)
+        before = (self.port.host.effect_count, self.port.host.number,
+                  self.port.host.observe(), self.port.host.snapshot(),
+                  copy.deepcopy(self.port.host._issued),
+                  self.port.changes, self.port.rollbacks)
+        first = self.call("RECORD", overrides={
+            "previous": confirmed, "receipt": receipt})
+        self.assertEqual(first["stage"], "SYNTHETIC_RECORD_ONLY_CANDIDATE")
+        self.assertEqual(self.port.records, 1)
+        self.assertEqual(self.port._recorded_attempts, {receipt["attempt"]})
+        self.assertEqual((self.port.host.effect_count, self.port.host.number,
+                          self.port.host.observe(), self.port.host.snapshot(),
+                          self.port.host._issued,
+                          self.port.changes, self.port.rollbacks), before)
+        self.inert(first)
+
+        # Identical Port, issuer q, actor, attempt, selected Tool and generation.
+        second = self.call("RECORD", overrides={
+            "previous": confirmed, "receipt": receipt})
+        self.assertEqual(second["stage"], "REFUSED_PORT_PRECONDITION")
+        self.assertIsNone(second["issued_receipt"])
+        self.assertEqual(self.port.records, 1)  # no second record effect
+        self.assertEqual(self.port._recorded_attempts, {receipt["attempt"]})
+        self.assertEqual((self.port.host.effect_count, self.port.host.number,
+                          self.port.host.observe(), self.port.host.snapshot(),
+                          self.port.host._issued,
+                          self.port.changes, self.port.rollbacks), before)
+        self.inert(second)
 
     def test_record_requires_issued_generation_even_if_attempt_and_q_match(self):
         self.seed()
