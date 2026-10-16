@@ -1,0 +1,50 @@
+name: Go target check
+
+on:
+  pull_request:
+    branches: [proposals]
+    paths:
+      - 'adapters/jev_api.py'
+      - 'adapters/contract_projection.py'
+      - 'contracts/**'
+      - 'checks/test_go_versapro.py'
+      - '.github/workflows/author-dev-jev-api.yml'
+      - '.github/workflows/go-target-check.yml'
+  push:
+    branches: [proposals]
+    paths:
+      - 'adapters/jev_api.py'
+      - 'adapters/contract_projection.py'
+      - 'contracts/**'
+      - 'checks/test_go_versapro.py'
+      - '.github/workflows/author-dev-jev-api.yml'
+      - '.github/workflows/go-target-check.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  target-source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Check target and input isolation without credentials
+        run: python3 checks/test_go_versapro.py
+      - name: Retain the exact public source for independent replay
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/go-target-source"
+          git rev-parse HEAD > "$RUNNER_TEMP/go-target-source/SOURCE"
+          git archive --format=tar HEAD > "$RUNNER_TEMP/go-target-source/source.tar"
+          sha256sum "$RUNNER_TEMP/go-target-source/source.tar" > "$RUNNER_TEMP/go-target-source/source.sha256"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: go-target-source-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/go-target-source/
+          if-no-files-found: error
+          retention-days: 7
