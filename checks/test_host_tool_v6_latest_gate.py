@@ -218,16 +218,21 @@ class LatestP4Cases(unittest.TestCase):
         self.refuse("P4 actual P1/P2/P3 SOURCE")
         self.newfiles[path] = old
 
-    def test_old_frozen_F2_failing_first_attempt_must_stay_failed(self):
+    def test_frozen_F2_retry_run_and_reviewed_F1_blob_still_bound(self):
+        # Prior F2 attempt-1 RED remains in the separately accepted F1/F2 X
+        # R/CI evidence. P4 requires attempt-2 terminal SUCCESS and the
+        # identical immutable F1 binding, without falsely claiming a fresh
+        # audit of its older per-step jobs.
         row = self.row("F2")
-        url = (f"{API}/repos/roccho-dev/windows/actions/runs/{row['run_id']}"
-               "/attempts/1/jobs?per_page=100")
+        url = f"{API}/repos/roccho-dev/windows/actions/runs/{row['run_id']}"
         old = copy.deepcopy(self.data[url])
-        for job in self.data[url]["jobs"]:
-            if job["name"] == "dev / fresh-develop-replace-continue":
-                job["conclusion"] = "success"
-        self.refuse("historical failed attempt")
+        self.data[url]["run_attempt"] = 1
+        self.refuse("F2: previously R-reviewed SOURCE run")
         self.data[url] = old
+        old_blob = self.frozen["binding"]["blob"]
+        self.frozen["binding"]["blob"] = "f" * 40
+        self.refuse("frozen approved SOURCE binding Git blob changed")
+        self.frozen["binding"]["blob"] = old_blob
 
     def test_64_CASES_source_map_preserved_but_no_real_target(self):
         original = self.coverage
