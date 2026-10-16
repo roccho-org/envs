@@ -36,6 +36,40 @@ jobs:
       - name: Test repository oracle
         run: python3 checks/test_repository.py
 
+      # Proposal-only: pure public SOURCE projection; no target read, secret, or effect permission.
+      - name: Test unadmitted Host Tool D/q proposal
+        run: python3 checks/test_host_tool_selection.py
+
+      - name: Test synthetic D/O/authority guard (always effect forbidden)
+        run: python3 checks/test_host_tool_guard.py
+
+      - name: Test stage-local READ, SOURCE, CHANGE, RECORD and receiver-start guards
+        run: python3 checks/test_host_tool_continuation.py
+
+      - name: Test v6 complete synthetic Target I(D)/I(O) gap and alternative plans
+        run: python3 checks/test_host_tool_target_gap.py
+
+      - name: Prove ordinary accepted projection rejects Host Tool proposal/admission
+        run: python3 checks/test_host_tool_normal_entry.py
+
+      - name: Test temporary native Tool generation and UNKNOWN/recovery SUT
+        run: python3 checks/test_host_tool_transition_sut.py
+
+      - name: Prove real resources Relation and envs Tool q bind same CI Host
+        run: python3 checks/test_host_tool_functional_binding.py
+
+      - name: Exercise F1 q/Host/Unit to disposable Target receive, O, receipt and UNKNOWN
+        run: python3 checks/test_host_tool_v6_bound_lifecycle.py
+
+      - name: Test inactive SOURCE entry with explicit scoped authority and disposable Target
+        run: python3 checks/test_host_tool_source_entry.py
+
+      - name: Test frozen v6 F1/F2 actual CI attempts and false-GREEN refusals (offline)
+        run: python3 checks/test_host_tool_v6_source_gate.py
+
+      - name: Test cross-repo public SOURCE provenance refusal (offline)
+        run: python3 checks/test_host_tool_source_provenance.py
+
       - name: Test Jev adapter
         run: python3 checks/test_jev_api.py
 
@@ -723,6 +757,52 @@ jobs:
           test "$(git rev-parse HEAD)" = "$ENVS_SOURCE_SHA"
           test -z "$(git status --porcelain)"
           echo "source commit=$ENVS_SOURCE_SHA tree=$(git rev-parse 'HEAD^{tree}')"
+
+      # PR merge checkout is separately tested by repository; prove this exact SOURCE head too.
+      - name: Test Host Tool proposal at exact source head
+        run: python3 checks/test_host_tool_selection.py
+
+      - name: Test synthetic Host Tool guard at exact source head
+        run: python3 checks/test_host_tool_guard.py
+
+      - name: Test stage-local SOURCE/READ/CHANGE/RECORD/HANDOFF at exact head
+        run: python3 checks/test_host_tool_continuation.py
+
+      - name: Test v6 full synthetic Target I(D)/I(O) gap at exact head
+        run: python3 checks/test_host_tool_target_gap.py
+
+      - name: Prove ordinary accepted entry is hard-closed at exact SOURCE head
+        run: python3 checks/test_host_tool_normal_entry.py
+
+      - name: Test disposable native generation SUT at exact head
+        run: python3 checks/test_host_tool_transition_sut.py
+
+      - name: Prove current Host Relation / D-q integration on exact SOURCE head
+        run: python3 checks/test_host_tool_functional_binding.py
+
+      - name: Exercise F1 to disposable Target lifecycle on exact SOURCE head
+        run: python3 checks/test_host_tool_v6_bound_lifecycle.py
+
+      - name: Test inactive SOURCE-entry read/change/receipt at exact head
+        run: python3 checks/test_host_tool_source_entry.py
+
+      - name: Test v6 F1/F2 CI-attempt and binding negative cases at exact head
+        run: python3 checks/test_host_tool_v6_source_gate.py
+
+      # SOURCE-only public GET; current PR CI never proves itself.
+      # Only this isolated unadmitted v6 verification branch performs live reads.
+      - name: Verify frozen F1/F2/relation public SOURCE evidence (not S4 admission)
+        if: github.event_name == 'pull_request' && (github.head_ref == 'codex/host-common-v6-f1-f2-source-gate-20261015' || github.head_ref == 'codex/host-common-v6-proposed-target-lifecycle-20261015')
+        run: python3 checks/host_tool_v6_source_gate.py --snapshot checks/fixtures/host-tool-v6-source-set.json
+
+      - name: Test public SOURCE provenance refusal at exact source head
+        run: python3 checks/test_host_tool_source_provenance.py
+
+      # Exactly this disposable SOURCE-candidate PR: immutable public metadata GET only.
+      # No token, Target, permission/trigger expansion or production job dependency.
+      - name: Verify real public SOURCE candidate provenance (not S4 admission)
+        if: github.event_name == 'pull_request' && (github.head_ref == 'codex/host-common-source-provenance-gate-20261014' || github.head_ref == 'codex/host-common-v5-source-composite-20261015')
+        run: python3 checks/host_tool_source_provenance.py --snapshot checks/fixtures/host-tool-source-set.json
 
       - name: Install pinned Nix
         uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24
