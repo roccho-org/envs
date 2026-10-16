@@ -7,9 +7,8 @@ import hashlib
 import importlib.util
 import json
 import os
-import getpass
 import re
-import secrets
+import socket
 import ssl
 import subprocess
 import sys
@@ -18,7 +17,6 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-import xml.etree.ElementTree as ElementTree
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
@@ -32,7 +30,8 @@ HANDOFF = Path("handoffs/dev-jev-api.json")
 FLAKE_LOCK = Path("flake.lock")
 RECEIPT_KIND = "envs.projectionReceipt.v1"
 TOOLCHAIN_KIND = "envs.effectToolchain.v1"
-TOOLCHAIN_TOOLS = ("python3", "sops", "wrangler", "git", "gh", "tofu", "cloudflared", "ssh", "sshd", "ssh_keygen", "curl")
+TOOLCHAIN_TOOLS = ("python3", "sops", "wrangler", "git", "gh", "tofu", "cloudflared", "ssh", "sshd", "ssh_keygen", "curl",
+                   "terraform_backend_git")
 STORE = Path("/nix/store")
 # Rent tunnel (windows #14): a provider-issued Named Tunnel token, encrypted to exactly one target age recipient.
 RENT_PLANE = "dev.rent-tunnel"
@@ -49,11 +48,90 @@ CLIENT_RECIPIENT = "RENT_CLIENT_AGE_RECIPIENT"
 # encrypted and locked R2 backend; its sensitive credentials output is sealed in memory into the two envelopes above.
 ROOT_PLANE = "dev.rent-root"
 ROOT_CONFIG = Path("providers/dev-rent-cloudflare/main.tf")
-ROOT_SECRETS = ("CLOUDFLARE_API_TOKEN", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "RENT_STATE_PASSPHRASE")
+# Host is not a GitHub Environment: rent stage ingress shares the functional dev-projection Environment, whose Pages/Mail
+# Cloudflare slots it never reads. Its own Cloudflare inputs are distinct storage slots (and runtime names); the adapter
+# hands each to its children only under the provider-native name below. No equality of value or scope is assumed.
+RENT_ENVIRONMENT = "dev-projection"
+RENT_CLOUDFLARE_INPUTS = {
+    "RENT_CLOUDFLARE_API_TOKEN": "CLOUDFLARE_API_TOKEN",
+    "RENT_CLOUDFLARE_ACCOUNT_ID": "CLOUDFLARE_ACCOUNT_ID",
+    "RENT_CLOUDFLARE_ZONE_ID": "CLOUDFLARE_ZONE_ID",
+}
+RETIRED_ENVIRONMENTS = ("dev-rent-tunnel", "dev-rent-client", "dev-rent-access-probe")
+ROOT_SECRETS = ("RENT_CLOUDFLARE_API_TOKEN", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "RENT_STATE_PASSPHRASE")
 # One key provider and method name for the state's life (a rotation would add a new name with this one as fallback).
 ROOT_KEY_NAME = "k0"
+# The reviewed readiness source grant opens only the read-only inspect entry; its workflow job admits one dispatch by
+# the declared caller on the accepted canonical SHA. Apply, backend migration and the backend-only plan stay closed.
+ROOT_INSPECT_SOURCE_ACTIVE = True
+ROOT_INSPECT_RESOURCE_TYPES = frozenset({
+    "cloudflare_zero_trust_tunnel_cloudflared",
+    "cloudflare_zero_trust_tunnel_cloudflared_config",
+    "cloudflare_dns_record",
+    "cloudflare_zero_trust_access_service_token",
+    "cloudflare_zero_trust_access_policy",
+    "cloudflare_zero_trust_access_application",
+})
+ROOT_INSPECT_STATE_LIMIT = 1048576
+# OpenTofu writes a state lineage as a UUID; the inspect receipt carries it only in that closed shape.
+ROOT_STATE_LINEAGE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+# S2 moves the declared root to the standard HTTP backend, served for one operation by a transient loopback
+# terraform-backend-git child that keeps the state on the GitHub ref below. No source path may plan, apply or create
+# against that backend before a separately reviewed activation grant: apply, backend migration and the backend-only
+# plan each refuse at their first line, before any contract, environment, manifest, secret or child.
+ROOT_APPLY_SOURCE_ACTIVE = False
+ROOT_MIGRATE_SOURCE_ACTIVE = False
+ROOT_PLAN_SOURCE_ACTIVE = False
+ROOT_STATE_BACKEND = {
+    "kind": "terraform-backend-git", "repository": "roccho-org/envs", "repository_id": 1391871347,
+    "ref": "refs/heads/tofu-state", "state_path": "state/dev-rent-cloudflare.json",
+    "lock_ref": "refs/heads/locks/state/dev-rent-cloudflare.json",
+}
+# The existing workflow principal for the state ref; it reaches only the backend child, never OpenTofu or argv.
+ROOT_STATE_GIT_TOKEN = "GITHUB_TOKEN"
+# Upstream v0.1.12 HTTPS basic auth refuses without GIT_USERNAME even for a token (storages/git/git.go authBasicHTTP);
+# GitHub accepts any fixed username with a token. Non-secret, so it is a source literal, not an Environment input.
+ROOT_STATE_GIT_USERNAME = "x-access-token"
+ROOT_BACKEND_READY_ATTEMPTS = 50
+# The root's former R2 S3 backend, used only to read and migrate the existing state until the retire source removes
+# it: exactly the partial S3 block and enforced encryption the root declared before S2, with nothing to plan or apply.
+ROOT_LEGACY_S3_CONFIG = """terraform {
+  backend "s3" {
+    region                      = "auto"
+    use_lockfile                = true
+    use_path_style              = true
+    skip_credentials_validation = true
+    skip_region_validation      = true
+    skip_requesting_account_id  = true
+    skip_metadata_api_check     = true
+    skip_s3_checksum            = true
+  }
+
+  encryption {
+    state {
+      enforced = true
+    }
+    plan {
+      enforced = true
+    }
+  }
+}
+"""
+
 # The format secrets.token_hex(32) produces, placed inside an HCL string: a format check, not a strength proof.
 ROOT_PASSPHRASE = re.compile(r"^[0-9a-f]{64}$")
+# The old S3 state object key exactly as the Environment declares it (the contract types it opaque): no prefix is
+# assumed. A closed ASCII charset keeps out any query, escape, space or control; every segment is a real name, so
+# there is no leading, trailing or doubled slash and no "." or ".." that a client could normalise to another object.
+ROOT_STATE_KEY_CHARS = re.compile(r"[A-Za-z0-9_./-]{1,180}")
+ROOT_LOCK_SUFFIX = ".tflock"
+
+
+def root_state_key_ok(key: str) -> bool:
+    return (ROOT_STATE_KEY_CHARS.fullmatch(key) is not None and key.endswith(".tfstate") and ".." not in key
+            and all(segment not in ("", ".") for segment in key.split("/")))
+
+
 # The windows slot rule (Get-RentAccessProblem) for each line: 1-1024 printable ASCII characters.
 SLOT_LINE = re.compile(r"^[!-~]{1,1024}$")
 WINDOWS_CONSUMER = "windows.rent.consumer"
@@ -64,59 +142,10 @@ RESPONSE_LIMIT = 65536
 LINODE_READ_PLANE = "dev.linode-read-probe"
 LINODE_API = "https://api.linode.com/v4"
 LINODE_READ_ENDPOINTS = (("profile", "/profile"), ("account", "/account"), ("linodes", "/linode/instances?page_size=25"))
-# Access SSH probe (windows #14): one disposable Named Tunnel, hostname, Service Auth app and service token.
-PROBE_PLANE = "dev.rent-access-probe"
-PROBE_CONFIG = Path("providers/dev-rent-access-probe/main.tf")
-PROBE_NAME = "windows-rent-access-probe"
-PROBE_HOSTNAME = "rent-access-probe.roccho.com"
-PROBE_PORT = 2222
-PROBE_TIMEOUT = 60.0
-PROBE_SETTLE = 20.0
-PROBE_LOCATED = ("tunnels", "dns_records", "access_applications", "service_tokens")
-# Every managed resource in the probe declaration (six, including the tunnel configuration).
-PROBE_ADDRESSES = tuple(f"cloudflare_{kind}.probe[0]" for kind in (
-    "zero_trust_tunnel_cloudflared", "zero_trust_tunnel_cloudflared_config", "dns_record",
-    "zero_trust_access_service_token", "zero_trust_access_policy", "zero_trust_access_application"))
+# The persistent root's sensitive credentials output: the tunnel token and the Access service token pair.
 PROBE_CREDENTIALS = ("tunnel_token", "service_token_id", "service_token_value")
-# Durable-state proof (windows #8/#14): OpenTofu S3-backend state, lock file and encryption on two per-run R2 buckets.
-# The parent token is an existing finite account token on the same Environment under its own secret name.
-STATE_PLANE = "dev.rent-state-proof"
-STATE_CONFIG = Path("providers/dev-rent-state-proof/main.tf")
-STATE_BACKEND = Path("providers/dev-rent-state-proof/backend/main.tf")
-STATE_BUCKET_PREFIX = "windows-rent-state-proof-"
-STATE_RESERVED_BUCKET = "windows-rent-state"
-STATE_ALLOWED_PREFIX = "state/"
-STATE_KEY = "state/proof.tfstate"
-# Fixed non-secret boundary objects: a known marker inside the prefix of each owned bucket, and the same bytes written
-# outside it. Every key a PUT is attempted for is deleted by cleanup, even when the response is unknown.
-STATE_MARKER_KEY = STATE_ALLOWED_PREFIX + "boundary-probe"
-STATE_OUTSIDE_MARKER_KEY = "outside/boundary-probe"
-STATE_MARKER = b"envs-r2-boundary-probe-v1"
-S3_TIMEOUT = 30
-S3_BODY_LIMIT = 65536
-# The workflow's timeout-minutes (the repository check requires equality) bounds the whole run, including the
-# temporary-credential wait; the parent token must outlive it by the margin before anything is created.
-STATE_JOB_MINUTES = 45
-STATE_MARGIN = 900.0
-STATE_CREDENTIAL_TTL = 900
-STATE_EXPIRY_GRACE = 60.0
-STATE_HOLD = 60
-STATE_SETTLE = 20.0
-STATE_LOCK_ERROR = b"Error acquiring the state lock"
-STATE_EVIDENCE_KIND = "envs.rentStateProofCreated.v1"
-STATE_CHECKS = (
-    "lock_holder_applied", "lock_contender_rejected", "lock_released", "raw_state_encrypted", "readback_exact",
-    "rotation_rewritten", "rotated_readback", "path_up_after_negatives",
-)
-# Each negative is REFUSED only after an adjacent control that differs in that one input succeeds and the negative fails
-# for its own cause; a negative that succeeds is ADMITTED; anything else (transport, 5xx, other cause) is UNKNOWN.
-STATE_NEGATIVES = {
-    "old_key_refused": {"decryption"},
-    "unencrypted_read_refused": {"encryption", "decryption"},
-    "no_credential_refused": {"credential"},
-    "outside_prefix_write_refused": {"access_denied"},
-    "decoy_refused": {"access_denied"},
-}
+# The disposable Access probe and R2 state proof (dev.rent-access-probe / dev.rent-state-proof) are retired with their
+# Environment; their parent token is never an input. The closed failure facts below remain the root's init hint.
 STATE_STATUS = re.compile(rb"StatusCode: ([0-9]{3})\b")
 STATE_TRANSIENT = re.compile(rb"(?<![-\w])timeout|timed out|connection (?:refused|reset)|no such host|unexpected EOF",
                              re.IGNORECASE)
@@ -131,8 +160,15 @@ GO_PLANE = "dev.opencode-go-authoring"
 GO_BINDING = "opencode-go.oci-dev"
 GO_CIPHERTEXT = Path("ciphertexts/dev-opencode-go.oci-dev.sops.yaml")
 GO_KEY = "OPENCODE_API_KEY"
+# The VersaPro own OCI Pi target (roccho-dev/resources#10): the same Go source plane with its own single recipient,
+# ciphertext and exact target. Declaring it never makes it usable; only a validated ciphertext at an exact commit does.
+OWN_GO_BINDING = "opencode-go.versapro-own-oci"
+OWN_GO_CIPHERTEXT = Path("ciphertexts/dev-opencode-go.versapro-own-oci.sops.yaml")
+OWN_GO_RECIPIENT = "VERSAPRO_OWN_OCI_AGE_RECIPIENT"
+# Go binding -> its one ciphertext; both read the Go plane's OPENCODE_API_KEY and nothing else.
+GO_CIPHERTEXTS = {GO_BINDING: GO_CIPHERTEXT, OWN_GO_BINDING: OWN_GO_CIPHERTEXT}
 # Every binding `author --target` can select; a dispatch names exactly one of them.
-AUTHOR_TARGETS = ("jev-api", OCI_BINDING, GO_BINDING)
+AUTHOR_TARGETS = ("jev-api", OCI_BINDING, GO_BINDING, OWN_GO_BINDING)
 ORG_BINDING = "jev-api.github-actions"
 ORG_HANDOFF = Path("handoffs/dev-jev-api.github-actions.json")
 ORG_RECEIPT_KIND = "envs.orgSecretProjectionReceipt.v1"
@@ -290,6 +326,16 @@ def expected_bindings(jev_target: dict[str, Any] | None = None) -> dict[str, dic
             "required_variables": [{"name": OCI_RECIPIENT, "type": "age_recipient", "lifecycle": "persistent"}],
             "target": {"repository": "roccho-dev/windows", "host": "oci-dev", "kind": "pi_auth_command"},
         },
+        OWN_GO_BINDING: {
+            "id": OWN_GO_BINDING,
+            "kind": "envs.authCapability.v1",
+            "capability": "opencode-go",
+            "ciphertext": OWN_GO_CIPHERTEXT.as_posix(),
+            "source_key": GO_KEY,
+            "github_environment": "dev-authoring",
+            "required_variables": [{"name": OWN_GO_RECIPIENT, "type": "age_recipient", "lifecycle": "persistent"}],
+            "target": {"repository": "roccho-dev/resources", "host": "versapro-own-oci", "kind": "pi_auth_command"},
+        },
         ORG_BINDING: {
             "id": ORG_BINDING, "kind": "envs.authCapability.v1", "capability": "jev-api",
             "ciphertext": OCI_CIPHERTEXT.as_posix(), "source_key": "JEV_API_KEY",
@@ -391,41 +437,6 @@ def expected_windows_consumer(source: str) -> dict[str, Any]:
     }
 
 
-def expected_probe_boundary() -> dict[str, Any]:
-    # A disposable probe of the client path; name lookup locates, it never proves ownership or deletes.
-    return {
-        "id": "dev.rent-access-probe.provider",
-        "kind": "envs.providerConsumerBoundary.v1",
-        "role": "provider",
-        "repository": "roccho-dev/envs",
-        "stage": "dev",
-        "capability": "rent-access-probe",
-        "source_kind": "provider_issued",
-        "target_kind": "disposable_probe",
-        "owns": ["disposable_probe_resources", "exact_id_cleanup", "name_lookup_locator"],
-        "does_not_own": ["existing_cloudflare_resources", "name_matched_deletion", "rent_target", "client_credential_selection"],
-        "handoff_ref_kind": "exact_commit_sha",
-    }
-
-
-def expected_state_boundary() -> dict[str, Any]:
-    # A disposable proof of the state backend; the parent credential and every existing bucket belong to others.
-    return {
-        "id": "dev.rent-state-proof.provider",
-        "kind": "envs.providerConsumerBoundary.v1",
-        "role": "provider",
-        "repository": "roccho-dev/envs",
-        "stage": "dev",
-        "capability": "rent-state-proof",
-        "source_kind": "github_environment",
-        "target_kind": "disposable_state_proof",
-        "owns": ["disposable_state_buckets", "run_scoped_temporary_credentials", "evidence_bound_cleanup"],
-        "does_not_own": ["parent_credential", "existing_r2_buckets", "reserved_production_state_bucket",
-                         "name_matched_deletion", "production_state"],
-        "handoff_ref_kind": "exact_commit_sha",
-    }
-
-
 def expected_oci_boundary() -> dict[str, Any]:
     # envs ends at the target-bound ciphertext PR; the target applies it and apps proves its own runtime.
     return {
@@ -461,6 +472,10 @@ def expected_go_boundary() -> dict[str, Any]:
     }
 
 
+def expected_own_go_boundary() -> dict[str, Any]:
+    return {**expected_go_boundary(), "id": "dev.opencode-go-versapro-own-oci.provider", "binding": OWN_GO_BINDING}
+
+
 def expected_inputs() -> dict[str, dict[str, list[dict[str, str]]]]:
     def entries(*values: tuple[str, str, str]) -> list[dict[str, str]]:
         return [{"name": name, "type": kind, "lifecycle": lifecycle} for name, kind, lifecycle in values]
@@ -481,7 +496,8 @@ def expected_inputs() -> dict[str, dict[str, list[dict[str, str]]]]:
         },
         GO_PLANE: {
             "required_secrets": entries((GO_KEY, "opaque", "one_shot_ingress")),
-            "required_variables": entries((OCI_RECIPIENT, "age_recipient", "persistent")),
+            "required_variables": entries((OCI_RECIPIENT, "age_recipient", "persistent"),
+                                          (OWN_GO_RECIPIENT, "age_recipient", "persistent")),
         },
         "dev.projection": {
             "required_secrets": entries(
@@ -492,25 +508,23 @@ def expected_inputs() -> dict[str, dict[str, list[dict[str, str]]]]:
         },
         "stg.projection": stage_projection(),
         "prd.projection": stage_projection(),
+        # Rent stage ingress shares dev-projection under its own RENT_CLOUDFLARE_* slots (RENT_CLOUDFLARE_INPUTS).
         RENT_PLANE: {
-            "required_secrets": entries(("CLOUDFLARE_API_TOKEN", "opaque", "persistent")),
+            "required_secrets": entries(("RENT_CLOUDFLARE_API_TOKEN", "opaque", "persistent")),
             "required_variables": entries(
-                ("CLOUDFLARE_ACCOUNT_ID", "cloudflare_account_id", "persistent"),
+                ("RENT_CLOUDFLARE_ACCOUNT_ID", "cloudflare_account_id", "persistent"),
                 ("RENT_TUNNEL_ID", "cloudflare_tunnel_id", "persistent"),
                 ("RENT_AGE_RECIPIENT", "age_recipient", "persistent"),
             ),
         },
-        # The credential arrives on stdin from the root's sensitive output; only its one recipient is an input.
-        CLIENT_PLANE: {
-            "required_secrets": entries(),
-            "required_variables": entries((CLIENT_RECIPIENT, "age_recipient", "persistent")),
-        },
-        # The persistent root shares the rent tunnel Environment; its own plane names every input the apply reads.
+        # The client plane is an output only: its credential arrives from the root's sensitive output and its one
+        # recipient is declared once, by the producing root below, so it has no ingress or Environment of its own.
+        # The persistent root's plane names every input the apply reads.
         ROOT_PLANE: {
             "required_secrets": entries(*((name, "opaque", "persistent") for name in ROOT_SECRETS)),
             "required_variables": entries(
-                ("CLOUDFLARE_ACCOUNT_ID", "cloudflare_account_id", "persistent"),
-                ("CLOUDFLARE_ZONE_ID", "cloudflare_zone_id", "persistent"),
+                ("RENT_CLOUDFLARE_ACCOUNT_ID", "cloudflare_account_id", "persistent"),
+                ("RENT_CLOUDFLARE_ZONE_ID", "cloudflare_zone_id", "persistent"),
                 ("RENT_HOSTNAME", "opaque", "persistent"),
                 ("RENT_ORIGIN_SERVICE", "opaque", "persistent"),
                 ("RENT_SERVICE_TOKEN_DURATION", "opaque", "persistent"),
@@ -519,21 +533,6 @@ def expected_inputs() -> dict[str, dict[str, list[dict[str, str]]]]:
                 ("RENT_AGE_RECIPIENT", "age_recipient", "persistent"),
                 (CLIENT_RECIPIENT, "age_recipient", "persistent"),
             ),
-        },
-        PROBE_PLANE: {
-            "required_secrets": entries(("CLOUDFLARE_API_TOKEN", "opaque", "persistent")),
-            "required_variables": entries(
-                ("CLOUDFLARE_ACCOUNT_ID", "cloudflare_account_id", "persistent"),
-                ("CLOUDFLARE_ZONE_ID", "cloudflare_zone_id", "persistent"),
-            ),
-        },
-        STATE_PLANE: {
-            # The parent token ID is non-secret but a GitHub variable is printed in the public step log, so it is a secret.
-            "required_secrets": entries(
-                ("R2_PARENT_API_TOKEN", "opaque", "finite_expiry"),
-                ("R2_PARENT_ACCESS_KEY_ID", "cloudflare_api_token_id", "finite_expiry"),
-            ),
-            "required_variables": entries(("CLOUDFLARE_ACCOUNT_ID", "cloudflare_account_id", "persistent")),
         },
         LINODE_READ_PLANE: {
             "required_secrets": entries(("LINODE_API_TOKEN", "opaque", "persistent")),
@@ -574,8 +573,7 @@ def validate_contracts(root: Path = ROOT) -> dict[str, dict[str, dict[str, Any]]
     boundary = index(root / BOUNDARY)
 
     require(set(envs) == {
-        "dev.authoring", GO_PLANE, "dev.projection", "dev.runtime", RENT_PLANE, CLIENT_PLANE, ROOT_PLANE, PROBE_PLANE, STATE_PLANE,
-        LINODE_READ_PLANE,
+        "dev.authoring", GO_PLANE, "dev.projection", "dev.runtime", RENT_PLANE, CLIENT_PLANE, ROOT_PLANE, LINODE_READ_PLANE,
         "stg.projection", "stg.runtime", "prd.projection", "prd.runtime",
         "voice-ui.dev", "voice-ui.stg", "voice-ui.prd",
     }, "environment set differs")
@@ -587,7 +585,7 @@ def validate_contracts(root: Path = ROOT) -> dict[str, dict[str, dict[str, Any]]
             and go_plane["active_github_environment"] is None and go_plane["migration_state"] == "NOT_CONFIGURED",
             "Go source-only authoring plane differs")
     rent = envs[RENT_PLANE]
-    require(rent["github_environment"] == "dev-rent-tunnel" and rent["owner"] == "envs"
+    require(rent["github_environment"] == RENT_ENVIRONMENT and rent["owner"] == "envs"
             and rent["source_kind"] == "provider_issued" and rent["target_kind"] == "public_sops",
             "dev rent tunnel plane differs")
     require(envs["dev.projection"]["github_environment"] == "dev-projection", "dev projection Environment differs")
@@ -596,7 +594,8 @@ def validate_contracts(root: Path = ROOT) -> dict[str, dict[str, dict[str, Any]]
         if row["kind"] != "envs.secretPlane.v1":
             continue
         declared = inputs.get(identity, {})
-        require(set(row) == SECRET_PLANE_KEYS | set(declared), f"{identity} fields differ")
+        extra = {"state_backend"} if identity == ROOT_PLANE else set()
+        require(set(row) == SECRET_PLANE_KEYS | set(declared) | extra, f"{identity} fields differ")
         require((row["github_environment"] is not None) == bool(declared), f"{identity} required inputs differ")
         for group, entries in declared.items():
             require(row[group] == entries, f"{identity} {group} differ")
@@ -631,25 +630,25 @@ def validate_contracts(root: Path = ROOT) -> dict[str, dict[str, dict[str, Any]]
 
     rent_cipher = root / RENT_CIPHERTEXT
     if rent_cipher.is_file():
-        require(rent["active_github_environment"] == "dev-rent-tunnel" and rent["migration_state"] == "ACTIVE",
+        require(rent["active_github_environment"] == RENT_ENVIRONMENT and rent["migration_state"] == "ACTIVE",
                 f"{RENT_PLANE} must be ACTIVE with its ciphertext")
         validate_rent_ciphertext(rent_cipher.read_bytes(), None, None)
     else:
         require(rent["active_github_environment"] is None and rent["migration_state"] == "NOT_CONFIGURED",
                 f"{RENT_PLANE} must be NOT_CONFIGURED without its ciphertext")
 
+    # The client plane is an output plane: no Environment, no ingress of its own; ACTIVE still records its sealed envelope.
     client = envs[CLIENT_PLANE]
-    require(client["github_environment"] == "dev-rent-client" and client["owner"] == "envs"
+    require(client["github_environment"] is None and client["active_github_environment"] is None
+            and client["owner"] == "envs"
             and client["source_kind"] == "provider_issued" and client["target_kind"] == "public_sops",
             f"{CLIENT_PLANE} plane differs")
     client_cipher = root / CLIENT_CIPHERTEXT
     if client_cipher.is_file():
-        require(client["active_github_environment"] == "dev-rent-client" and client["migration_state"] == "ACTIVE",
-                f"{CLIENT_PLANE} must be ACTIVE with its ciphertext")
+        require(client["migration_state"] == "ACTIVE", f"{CLIENT_PLANE} must be ACTIVE with its ciphertext")
         validate_client_ciphertext(client_cipher.read_bytes(), None, None)
     else:
-        require(client["active_github_environment"] is None and client["migration_state"] == "NOT_CONFIGURED",
-                f"{CLIENT_PLANE} must be NOT_CONFIGURED without its ciphertext")
+        require(client["migration_state"] == "NOT_CONFIGURED", f"{CLIENT_PLANE} must be NOT_CONFIGURED without its ciphertext")
 
     # The persistent root has no ciphertext of its own: ACTIVE records only that it sealed both envelopes above
     # (declared plane state, not proof that the Environment, the provider or the backend is configured).
@@ -657,27 +656,30 @@ def validate_contracts(root: Path = ROOT) -> dict[str, dict[str, dict[str, Any]]
     require(root_plane["github_environment"] == rent["github_environment"] and root_plane["owner"] == "envs"
             and root_plane["source_kind"] == "provider_issued" and root_plane["target_kind"] == "public_sops",
             f"{ROOT_PLANE} plane differs")
+    # The GitHub-ref state location: this repository's stable identity, a dedicated ref, a state path unique in it and
+    # the upstream backend's own lock ref for that path.
+    backend = root_plane["state_backend"]
+    require(backend == ROOT_STATE_BACKEND and backend["lock_ref"] == "refs/heads/locks/" + backend["state_path"]
+            and sum(1 for row in envs.values() if row.get("state_backend", {}).get("state_path") == backend["state_path"]
+                    and row.get("state_backend", {}).get("repository") == backend["repository"]) == 1,
+            f"{ROOT_PLANE} GitHub-ref state backend differs")
     if root_plane["migration_state"] == "ACTIVE":
-        require(root_plane["active_github_environment"] == "dev-rent-tunnel" and rent_cipher.is_file()
+        require(root_plane["active_github_environment"] == RENT_ENVIRONMENT and rent_cipher.is_file()
                 and client_cipher.is_file(), f"{ROOT_PLANE} is ACTIVE only with both envelopes")
     else:
         require(root_plane["active_github_environment"] is None and root_plane["migration_state"] == "NOT_CONFIGURED",
                 f"{ROOT_PLANE} must be NOT_CONFIGURED until it sealed both envelopes")
 
-    probe = envs[PROBE_PLANE]
-    require(probe["github_environment"] == "dev-rent-access-probe" and probe["owner"] == "envs"
-            and probe["source_kind"] == "provider_issued" and probe["target_kind"] == "disposable_probe"
-            and probe["active_github_environment"] is None and probe["migration_state"] == "NOT_CONFIGURED",
-            f"{PROBE_PLANE} must be a NOT_CONFIGURED disposable probe plane")
-    # The state proof shares the probe's Environment under its own secret name, so neither reads the other's token.
-    state = envs[STATE_PLANE]
-    require(state["github_environment"] == probe["github_environment"] and state["owner"] == "envs"
-            and state["source_kind"] == "github_environment" and state["target_kind"] == "disposable_state_proof"
-            and state["active_github_environment"] is None and state["migration_state"] == "NOT_CONFIGURED",
-            f"{STATE_PLANE} must be a NOT_CONFIGURED disposable state plane")
-    probe_secrets = {entry["name"] for entry in probe["required_secrets"]}
-    require(not probe_secrets & {entry["name"] for entry in state["required_secrets"]},
-            f"{STATE_PLANE} must not reuse the access probe secret")
+    # Rent shares the dev-projection trust boundary but never the Pages/Mail Cloudflare slots, and no plane names a
+    # retired host-specific Environment or the retired R2 parent token.
+    for identity, row in envs.items():
+        require(row.get("github_environment") not in RETIRED_ENVIRONMENTS
+                and row.get("active_github_environment") not in RETIRED_ENVIRONMENTS,
+                f"{identity} names a retired host-specific Environment")
+        names = {entry["name"] for group in ("required_secrets", "required_variables") for entry in row.get(group, [])}
+        require(not any(name.startswith("R2_PARENT_") for name in names), f"{identity} requires the retired R2 parent token")
+        if identity in (RENT_PLANE, ROOT_PLANE):
+            require(not names & set(RENT_CLOUDFLARE_INPUTS.values()), f"{identity} reads a Pages/Mail Cloudflare slot")
 
     linode = envs[LINODE_READ_PLANE]
     require(linode["github_environment"] == "dev-projection" and linode["owner"] == "envs"
@@ -689,17 +691,17 @@ def validate_contracts(root: Path = ROOT) -> dict[str, dict[str, dict[str, Any]]
     oci_cipher = root / OCI_CIPHERTEXT
     if oci_cipher.is_file():
         validate_oci_ciphertext(oci_cipher.read_bytes(), None, None)
-    go_cipher = root / GO_CIPHERTEXT
-    if go_cipher.is_file():
-        validate_oci_ciphertext(go_cipher.read_bytes(), None, None, key=GO_KEY)
+    for path in GO_CIPHERTEXTS.values():
+        if (root / path).is_file():
+            validate_oci_ciphertext((root / path).read_bytes(), None, None, key=GO_KEY)
 
     jev_target = validate_jev_target(bindings.get("jev-api", {}).get("target"))
     require(bindings == expected_bindings(jev_target), "binding set differs")
     require(set(boundary) == {
-        "repository.branch-policy", "dev.jev-api.provider", "dev.rent-tunnel.provider", "dev.rent-access-probe.provider",
-        "dev.rent-state-proof.provider", "dev.jev-api-oci-dev.provider", "apps.voice-ui.consumer", "ops.voice-ui.consumer",
+        "repository.branch-policy", "dev.jev-api.provider", "dev.rent-tunnel.provider",
+        "dev.jev-api-oci-dev.provider", "apps.voice-ui.consumer", "ops.voice-ui.consumer",
         "normal.consumer.path", "dev.rent-client.provider", "dev.rent-root.provider", WINDOWS_CONSUMER,
-        "dev.opencode-go-oci-dev.provider",
+        "dev.opencode-go-oci-dev.provider", "dev.opencode-go-versapro-own-oci.provider",
     } | set(expected_org_boundaries()), "provider-consumer boundary set differs")
     for identity, expected in expected_org_boundaries().items():
         require(boundary[identity] == expected, "Org provider-consumer boundary differs")
@@ -709,11 +711,11 @@ def validate_contracts(root: Path = ROOT) -> dict[str, dict[str, dict[str, Any]]
     source = boundary[WINDOWS_CONSUMER].get("distribution_source")
     require(isinstance(source, str) and SHA40.fullmatch(source) is not None
             and boundary[WINDOWS_CONSUMER] == expected_windows_consumer(source), "windows rent consumer boundary differs")
-    require(boundary["dev.rent-access-probe.provider"] == expected_probe_boundary(), "access probe provider boundary differs")
-    require(boundary["dev.rent-state-proof.provider"] == expected_state_boundary(), "state proof provider boundary differs")
     require(boundary["dev.jev-api-oci-dev.provider"] == expected_oci_boundary(), "OCI dev provider boundary differs")
     require(boundary["dev.opencode-go-oci-dev.provider"] == expected_go_boundary(),
             "OpenCode Go provider boundary differs")
+    require(boundary["dev.opencode-go-versapro-own-oci.provider"] == expected_own_go_boundary(),
+            "OpenCode Go own OCI provider boundary differs")
     require(boundary["repository.branch-policy"] == {
         "id": "repository.branch-policy", "kind": "envs.branchPolicy.v1",
         "canonical_branch": "proposals", "default_branch": "proposals",
@@ -802,30 +804,40 @@ def reject_live_values(root: Path, name: str, values: list[str],
         relative = path.relative_to(root).as_posix()
         data = path.read_bytes()
         if relative in {CIPHERTEXT.as_posix(), RENT_CIPHERTEXT.as_posix(), CLIENT_CIPHERTEXT.as_posix(),
-                        OCI_CIPHERTEXT.as_posix(), GO_CIPHERTEXT.as_posix()}:
+                        OCI_CIPHERTEXT.as_posix(), *(path.as_posix() for path in GO_CIPHERTEXTS.values())}:
             data = without_recipient_metadata(data.decode("utf-8", errors="replace")).encode()
         for value in values:
             if value.encode() in data:
                 require(relative in allowed_paths, f"{relative}: live {name} value is stored in Git")
 
 
-def gate(root: Path, contracts: dict[str, dict[str, dict[str, Any]]], plane: str) -> dict[str, str]:
+def gate(root: Path, contracts: dict[str, dict[str, dict[str, Any]]], plane: str,
+         only: Iterable[str] | None = None) -> dict[str, str]:
+    # `only` reads a declared subset of the plane's inputs (an output plane uses its producer's declaration).
     row = contracts["environments"][plane]
+    selected = None if only is None else set(only)
+    declared = [entry for entry in row["required_secrets"] + row["required_variables"]
+                if selected is None or entry["name"] in selected]
+    require(selected is None or {entry["name"] for entry in declared} == selected, f"{plane}: undeclared input selected")
     values: dict[str, str] = {}
-    for entry in row["required_secrets"] + row["required_variables"]:
+    for entry in declared:
         name, kind = entry["name"], entry["type"]
         value = os.environ.get(name, "")
         require(value != "", f"{plane}: {name} is missing")
         require(INPUT_TYPES[kind](value), f"{plane}: {name} is not a valid {kind}")
         values[name] = value
     for entry in row["required_variables"]:
+        if entry["name"] not in values:
+            continue
         value = values[entry["name"]]
         live = recipient_items(value) if entry["type"] == "age_recipient_list" else [value]
         allowed_paths: tuple[str, ...] = ()
-        if entry["name"] == "CLOUDFLARE_ACCOUNT_ID":
+        if entry["name"] in ("CLOUDFLARE_ACCOUNT_ID", "RENT_CLOUDFLARE_ACCOUNT_ID"):
             target = contracts["bindings"]["jev-api"]["target"]
             if target.get("provider") == "cloudflare-workers":
-                require(value == target["account_id"], "Workers target account differs from projection account")
+                # Only the projection account must be the Workers target's; the rent slot is never assumed equal.
+                require(entry["name"] != "CLOUDFLARE_ACCOUNT_ID" or value == target["account_id"],
+                        "Workers target account differs from projection account")
                 # Account ID is a non-secret target identifier. It may occur only in the
                 # closed selected binding and its non-secret handoff receipt; every other
                 # repository occurrence remains rejected.
@@ -933,7 +945,7 @@ def authoring_inputs(contracts: dict[str, dict[str, dict[str, Any]]], target: st
     # A selected author target reads only its own source plane and recipient. The GitHub Environment
     # can be shared without leaking one source key into another target's process environment.
     require(target in AUTHOR_TARGETS, f"unknown author target: {target}")
-    plane = contracts["environments"]["dev.authoring" if target != GO_BINDING else GO_PLANE]
+    plane = contracts["environments"][GO_PLANE if target in GO_CIPHERTEXTS else "dev.authoring"]
     if target == "jev-api":
         return plane["required_secrets"] + plane["required_variables"]
     binding = contracts["bindings"][target]
@@ -963,11 +975,14 @@ def encrypt_oci_key(source: str, recipient: str, tools: Mapping[str, str], runne
 
 def author_oci(root: Path = ROOT, runner: Runner = default_runner, target: str = OCI_BINDING) -> dict[str, Any]:
     # Writes only the selected OCI ciphertext: no plane state, handoff or other target's file.
-    require(target in (OCI_BINDING, GO_BINDING), "OCI author target not declared")
+    require(target == OCI_BINDING or target in GO_CIPHERTEXTS, "OCI author target not declared")
     contracts = validate_contracts(root)
     tools = toolchain(root)
     binding = contracts["bindings"][target]
     source_key = binding["source_key"]
+    # Each target names exactly one recipient variable; another target's recipient is never a fallback.
+    require(len(binding["required_variables"]) == 1, f"{target} must name exactly one recipient")
+    recipient_name = binding["required_variables"][0]["name"]
     values: dict[str, str] = {}
     for entry in authoring_inputs(contracts, target):
         name, kind = entry["name"], entry["type"]
@@ -976,10 +991,10 @@ def author_oci(root: Path = ROOT, runner: Runner = default_runner, target: str =
         require(INPUT_TYPES[kind](value), f"{target}: {name} is not a valid {kind}")
         values[name] = value
     # Secret and Variable alike: a value already in Git is RED before SOPS runs.
-    reject_live_values(root, OCI_RECIPIENT, [values[OCI_RECIPIENT]])
+    reject_live_values(root, recipient_name, [values[recipient_name]])
     reject_live_values(root, source_key, [values[source_key]])
-    data = encrypt_oci_key(values[source_key], values[OCI_RECIPIENT], tools, runner, key=source_key)
-    ciphertext_path = OCI_CIPHERTEXT if target == OCI_BINDING else GO_CIPHERTEXT
+    data = encrypt_oci_key(values[source_key], values[recipient_name], tools, runner, key=source_key)
+    ciphertext_path = OCI_CIPHERTEXT if target == OCI_BINDING else GO_CIPHERTEXTS[target]
     require(binding["ciphertext"] == ciphertext_path.as_posix(), "selected ciphertext differs")
     output = root / ciphertext_path
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -1060,9 +1075,9 @@ def rent_author(root: Path = ROOT, runner: Runner = default_runner, fetch: Fetch
     tools = toolchain(root)
     inputs = gate(root, contracts, RENT_PLANE)
     # Secrets as well as Variables: a value already in Git is RED before the provider call, the token before SOPS.
-    reject_live_values(root, "CLOUDFLARE_API_TOKEN", [inputs["CLOUDFLARE_API_TOKEN"]])
+    reject_live_values(root, "RENT_CLOUDFLARE_API_TOKEN", [inputs["RENT_CLOUDFLARE_API_TOKEN"]])
     token = retrieve_tunnel_token(
-        inputs["CLOUDFLARE_ACCOUNT_ID"], inputs["RENT_TUNNEL_ID"], inputs["CLOUDFLARE_API_TOKEN"], fetch)
+        inputs["RENT_CLOUDFLARE_ACCOUNT_ID"], inputs["RENT_TUNNEL_ID"], inputs["RENT_CLOUDFLARE_API_TOKEN"], fetch)
     reject_live_values(root, RENT_KEY, [token])
     data = encrypt_rent_token(token, inputs["RENT_AGE_RECIPIENT"], tools, runner)
     target = root / RENT_CIPHERTEXT
@@ -1110,7 +1125,8 @@ def client_author(credentials: bytes, root: Path = ROOT, runner: Runner = defaul
     # service token pair is projected. Nothing is printed but this result, which carries no value.
     contracts = validate_contracts(root)
     tools = toolchain(root)
-    inputs = gate(root, contracts, CLIENT_PLANE)
+    # The output plane has no ingress: its one recipient is the producing root's declared RENT_CLIENT_AGE_RECIPIENT.
+    inputs = gate(root, contracts, ROOT_PLANE, only=(CLIENT_RECIPIENT,))
     require(len(credentials) <= RESPONSE_LIMIT, "root output exceeds its bound")
     try:
         value = json.loads(credentials)
@@ -1131,13 +1147,14 @@ def client_author(credentials: bytes, root: Path = ROOT, runner: Runner = defaul
 
 def root_env(tools: Mapping[str, str], inputs: Mapping[str, str], home: Path) -> dict[str, str]:
     # Only the OpenTofu child gets these: the API token, the backend credential and endpoint, the fixed encryption
-    # (pbkdf2 key provider and aes_gcm method, both k0, for state and plan) and the root's five inputs.
+    # (pbkdf2 key provider and aes_gcm method, both k0, for state and plan) and the root's five inputs. The rent
+    # RENT_CLOUDFLARE_* slots reach it only under the provider-native names (RENT_CLOUDFLARE_INPUTS).
     return clean_env(tools, {
-        "CLOUDFLARE_API_TOKEN": inputs["CLOUDFLARE_API_TOKEN"],
+        "CLOUDFLARE_API_TOKEN": inputs["RENT_CLOUDFLARE_API_TOKEN"],
         "AWS_ACCESS_KEY_ID": inputs["AWS_ACCESS_KEY_ID"], "AWS_SECRET_ACCESS_KEY": inputs["AWS_SECRET_ACCESS_KEY"],
-        "AWS_ENDPOINT_URL_S3": r2_endpoint(inputs["CLOUDFLARE_ACCOUNT_ID"]), "AWS_EC2_METADATA_DISABLED": "true",
+        "AWS_ENDPOINT_URL_S3": r2_endpoint(inputs["RENT_CLOUDFLARE_ACCOUNT_ID"]), "AWS_EC2_METADATA_DISABLED": "true",
         "TF_ENCRYPTION": encryption_config(ROOT_KEY_NAME, inputs["RENT_STATE_PASSPHRASE"]),
-        "TF_VAR_account_id": inputs["CLOUDFLARE_ACCOUNT_ID"], "TF_VAR_zone_id": inputs["CLOUDFLARE_ZONE_ID"],
+        "TF_VAR_account_id": inputs["RENT_CLOUDFLARE_ACCOUNT_ID"], "TF_VAR_zone_id": inputs["RENT_CLOUDFLARE_ZONE_ID"],
         "TF_VAR_hostname": inputs["RENT_HOSTNAME"], "TF_VAR_origin_service": inputs["RENT_ORIGIN_SERVICE"],
         "TF_VAR_service_token_duration": inputs["RENT_SERVICE_TOKEN_DURATION"],
         "TF_IN_AUTOMATION": "1", "TF_INPUT": "0", "HOME": str(home),
@@ -1180,6 +1197,10 @@ def rent_root(root: Path = ROOT, runner: Runner = default_runner, progress: dict
     # progress["stage"] names how far it got, so a failure is reported as a closed kind and stage only; a captured
     # non-zero init child also leaves progress["init_hint"], its closed and unverified failure facts.
     progress = {} if progress is None else progress
+    # S2: the root now declares the GitHub-ref HTTP backend, so this S3-era apply refuses before any input or child
+    # until a separately reviewed activation source re-binds it.
+    progress["stage"] = "source_guard"
+    require(ROOT_APPLY_SOURCE_ACTIVE, "rent-root apply is source-hard-inactive")
     progress["stage"] = "gate"
     contracts = validate_contracts(root)
     tools = toolchain(root)
@@ -1216,18 +1237,7 @@ def rent_root(root: Path = ROOT, runner: Runner = default_runner, progress: dict
                             progress)
 
 
-# A bounded client attempt returns ("exit", code, stdout) or ("timeout", -1, b""); stderr is never kept or logged.
-Bounded = Callable[[Sequence[str], Mapping[str, str], float], tuple[str, int, bytes]]
 Spawn = Callable[[Sequence[str], Mapping[str, str]], Any]
-
-
-def default_bounded(argv: Sequence[str], env: Mapping[str, str], timeout: float) -> tuple[str, int, bytes]:
-    try:
-        result = subprocess.run(list(argv), env=dict(env), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                stderr=subprocess.DEVNULL, timeout=timeout, check=False, shell=False)
-    except subprocess.TimeoutExpired:
-        return ("timeout", -1, b"")
-    return ("exit", result.returncode, result.stdout)
 
 
 def default_spawn(argv: Sequence[str], env: Mapping[str, str]) -> subprocess.Popen[bytes]:
@@ -1250,16 +1260,6 @@ def tofu(tools: Mapping[str, str], work: Path, env: Mapping[str, str], runner: R
                        label=f"OpenTofu {args[0]}").stdout
 
 
-def tofu_workdir(root: Path, scratch: Path, name: str, tools: Mapping[str, str], env: Mapping[str, str],
-                 runner: Runner) -> Path:
-    # Each phase gets its own fresh state; a lookup directory never holds a managed resource it could delete.
-    work = scratch / name
-    work.mkdir()
-    (work / "main.tf").write_bytes((root / PROBE_CONFIG).read_bytes())
-    tofu(tools, work, env, runner, "init", "-input=false", "-no-color")
-    return work
-
-
 def output(tools: Mapping[str, str], work: Path, env: Mapping[str, str], runner: Runner, name: str,
            keys: Sequence[str]) -> dict[str, Any]:
     try:
@@ -1268,222 +1268,6 @@ def output(tools: Mapping[str, str], work: Path, env: Mapping[str, str], runner:
         raise EnvsError(f"OpenTofu output {name} is not JSON") from None
     require(isinstance(value, dict) and set(value) == set(keys), f"OpenTofu output {name} differs")
     return value
-
-
-def locate(root: Path, scratch: Path, name: str, tools: Mapping[str, str], env: Mapping[str, str],
-           runner: Runner) -> dict[str, list[str]]:
-    # A locator only: create=false declares no managed resource, so this path has no create or delete.
-    work = tofu_workdir(root, scratch, name, tools, env, runner)
-    tofu(tools, work, env, runner, "apply", "-input=false", "-auto-approve", "-no-color", "-var", "create=false")
-    found = output(tools, work, env, runner, "located", PROBE_LOCATED)
-    require(all(isinstance(ids, list) and all(isinstance(item, str) for item in ids) for ids in found.values()),
-            "OpenTofu located output differs")
-    return found
-
-
-def ssh_fixture(tools: Mapping[str, str], directory: Path, runner: Runner) -> dict[str, Any]:
-    # A throwaway localhost sshd that answers every login with a run-scoped nonce, and the client files for it.
-    directory.mkdir(mode=0o700)
-    for key in ("host", "client"):
-        run_checked([tools["ssh_keygen"], "-q", "-t", "ed25519", "-N", "", "-C", PROBE_NAME, "-f", str(directory / key)],
-                    env=clean_env(tools, {}), runner=runner, label="ssh-keygen")
-    nonce = secrets.token_hex(16)
-    (directory / "nonce").write_text(nonce + "\n", encoding="utf-8")
-    (directory / "authorized_keys").write_bytes((directory / "client.pub").read_bytes())
-    host = (directory / "host.pub").read_text(encoding="utf-8").split()
-    (directory / "known_hosts").write_text(f"{PROBE_NAME} {host[0]} {host[1]}\n", encoding="utf-8")
-    user = getpass.getuser()
-    (directory / "sshd_config").write_text("".join(f"{line}\n" for line in (
-        f"Port {PROBE_PORT}", "ListenAddress 127.0.0.1", f"HostKey {directory / 'host'}",
-        f"AuthorizedKeysFile {directory / 'authorized_keys'}", f"PidFile {directory / 'sshd.pid'}",
-        "PasswordAuthentication no", "KbdInteractiveAuthentication no", "PubkeyAuthentication yes",
-        "UsePAM no", "StrictModes no", f"AllowUsers {user}", f"ForceCommand cat {directory / 'nonce'}",
-    )), encoding="utf-8")
-    return {"directory": directory, "nonce": nonce, "user": user}
-
-
-def ssh_argv(tools: Mapping[str, str], fixture: Mapping[str, Any], target: str, proxy: bool) -> list[str]:
-    directory = fixture["directory"]
-    argv = [tools["ssh"], "-F", "/dev/null", "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes",
-            "-i", str(directory / "client"), "-o", "StrictHostKeyChecking=yes",
-            "-o", f"UserKnownHostsFile={directory / 'known_hosts'}", "-o", f"HostKeyAlias={PROBE_NAME}",
-            "-o", "UpdateHostKeys=no", "-o", "ConnectTimeout=30", "-l", fixture["user"]]
-    if proxy:
-        # The same ProxyCommand shape windows PR #21 writes; credentials only ever come from the environment.
-        argv += ["-o", f'ProxyCommand="{tools["cloudflared"]}" access ssh --hostname %h']
-    else:
-        argv += ["-p", str(PROBE_PORT)]
-    return argv + [target]
-
-
-PROBE_CASES = ("service_token", "no_token", "wrong_token", "service_token_again")
-
-
-def classify(outcomes: Mapping[str, tuple[str, int, bytes]], nonce: str) -> dict[str, Any]:
-    # The client sees only its own exit and output, so a refused negative is not evidence that Access denied it: DNS,
-    # edge, tunnel or sshd failures look the same. The negatives are bracketed by two token cases; only when both
-    # reach the nonce was the path up around them, and even then the refusal cause stays unattributed.
-    def reached(outcome: tuple[str, int, bytes]) -> bool:
-        return outcome[0] == "exit" and outcome[1] == 0 and outcome[2].strip() == nonce.encode()
-
-    require(set(outcomes) == set(PROBE_CASES), "probe cases differ")
-    labels: dict[str, str] = {}
-    for case, outcome in outcomes.items():
-        if outcome[0] == "timeout":
-            labels[case] = "UNKNOWN"
-        elif case.startswith("service_token"):
-            labels[case] = "REACHED" if reached(outcome) else "FAILED"
-        else:
-            labels[case] = "ADMITTED" if outcome[1] == 0 or nonce.encode() in outcome[2] else "REFUSED"
-    if any(labels[case] == "ADMITTED" for case in ("no_token", "wrong_token")):
-        status = "ACCESS_NOT_ENFORCED"
-    elif "UNKNOWN" in labels.values():
-        status = "UNKNOWN"
-    elif labels["service_token"] == labels["service_token_again"] == "REACHED":
-        status = "TOKEN_REACHED_NEGATIVES_REFUSED"
-    elif labels["service_token"] == labels["service_token_again"] == "FAILED":
-        status = "UNATTENDED_PATH_FAILED"
-    else:
-        status = "UNKNOWN"
-    return {"status": status, "cases": labels, "cause": "UNKNOWN",
-            "access_denial_evidence": "NOT_OBSERVED",
-            "needed_for_denial_claim": "a provider-side Access decision record for each negative attempt"}
-
-
-def run_probe(tools: Mapping[str, str], credentials: Mapping[str, str], scratch: Path, runner: Runner,
-              bounded: Bounded, spawn: Spawn, sleep: Callable[[float], None]) -> dict[str, Any]:
-    fixture = ssh_fixture(tools, scratch / "ssh", runner)
-
-    def isolated(name: str, extra: Mapping[str, str]) -> dict[str, str]:
-        # Every process and case gets its own fresh, empty HOME: no runner login cache (~/.cloudflared) and no
-        # token cached by one case can reach another.
-        home = scratch / f"home-{name}"
-        home.mkdir(mode=0o700)
-        return {**clean_env(tools, {}), "HOME": str(home), **extra}
-
-    processes = [spawn([tools["sshd"], "-D", "-e", "-f", str(fixture["directory"] / "sshd_config")], isolated("sshd", {}))]
-    try:
-        processes.append(spawn([tools["cloudflared"], "tunnel", "--no-autoupdate", "run"],
-                               isolated("tunnel", {"TUNNEL_TOKEN": credentials["tunnel_token"]})))
-        sleep(PROBE_SETTLE)
-        argv = ssh_argv(tools, fixture, PROBE_HOSTNAME, proxy=True)
-        token = {"TUNNEL_SERVICE_TOKEN_ID": credentials["service_token_id"],
-                 "TUNNEL_SERVICE_TOKEN_SECRET": credentials["service_token_value"]}
-        cases = {
-            "service_token": token,
-            "no_token": {},
-            "wrong_token": {"TUNNEL_SERVICE_TOKEN_ID": credentials["service_token_id"],
-                            "TUNNEL_SERVICE_TOKEN_SECRET": secrets.token_hex(32)},
-            "service_token_again": token,
-        }
-        # Each case runs once, in this order, with no retry.
-        outcomes = {case: bounded(argv, isolated(case, extra), PROBE_TIMEOUT) for case, extra in cases.items()}
-    finally:
-        for process in reversed(processes):
-            stop(process)
-    return classify(outcomes, fixture["nonce"])
-
-
-def access_probe(root: Path = ROOT, *, locate_only: bool = False, runner: Runner = default_runner,
-                 bounded: Bounded = default_bounded, spawn: Spawn = default_spawn,
-                 sleep: Callable[[float], None] = time.sleep) -> dict[str, Any]:
-    contracts = validate_contracts(root)
-    tools = toolchain(root)
-    inputs = gate(root, contracts, PROBE_PLANE)
-    reject_live_values(root, "CLOUDFLARE_API_TOKEN", [inputs["CLOUDFLARE_API_TOKEN"]])
-    env = clean_env(tools, {
-        "CLOUDFLARE_API_TOKEN": inputs["CLOUDFLARE_API_TOKEN"], "TF_VAR_account_id": inputs["CLOUDFLARE_ACCOUNT_ID"],
-        "TF_VAR_zone_id": inputs["CLOUDFLARE_ZONE_ID"], "TF_IN_AUTOMATION": "1", "TF_INPUT": "0",
-    })
-    result: dict[str, Any] = {"kind": "envs.rentAccessProbeResult.v1", "hostname": PROBE_HOSTNAME,
-                              "real_ssh_acceptance": "NOT_CLAIMED", "rent_target": "UNTOUCHED"}
-    with tempfile.TemporaryDirectory(prefix="envs-access-probe-") as temporary:
-        scratch = Path(temporary)
-        before = locate(root, scratch, "before", tools, env, runner)
-        if locate_only or any(before.values()):
-            # Name matches are candidates only: ownership is unproven and nothing is adopted or deleted.
-            located = any(before.values())
-            result.update({"stage": "locate" if locate_only else "preflight", "located": before,
-                           "status": "UNKNOWN" if located else "NONE_LOCATED",
-                           "ownership": "UNPROVEN" if located else None,
-                           "next": "NEEDS_AUTHORITY" if located else None})
-            if not locate_only:
-                result["status"] = "UNKNOWN"
-            return result
-        work = tofu_workdir(root, scratch, "probe", tools, env, runner)
-        result.update({"stage": "create", "status": "UNKNOWN", "observed_state_ids": None, "probe": None,
-                       "id_claim": "IDs are as recorded in this run's OpenTofu state; provider existence or "
-                                   "absence is not asserted"})
-        observed: dict[str, str] | None = None
-        try:
-            try:
-                tofu(tools, work, env, runner, "apply", "-input=false", "-auto-approve", "-no-color",
-                     "-var", "create=true")
-            finally:
-                # Whatever apply managed to create, its exact IDs are taken from the state before anything else.
-                observed = state_ids(tools, work, env, runner)
-                result["observed_state_ids"] = observed if observed is not None else "STATE_UNREADABLE"
-                print(json.dumps({"kind": "envs.rentAccessProbeStateIds.v1", "observed_state_ids":
-                                  result["observed_state_ids"]}, sort_keys=True), file=sys.stderr, flush=True)
-            require(observed is not None and set(observed) == set(PROBE_ADDRESSES), "created resource set differs")
-            result["stage"] = "probe"
-            credentials = output(tools, work, env, runner, "credentials", PROBE_CREDENTIALS)
-            require(all(isinstance(value, str) and value for value in credentials.values()), "credentials differ")
-            probe = run_probe(tools, credentials, scratch, runner, bounded, spawn, sleep)
-            result.update({"probe": probe, "status": probe["status"]})
-        except EnvsError as exc:
-            result["error"] = str(exc)
-        finally:
-            # Cleanup destroys only this state, then re-reads the state and looks up absence in a fresh lookup state.
-            destroyed = True
-            try:
-                tofu(tools, work, env, runner, "destroy", "-input=false", "-auto-approve", "-no-color",
-                     "-var", "create=true")
-            except EnvsError:
-                destroyed = False
-            remaining = state_ids(tools, work, env, runner)
-            after = None
-            if destroyed and remaining == {}:
-                try:
-                    after = locate(root, scratch, "after", tools, env, runner)
-                except EnvsError:
-                    after = None
-            result["located_after"] = after
-            if destroyed and remaining == {} and after is not None and not any(after.values()):
-                result["cleanup"] = "ABSENT"
-            else:
-                result["cleanup"] = "CLEANUP_UNKNOWN"
-                # Still in state: destroy did not remove them. Unverified: state says removed (or state unreadable),
-                # but absence was not read back. Either way only these exact IDs may be cleaned up; a name match may not.
-                known = observed or {}
-                result["remaining_in_state"] = remaining if remaining is not None else "STATE_UNREADABLE"
-                result["unverified_after_destroy"] = {
-                    address: value for address, value in known.items() if remaining is None or address not in remaining}
-                result["owner_cleanup"] = "exact IDs above only; name-matched deletion needs its own contract"
-    if result["cleanup"] != "ABSENT":
-        # The current state is what matters: resources may remain, so no probe outcome stands as the status.
-        result["status"] = "CLEANUP_UNKNOWN"
-    return result
-
-
-def state_ids(tools: Mapping[str, str], work: Path, env: Mapping[str, str], runner: Runner) -> dict[str, str] | None:
-    # The state JSON can hold secrets in plain text: it is parsed in memory and only managed addresses and IDs leave.
-    try:
-        state = json.loads(tofu(tools, work, env, runner, "show", "-json", "-no-color") or b"{}")
-    except (EnvsError, json.JSONDecodeError, UnicodeDecodeError):
-        return None
-    resources = (state.get("values") or {}).get("root_module", {}).get("resources", []) if isinstance(state, dict) else None
-    if not isinstance(resources, list):
-        return None
-    found: dict[str, str] = {}
-    for item in resources:
-        if not isinstance(item, dict) or item.get("mode") != "managed":
-            continue
-        address, value = item.get("address"), (item.get("values") or {}).get("id")
-        if address not in PROBE_ADDRESSES or not isinstance(value, str) or not value or address in found:
-            return None
-        found[address] = value
-    return found
 
 
 # A Cloudflare API call returns (HTTP status, parsed JSON or None); a transport failure is UNKNOWN, never a status.
@@ -1516,145 +1300,6 @@ def default_api(method: str, path: str, token: str, body: Any) -> tuple[int, Any
         return status, None
 
 
-def api_result(status: int, value: Any) -> Any:
-    return value.get("result") if status == 200 and isinstance(value, dict) and value.get("success") is True else None
-
-
-def utc_seconds(value: Any) -> float:
-    require(isinstance(value, str) and value.endswith("Z"), "provider timestamp is not UTC")
-    try:
-        return datetime.fromisoformat(value[:-1] + "+00:00").timestamp()
-    except ValueError:
-        raise EnvsError("provider timestamp is invalid") from None
-
-
-def state_window() -> float:
-    # The job bound (which includes the temporary-credential wait and cleanup) plus the declared margin.
-    return STATE_JOB_MINUTES * 60 + STATE_MARGIN
-
-
-def verify_parent(api: Api, account: str, token: str, expected: str, now: float) -> dict[str, str]:
-    # Verify proves identity, status and time bounds only; R2 authority is proven by the first bounded create.
-    result = api_result(*api("GET", f"/accounts/{account}/tokens/verify", token, None))
-    require(isinstance(result, dict), "parent token verify did not succeed")
-    require(result.get("id") == expected, "parent token ID differs from R2_PARENT_ACCESS_KEY_ID")
-    require(result.get("status") == "active", "parent token is not active")
-    if result.get("not_before") is not None:
-        require(utc_seconds(result["not_before"]) <= now, "parent token is not yet valid")
-    require(result.get("expires_on") is not None, "parent token has no expiry")
-    require(utc_seconds(result["expires_on"]) - now >= state_window(), "parent token expiry does not cover the proof window")
-    return {"id": "MATCHED", "status": "ACTIVE", "expiry": "COVERS_WINDOW"}
-
-
-def run_identity(environ: Mapping[str, str]) -> dict[str, str]:
-    run_id, attempt, head = (environ.get(name, "") for name in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "GITHUB_SHA"))
-    require(re.fullmatch(r"[1-9][0-9]{0,19}", run_id) is not None and re.fullmatch(r"[1-9][0-9]{0,3}", attempt) is not None
-            and SHA40.fullmatch(head) is not None, "GitHub run identity is missing")
-    return {"run_id": run_id, "run_attempt": attempt, "head": head, "scope": f"{run_id}-{attempt}"}
-
-
-def state_bucket_names(run: Mapping[str, str]) -> dict[str, str]:
-    proof = STATE_BUCKET_PREFIX + run["scope"]
-    names = {"proof": proof, "decoy": proof + "-decoy"}
-    require(STATE_RESERVED_BUCKET not in names.values() and all(len(name) <= 63 for name in names.values()),
-            "state bucket names differ")
-    return names
-
-
-def bucket_creation(api: Api, account: str, token: str, name: str) -> str | None:
-    # None is absent (404); a present bucket returns its provider creation_date; anything else is UNKNOWN.
-    status, value = api("GET", f"/accounts/{account}/r2/buckets/{name}", token, None)
-    if status == 404:
-        return None
-    result = api_result(status, value)
-    require(isinstance(result, dict) and result.get("name") == name and isinstance(result.get("creation_date"), str),
-            "bucket readback is UNKNOWN")
-    return result["creation_date"]
-
-
-def temporary_credentials(api: Api, account: str, token: str, parent: str, bucket: str) -> dict[str, str]:
-    # One bucket-bound, prefix-bound, object-level credential that cannot exceed its parent and expires by itself.
-    result = api_result(*api("POST", f"/accounts/{account}/r2/temp-access-credentials", token, {
-        "bucket": bucket, "parentAccessKeyId": parent, "permission": "object-read-write",
-        "ttlSeconds": STATE_CREDENTIAL_TTL, "prefixes": [STATE_ALLOWED_PREFIX]}))
-    require(isinstance(result, dict), "temporary credential issuance did not succeed")
-    values = {name: result.get(field) for name, field in (
-        ("AWS_ACCESS_KEY_ID", "accessKeyId"), ("AWS_SECRET_ACCESS_KEY", "secretAccessKey"),
-        ("AWS_SESSION_TOKEN", "sessionToken"))}
-    require(all(isinstance(value, str) and BEARER.fullmatch(value) for value in values.values()),
-            "temporary credential differs")
-    return values
-
-
-def state_buckets(tools: Mapping[str, str], work: Path, env: Mapping[str, str], runner: Runner) -> dict[str, str] | None:
-    # This run's own create results: bucket name and provider creation_date from its state, parsed in memory.
-    try:
-        state = json.loads(tofu(tools, work, env, runner, "show", "-json", "-no-color") or b"{}")
-    except (EnvsError, json.JSONDecodeError, UnicodeDecodeError):
-        return None
-    resources = (state.get("values") or {}).get("root_module", {}).get("resources", []) if isinstance(state, dict) else None
-    if not isinstance(resources, list):
-        return None
-    found: dict[str, str] = {}
-    for item in resources:
-        if not isinstance(item, dict) or item.get("mode") != "managed":
-            continue
-        values = item.get("values") or {}
-        name, created = values.get("name"), values.get("creation_date")
-        if item.get("type") != "cloudflare_r2_bucket" or not isinstance(name, str) or not isinstance(created, str) \
-                or name in found:
-            return None
-        found[name] = created
-    return found
-
-
-def state_evidence(run: Mapping[str, str], bucket: str, created: str) -> dict[str, str]:
-    return {"kind": STATE_EVIDENCE_KIND, "bucket": bucket, "creation_date": created,
-            "run_id": run["run_id"], "run_attempt": run["run_attempt"], "head": run["head"]}
-
-
-def record_created(tools: Mapping[str, str], work: Path, env: Mapping[str, str], runner: Runner,
-                   run: Mapping[str, str], previous: dict[str, str] | None) -> dict[str, str] | None:
-    # Right after each create, every new bucket is emitted once as a non-secret evidence line.
-    found = state_buckets(tools, work, env, runner)
-    if found is None or previous is None:
-        return None
-    for bucket, created in sorted(found.items()):
-        if previous.get(bucket) != created:
-            print(json.dumps(state_evidence(run, bucket, created), sort_keys=True), file=sys.stderr, flush=True)
-    return found
-
-
-def parse_state_evidence(text: str, run: Mapping[str, str]) -> dict[str, str]:
-    # Recovery input: the evidence lines of one exact run, attempt and head, from a job log with any line prefix.
-    names = set(state_bucket_names(run).values())
-    found: dict[str, str] = {}
-    for line in text.splitlines():
-        start = line.find("{")
-        if start == -1 or STATE_EVIDENCE_KIND not in line:
-            continue
-        try:
-            value = json.loads(line[start:])
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(value, dict) or value.get("kind") != STATE_EVIDENCE_KIND:
-            continue
-        if any(value.get(key) != run[key] for key in ("run_id", "run_attempt", "head")):
-            continue
-        bucket, created = value.get("bucket"), value.get("creation_date")
-        if bucket not in names or not isinstance(created, str):
-            continue
-        require(found.get(bucket, created) == created, "conflicting bucket creation evidence")
-        found[bucket] = created
-    return found
-
-
-def owned_buckets(evidence: Mapping[str, str], current: Mapping[str, str | None], run: Mapping[str, str]) -> list[str]:
-    # Deletion needs this run's create evidence and the same provider creation_date now; a name alone never suffices.
-    return sorted(name for name in state_bucket_names(run).values()
-                  if name in evidence and current.get(name) is not None and current[name] == evidence[name])
-
-
 def encryption_config(name: str, passphrase: str, fallback: tuple[str, str] | None = None) -> str:
     # TF_ENCRYPTION text with per-run pbkdf2 passphrases; it reaches OpenTofu only through the process environment.
     # OpenTofu binds encrypted metadata to the key provider and method names, so a key keeps its name for life: a
@@ -1665,29 +1310,6 @@ def encryption_config(name: str, passphrase: str, fallback: tuple[str, str] | No
     tail = f"  fallback {{\n    method = method.aes_gcm.{fallback[0]}\n  }}\n" if fallback else ""
     blocks += [f"{target} {{\n  method = method.aes_gcm.{name}\n{tail}}}\n" for target in ("state", "plan")]
     return "".join(blocks)
-
-
-def wrangler_env(tools: Mapping[str, str], scratch: Path, account: str, token: str) -> dict[str, str]:
-    home = Path(tempfile.mkdtemp(prefix="home-wrangler-", dir=scratch))
-    return clean_env(tools, {"CLOUDFLARE_API_TOKEN": token, "CLOUDFLARE_ACCOUNT_ID": account,
-                             "WRANGLER_SEND_METRICS": "false", "HOME": str(home)})
-
-
-def raw_state(tools: Mapping[str, str], scratch: Path, account: str, token: str, bucket: str, runner: Runner) -> bytes | None:
-    # The raw object bytes stay in this process: never stdout, a file, an artifact or a cache.
-    result = runner([tools["wrangler"], "r2", "object", "get", f"{bucket}/{STATE_KEY}", "--remote", "--pipe"], None,
-                    wrangler_env(tools, scratch, account, token))
-    return result.stdout if result.returncode == 0 else None
-
-
-def encrypted_raw(raw: bytes | None, canary: str) -> bool:
-    if raw is None or canary.encode() in raw:
-        return False
-    try:
-        value = json.loads(raw)
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        return False
-    return isinstance(value, dict) and isinstance(value.get("encrypted_data"), str) and "resources" not in value
 
 
 def failure_facts(result: subprocess.CompletedProcess[bytes]) -> dict[str, Any]:
@@ -1722,30 +1344,6 @@ def refusal(control: bool, attempt: subprocess.CompletedProcess[bytes], causes: 
     return "REFUSED" if control and failure_cause(attempt) in causes else "UNKNOWN"
 
 
-# Branch evidence for the receipt: every value comes from these closed sets, so no captured output, status body,
-# key, credential or exception text can reach it. It explains an UNKNOWN; it never changes a label or PASS.
-STATE_DIAGNOSTIC_VALUES: dict[str, tuple[Any, ...]] = {
-    "control": (True, False),
-    "phase": ("admitted", "init", "read", "lock", "write"),
-    "probe": ("not_run", "admitted", "refused", "local_failure"),
-    "status": ("none", "401", "403", "5xx", "other", "multiple"),
-    "access_denied": (True, False),
-    "transient": (True, False),
-    "word": ("decrypt", "encrypt", "credential", "none"),
-    "local": ("none", "envs", "os", "subprocess"),
-    # The post-TTL probe's S3 error code: the R2 authentication and authorization codes, any other parsed code, or
-    # none. It narrows the investigation only; no code is a credential end, which stays a completed 401.
-    "code": ("Unauthorized", "AccessDenied", "ExpiredRequest", "SignatureDoesNotMatch", "NotEntitled", "other", "none"),
-}
-NO_FAILURE_FACTS = {"status": "none", "access_denied": False, "transient": False, "word": "none"}
-
-
-def negative_evidence(control: bool, phase: str, attempt: subprocess.CompletedProcess[bytes]) -> dict[str, Any]:
-    # phase is where the attempt stopped: admitted, or refused at init, read (output) or lock (the lock-file write).
-    facts = NO_FAILURE_FACTS if attempt.returncode == 0 else failure_facts(attempt)
-    return {"control": control, "phase": "admitted" if attempt.returncode == 0 else phase, **facts}
-
-
 def r2_endpoint(account: str) -> str:
     return f"https://{account}.r2.cloudflarestorage.com"
 
@@ -1754,447 +1352,354 @@ def curl_value(value: str) -> str:
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def s3_error_code(body: bytes) -> str | None:
-    # Only an actual S3 XML error document with exactly one direct Code names a code; a substring, a bodyless reply,
-    # malformed XML or contradictory duplicate codes name none.
-    if not body or len(body) > S3_BODY_LIMIT:
-        return None
-    try:
-        document = ElementTree.fromstring(body)
-    except ElementTree.ParseError:
-        return None
-    codes = document.findall("Code") if document.tag == "Error" else []
-    return codes[0].text.strip() if len(codes) == 1 and codes[0].text else None
-
-
-def s3_object(tools: Mapping[str, str], runner: Runner, endpoint: str, credentials: Mapping[str, str], method: str,
-              bucket: str, key: str, body: bytes | None = None, timeout: int = S3_TIMEOUT) -> dict[str, Any]:
-    # One path-style request signed by the locked curl (aws:amz:auto:s3) with the temporary credential. The credential
-    # and session token reach curl only through its stdin config, with its default config disabled: never argv, a
-    # file or a log. No proxy, redirect or retry. The reply stays in this process and leaves only as finite facts.
-    scheme = endpoint.split("://", 1)[0]
+def rent_inspect_head(tools: Mapping[str, str], inputs: Mapping[str, str], runner: Runner, object_key: str) -> str:
+    # The existing persistent root's exact R2 object or native .tflock.
+    # curl's SigV4 config enters through stdin only: no secret argv, file,
+    # shell, proxy, redirect, request body or retry. Never emit response bytes.
+    account = inputs["RENT_CLOUDFLARE_ACCOUNT_ID"]
+    bucket = inputs["RENT_STATE_BUCKET"]
+    require(re.fullmatch(r"[a-z0-9][a-z0-9.-]{2,62}", bucket) is not None and ".." not in bucket,
+            "rent inspect bucket is not a closed R2 object name")
+    base = object_key[:-len(ROOT_LOCK_SUFFIX)] if object_key.endswith(ROOT_LOCK_SUFFIX) else object_key
+    require(root_state_key_ok(base), "rent inspect object key is not bounded")
+    endpoint = r2_endpoint(account)
     lines = [
-        f"url = {curl_value(f'{endpoint}/{bucket}/{key}')}",
-        f"request = {curl_value(method)}",
-        'aws-sigv4 = "aws:amz:auto:s3"',
-        f"user = {curl_value(credentials['AWS_ACCESS_KEY_ID'] + ':' + credentials['AWS_SECRET_ACCESS_KEY'])}",
-        f"header = {curl_value('x-amz-security-token: ' + credentials['AWS_SESSION_TOKEN'])}",
-        f"proto = {curl_value('=' + scheme)}",
-        'noproxy = "*"',
-        "silent",
-        f'connect-timeout = "{min(timeout, 10)}"',
-        f'max-time = "{timeout}"',
+        f"url = {curl_value(f'{endpoint}/{bucket}/{object_key}')}",
+        'request = "HEAD"', 'aws-sigv4 = "aws:amz:auto:s3"',
+        f"user = {curl_value(inputs['AWS_ACCESS_KEY_ID'] + ':' + inputs['AWS_SECRET_ACCESS_KEY'])}",
+        'proto = "=https"', 'noproxy = "*"', "silent",
+        'connect-timeout = "10"', 'max-time = "30"',
         'write-out = "%{stderr}%{http_code}"',
     ]
-    if os.environ.get("SSL_CERT_FILE") and scheme == "https":
+    if os.environ.get("SSL_CERT_FILE"):
+        require(in_store(os.environ["SSL_CERT_FILE"]), "rent inspect CA bundle is not Nix-owned")
         lines.append(f"cacert = {curl_value(os.environ['SSL_CERT_FILE'])}")
-    if body is not None:
-        lines += [f"data-binary = {curl_value(body.decode('ascii'))}", 'header = "Content-Type: application/octet-stream"']
-    result = runner([tools["curl"], "-q", "--config", "-"], ("\n".join(lines) + "\n").encode("utf-8"), clean_env(tools, {}))
-    written = result.stderr.strip()
-    code = int(written) if re.fullmatch(rb"[0-9]{3}", written) else 0
-    # Any nonzero curl exit is an incomplete transfer (timeout, connection, partial body...): whatever status or body
-    # arrived, it is transient and never a completed reply, so it can be neither ADMITTED, REFUSED nor a 401 expiry.
-    complete = result.returncode == 0
-    ok = complete and 200 <= code < 300
-    status = "none" if ok or code == 0 else str(code) if code in (401, 403) else "5xx" if code >= 500 else "other"
-    # Only a completed failed reply's single direct Code names one, mapped into the closed set; nothing else is kept.
-    parsed = s3_error_code(result.stdout) if complete and not ok else None
-    known = STATE_DIAGNOSTIC_VALUES["code"][:-2]
-    return {"ok": ok, "status": status,
-            "access_denied": complete and status == "403" and parsed == "AccessDenied",
-            "transient": not complete, "body": result.stdout if ok else None,
-            "code": "none" if parsed is None else parsed if parsed in known else "other"}
+    result = runner([tools["curl"], "-q", "-I", "--config", "-"],
+                    ("\n".join(lines) + "\n").encode(), clean_env(tools, {}))
+    code = result.stderr.strip()
+    require(result.returncode == 0 and code in (b"200", b"404")
+            and len(result.stdout) <= 4096, "rent inspect S3 HEAD is UNKNOWN")
+    return "PRESENT" if code == b"200" else "ABSENT"
 
 
-def s3_facts(operation: Mapping[str, Any]) -> dict[str, Any]:
-    if operation["ok"]:
-        return dict(NO_FAILURE_FACTS)
-    return {"status": operation["status"], "access_denied": operation["access_denied"],
-            "transient": operation["transient"], "word": "none"}
+def root_scratch(prefix: str) -> tuple[Path, Path]:
+    # A fresh owner-only scratch (an empty HOME and the root's working copy), retained like rent-root's.
+    scratch = Path(tempfile.mkdtemp(prefix=prefix))
+    home, work = scratch / "home", scratch / "root"
+    home.mkdir(mode=0o700)
+    work.mkdir(mode=0o700)
+    return home, work
 
 
-def s3_cause(operation: Mapping[str, Any]) -> str:
-    # The same rule as failure_cause: 401 is the credential as a whole, 403 with a parsed AccessDenied its scope.
-    facts = s3_facts(operation)
-    if operation["ok"] or facts["transient"] or facts["status"] not in {"401", "403"}:
-        return "unknown"
-    return "unauthorized" if facts["status"] == "401" else "access_denied" if facts["access_denied"] else "unknown"
+def legacy_root_env(tools: Mapping[str, str], inputs: Mapping[str, str], home: Path) -> dict[str, str]:
+    # Only what the former S3 state needs: its R2 credential and endpoint and the state encryption. No provider token.
+    return clean_env(tools, {
+        "HOME": str(home), "AWS_ACCESS_KEY_ID": inputs["AWS_ACCESS_KEY_ID"],
+        "AWS_SECRET_ACCESS_KEY": inputs["AWS_SECRET_ACCESS_KEY"],
+        "AWS_ENDPOINT_URL_S3": r2_endpoint(inputs["RENT_CLOUDFLARE_ACCOUNT_ID"]),
+        "AWS_EC2_METADATA_DISABLED": "true",
+        "TF_ENCRYPTION": encryption_config(ROOT_KEY_NAME, inputs["RENT_STATE_PASSPHRASE"]),
+        "TF_IN_AUTOMATION": "1", "TF_INPUT": "0",
+    })
 
 
-def s3_refusal(control: bool, operation: Mapping[str, Any], causes: set[str]) -> str:
-    if operation["ok"]:
-        return "ADMITTED"
-    return "REFUSED" if control and s3_cause(operation) in causes else "UNKNOWN"
-
-
-def s3_evidence(control: bool, phase: str, operation: Mapping[str, Any]) -> dict[str, Any]:
-    return {"control": control, "phase": "admitted" if operation["ok"] else phase, **s3_facts(operation)}
-
-
-def failure_class(error: BaseException) -> str:
-    # One of the state proof's handled failure kinds, never its message or class name.
-    return "envs" if isinstance(error, EnvsError) else "subprocess" if isinstance(error, subprocess.SubprocessError) \
-        else "os"
-
-
-def probe_evidence(probe: str, operation: Mapping[str, Any] | None = None,
-                   error: BaseException | None = None) -> dict[str, Any]:
-    local = "none" if error is None else failure_class(error)
-    facts = s3_facts(operation) if operation is not None else NO_FAILURE_FACTS
-    return {"probe": probe, **facts, "local": local, "code": operation["code"] if operation is not None else "none"}
-
-
-def diagnostics_finite(diagnostics: Any) -> bool:
-    # Only known keys with values from their closed set; anything else is never emitted.
-    def entry(value: Any, keys: set[str]) -> bool:
-        return isinstance(value, dict) and set(value) == keys and all(
-            any(type(item) is type(allowed) and item == allowed for allowed in STATE_DIAGNOSTIC_VALUES[key])
-            for key, item in value.items())
-
-    if not isinstance(diagnostics, dict) or set(diagnostics) != {"negatives", "credential_probe"}:
-        return False
-    negatives = diagnostics["negatives"]
-    negative_keys = {"control", "phase", *NO_FAILURE_FACTS}
-    return (negatives is None or (isinstance(negatives, dict) and set(negatives) == set(STATE_NEGATIVES) and all(
-        item is None or entry(item, negative_keys) for item in negatives.values()))) and entry(
-        diagnostics["credential_probe"], {"probe", "local", "code", *NO_FAILURE_FACTS})
-
-
-S3 = Callable[..., dict[str, Any]]
-
-
-def marker_written(s3: S3, bucket: str, attempted: dict[str, set[str]], key: str = STATE_MARKER_KEY) -> dict[str, Any]:
-    # Recorded before it is sent: an ambiguous PUT may still have written the object, so cleanup deletes the key.
-    attempted.setdefault(bucket, set()).add(key)
-    return s3("PUT", bucket, key, STATE_MARKER)
-
-
-def marker_read(s3: S3, bucket: str) -> bool:
-    operation = s3("GET", bucket, STATE_MARKER_KEY)
-    return operation["ok"] and operation["body"] == STATE_MARKER
-
-
-def decoy_seeded(tools: Mapping[str, str], scratch: Path, account: str, token: str, bucket: str, runner: Runner,
-                 attempted: dict[str, set[str]]) -> bool:
-    # The parent token writes the known decoy marker and reads its exact bytes back, so a refused read cannot be a
-    # missing object masked as a denial.
-    attempted.setdefault(bucket, set()).add(STATE_MARKER_KEY)
-    env = wrangler_env(tools, scratch, account, token)
-    path = f"{bucket}/{STATE_MARKER_KEY}"
-    if runner([tools["wrangler"], "r2", "object", "put", path, "--remote", "--pipe"], STATE_MARKER, env).returncode != 0:
-        return False
-    read = runner([tools["wrangler"], "r2", "object", "get", path, "--remote", "--pipe"], None, env)
-    return read.returncode == 0 and read.stdout == STATE_MARKER
-
-
-# The backend root's one enforced encryption block. Only the no-encryption negative removes it, so that OpenTofu has
-# no encryption configuration at all; a method-less enforced block is a configuration error, not a ciphertext read.
-STATE_ENCRYPTION_BLOCK = ("  encryption {\n    state {\n      enforced = true\n    }\n"
-                          "    plan {\n      enforced = true\n    }\n  }\n")
-ENCRYPTION_BLOCK_START = re.compile(r"(?m)^\s*encryption\s*\{")
-
-
-def without_encryption(text: str) -> str | None:
-    # Exactly one exact block is removed; a missing, differing or repeated block yields None (fail closed).
-    if text.count(STATE_ENCRYPTION_BLOCK) != 1:
-        return None
-    plain = text.replace(STATE_ENCRYPTION_BLOCK, "")
-    return None if ENCRYPTION_BLOCK_START.search(plain) else plain
-
-
-def state_checks(root: Path, scratch: Path, tools: Mapping[str, str], account: str, token: str,
-                 names: Mapping[str, str], credentials: Mapping[str, str], runner: Runner, spawn: Spawn,
-                 sleep: Callable[[float], None], s3: S3,
-                 attempted: dict[str, set[str]]) -> tuple[dict[str, bool], dict[str, str], dict[str, Any]]:
-    passphrase, rotated = secrets.token_hex(32), secrets.token_hex(32)
-    first, second = "canary-" + secrets.token_hex(16), "canary-" + secrets.token_hex(16)
-    hold = {"TF_VAR_python": tools["python3"], "TF_VAR_hold_nonce": secrets.token_hex(8),
-            "TF_VAR_hold_seconds": str(STATE_HOLD)}
-    init = ("init", "-input=false", "-no-color")
-    apply = ("apply", "-input=false", "-auto-approve", "-no-color")
-
-    def backend(name: str, *, encryption: str | None, creds: Mapping[str, str] = credentials,
-                bucket: str = names["proof"], key: str = STATE_KEY, canary: str = first,
-                root_text: str | None = None) -> tuple[Path, dict[str, str]]:
-        # Every OpenTofu process gets its own directory and empty HOME; only this run's temporary credential and
-        # encryption text reach it, never the parent token. root_text replaces the backend root for that one directory.
-        work, home = scratch / name, scratch / f"home-{name}"
-        work.mkdir()
-        home.mkdir(mode=0o700)
-        (work / "main.tf").write_bytes((root / STATE_BACKEND).read_bytes() if root_text is None
-                                       else root_text.encode("utf-8"))
-        extra = {"TF_IN_AUTOMATION": "1", "TF_INPUT": "0", "HOME": str(home), "AWS_EC2_METADATA_DISABLED": "true",
-                 "TF_VAR_account_id": account, "TF_VAR_bucket": bucket, "TF_VAR_key": key, "TF_VAR_canary": canary,
-                 **hold, **creds}
-        if encryption is not None:
-            extra["TF_ENCRYPTION"] = encryption
-        return work, clean_env(tools, extra)
-
-    def run(work: Path, env: Mapping[str, str], *args: str) -> subprocess.CompletedProcess[bytes]:
-        return runner([tools["tofu"], f"-chdir={work}", *args], None, env)
-
-    def ok(work: Path, env: Mapping[str, str], *args: str) -> bool:
-        return run(work, env, *args).returncode == 0
-
-    def reads(work: Path, env: Mapping[str, str], expected: str) -> bool:
-        if not ok(work, env, *init):
-            return False
-        result = run(work, env, "output", "-raw", "canary")
-        return result.returncode == 0 and result.stdout == expected.encode()
-
-    def read_attempt(name: str, **options: Any) -> tuple[str, subprocess.CompletedProcess[bytes]]:
-        work, env = backend(name, **options)
-        opened = run(work, env, *init)
-        return ("init", opened) if opened.returncode != 0 else ("read", run(work, env, "output", "-raw", "canary"))
-
-    def negative(name: str, control: bool, phase: str, attempt: subprocess.CompletedProcess[bytes]) -> None:
-        negatives[name] = refusal(control, attempt, STATE_NEGATIVES[name])
-        evidence[name] = negative_evidence(control, phase, attempt)
-
-    checks = dict.fromkeys(STATE_CHECKS, False)
-    negatives = dict.fromkeys(STATE_NEGATIVES, "UNKNOWN")
-    evidence: dict[str, Any] = dict.fromkeys(STATE_NEGATIVES)
-    current = encryption_config("k0", passphrase)
-    holder_work, holder_env = backend("holder", encryption=current)
-    contender_work, contender_env = backend("contender", encryption=current)
-    if not (ok(holder_work, holder_env, *init) and ok(contender_work, contender_env, *init)):
-        return checks, negatives, evidence
-    holder = spawn([tools["tofu"], f"-chdir={holder_work}", *apply], holder_env)
-    code = None
+def root_state_identity(payload: bytes) -> dict[str, Any]:
+    # The root's own state, in memory only: a lineage, a positive serial and exactly the six owned resources.
+    require(0 < len(payload) <= ROOT_INSPECT_STATE_LIMIT, "rent-root state size UNKNOWN")
     try:
-        sleep(STATE_SETTLE)
-        contender = run(contender_work, contender_env, "plan", "-lock-timeout=0", "-input=false", "-no-color")
-        checks["lock_contender_rejected"] = contender.returncode != 0 and STATE_LOCK_ERROR in contender.stderr + contender.stdout
-        code = holder.wait(timeout=STATE_HOLD + 300)
-    except subprocess.TimeoutExpired:
-        code = None
-    finally:
-        if code is None:
-            stop(holder)
-    checks["lock_holder_applied"] = code == 0
-    checks["lock_released"] = run(contender_work, contender_env, "plan", "-lock-timeout=0", "-detailed-exitcode",
-                                  "-input=false", "-no-color").returncode == 0
-    before = raw_state(tools, scratch, account, token, names["proof"], runner)
-    checks["raw_state_encrypted"] = encrypted_raw(before, first)
-    checks["readback_exact"] = reads(*backend("readback", encryption=current), first)
-    rotate_work, rotate_env = backend("rotate", encryption=encryption_config("k1", rotated, ("k0", passphrase)),
-                                     canary=second)
-    rewritten = ok(rotate_work, rotate_env, *init) and ok(rotate_work, rotate_env, *apply)
-    after = raw_state(tools, scratch, account, token, names["proof"], runner)
-    checks["rotation_rewritten"] = rewritten and encrypted_raw(after, second) and after != before
-    only_rotated = encryption_config("k1", rotated)
-    checks["rotated_readback"] = reads(*backend("rotated", encryption=only_rotated), second)
-    # Each negative runs right after a control that differs only in the input under test.
-    control = reads(*backend("old-key-control", encryption=only_rotated), second)
-    negative("old_key_refused", control, *read_attempt("old-key", encryption=current))
-    # No encryption configuration at all: a temporary copy of the root without its enforced block, used only by
-    # read_attempt (init and output). If that block cannot be removed exactly, the negative is not attempted.
-    plain = without_encryption((root / STATE_BACKEND).read_text(encoding="utf-8"))
-    if plain is not None:
-        control = reads(*backend("no-encryption-control", encryption=only_rotated), second)
-        negative("unencrypted_read_refused", control,
-                 *read_attempt("no-encryption", encryption=None, root_text=plain))
-    control = ok(*backend("no-credential-control", encryption=only_rotated), *init)
-    work, env = backend("no-credential", encryption=only_rotated, creds={})
-    negative("no_credential_refused", control, "init", run(work, env, *init))
-    # Object boundaries, by the locked curl and the same temporary credential: OpenTofu reads its state key (HEAD)
-    # before any write, so its init cannot isolate a prefix write or a bucket read. Each attempt follows a control
-    # that differs only in the key or the bucket.
-    write_control = marker_written(s3, names["proof"], attempted)["ok"]
-    outside = marker_written(s3, names["proof"], attempted, STATE_OUTSIDE_MARKER_KEY)
-    negatives["outside_prefix_write_refused"] = s3_refusal(write_control, outside,
-                                                           STATE_NEGATIVES["outside_prefix_write_refused"])
-    evidence["outside_prefix_write_refused"] = s3_evidence(write_control, "write", outside)
-    # The decoy read needs a known object there; without a verified marker the negative is not attempted.
-    if decoy_seeded(tools, scratch, account, token, names["decoy"], runner, attempted):
-        read_control = marker_read(s3, names["proof"])
-        decoy = s3("GET", names["decoy"], STATE_MARKER_KEY)
-        negatives["decoy_refused"] = s3_refusal(read_control, decoy, STATE_NEGATIVES["decoy_refused"])
-        evidence["decoy_refused"] = s3_evidence(read_control, "read", decoy)
-    # The negatives mean something only if the same credential still reads the same state after them.
-    checks["path_up_after_negatives"] = reads(*backend("bracket", encryption=only_rotated), second)
-    return checks, negatives, evidence
+        state = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise EnvsError("rent-root state is not valid JSON") from None
+    require(isinstance(state, dict) and isinstance(state.get("lineage"), str) and state["lineage"]
+            and type(state.get("serial")) is int and state["serial"] > 0,
+            "rent-root state identity UNKNOWN")
+    resources = state.get("resources")
+    require(isinstance(resources, list), "rent-root managed resource set UNKNOWN")
+    managed = [item for item in resources if isinstance(item, dict) and item.get("mode") == "managed"]
+    require(len(managed) == len(ROOT_INSPECT_RESOURCE_TYPES)
+            and {item.get("type") for item in managed} == ROOT_INSPECT_RESOURCE_TYPES
+            and all(item.get("name") == "rent" for item in managed),
+            "rent-root state owned-resource identity UNKNOWN")
+    return state
 
 
-def state_cleanup(tools: Mapping[str, str], scratch: Path, account: str, token: str,
-                  run: Mapping[str, str], names: Mapping[str, str], outer: Path, outer_env: Mapping[str, str],
-                  created: dict[str, str] | None, credential: str, control: bool, issued: float | None,
-                  s3: S3 | None, attempted: Mapping[str, set[str]], runner: Runner, api: Api,
-                  sleep: Callable[[float], None], clock: Callable[[], float]) -> dict[str, Any]:
-    # Runs once: after the TTL, the same credential must be refused 401 reading the same verified marker; delete only
-    # the exact expected and attempted keys and only buckets this run provably created, then read both names back.
-    # Doubt is never ABSENT.
-    report: dict[str, Any] = {"credential": credential, "buckets": "UNKNOWN", "owned": [], "cleanup": "UNKNOWN",
-                              "credential_probe": probe_evidence("not_run")}
-    if credential == "ISSUED":
-        report["credential"] = "UNKNOWN"
-        try:
-            if control and issued is not None and s3 is not None:
-                sleep(max(0.0, issued + STATE_CREDENTIAL_TTL + STATE_EXPIRY_GRACE - clock()))
-                after = s3("GET", names["proof"], STATE_MARKER_KEY)
-                report["credential_probe"] = probe_evidence("admitted" if after["ok"] else "refused", after)
-                if after["ok"]:
-                    report["credential"] = "STILL_USABLE"
-                elif s3_cause(after) == "unauthorized":
-                    report["credential"] = "UNUSABLE_AFTER_TTL"
-        except STATE_FAILURES as exc:
-            # A probe that could not run observes nothing: the credential stays UNKNOWN and cleanup still proceeds.
-            report["credential"] = "UNKNOWN"
-            report["credential_probe"] = probe_evidence("local_failure", error=exc)
-    if created is None:
-        return report
-    # Phase 1: ownership needs a complete current readback; without it nothing is deleted.
+def legacy_root_state(tools: Mapping[str, str], inputs: Mapping[str, str], work: Path, env: Mapping[str, str],
+                      runner: Runner) -> dict[str, Any]:
+    # The former S3 backend from source alone (the root itself now declares HTTP); state pull reads it into memory.
+    (work / "main.tf").write_text(ROOT_LEGACY_S3_CONFIG, encoding="utf-8")
+    tofu(tools, work, env, runner, "init", "-input=false", "-no-color",
+         f"-backend-config=bucket={inputs['RENT_STATE_BUCKET']}", f"-backend-config=key={inputs['RENT_STATE_KEY']}")
+    return root_state_identity(tofu(tools, work, env, runner, "state", "pull"))
+
+
+LocalGet = Callable[[str], tuple[int, bytes]]
+
+
+def default_local_get(url: str) -> tuple[int, bytes]:
+    # The loopback backend only: no proxy or retry, and the reply stays in this process.
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
-        current = {name: bucket_creation(api, account, token, name) for name in names.values()}
-    except STATE_FAILURES:
-        return report
-    owned = owned_buckets(created, current, run)
-    report["owned"] = owned
-    # Phase 2: delete only the exact keys (state, lock and every attempted marker), then only owned buckets; a failure
-    # here is settled by the readback below. A delete is never a write retry.
-    for bucket in names.values():
-        if bucket not in owned:
-            continue
-        keys = [STATE_KEY, STATE_KEY + ".tflock"] if bucket == names["proof"] else []
-        for key in keys + sorted(attempted.get(bucket, set()) - set(keys)):
-            try:
-                runner([tools["wrangler"], "r2", "object", "delete", f"{bucket}/{key}", "--remote"], None,
-                       wrangler_env(tools, scratch, account, token))
-            except STATE_FAILURES:
-                pass
-    try:
-        present = {name for name, value in current.items() if value is not None}
-        if present and present <= set(owned):
-            runner([tools["tofu"], f"-chdir={outer}", "destroy", "-input=false", "-auto-approve", "-no-color",
-                    "-var", "decoy=true"], None, outer_env)
-    except STATE_FAILURES:
-        pass
-    # Phase 3: the final readback always runs after phase 1; a readback that fails is UNKNOWN, never ABSENT.
-    try:
-        after_buckets = [bucket_creation(api, account, token, name) for name in names.values()]
-        report["buckets"] = "LEFTOVER" if any(value is not None for value in after_buckets) else "ABSENT"
-    except STATE_FAILURES:
-        report["buckets"] = "UNKNOWN"
-    # Absence means only what this run saw: every bucket its create evidence names was read back present and owned
-    # before it went; a 404 for a bucket never seen present is doubt, not ABSENT.
-    if report["buckets"] == "LEFTOVER":
-        report["cleanup"] = "LEFTOVER"
-    elif report["buckets"] == "ABSENT" and set(owned) == set(created) \
-            and report["credential"] in {"NOT_ATTEMPTED", "UNUSABLE_AFTER_TTL"}:
-        report["cleanup"] = "ABSENT"
-    return report
+        with opener.open(urllib.request.Request(url, method="GET"), timeout=5) as reply:
+            return reply.status, reply.read(ROOT_INSPECT_STATE_LIMIT + 1)
+    except urllib.error.HTTPError as exc:
+        return exc.code, b""
+    except (urllib.error.URLError, OSError):
+        return 0, b""
 
 
-def state_proof(root: Path = ROOT, *, runner: Runner = default_runner, api: Api = default_api,
-                spawn: Spawn = default_spawn, sleep: Callable[[float], None] = time.sleep,
-                clock: Callable[[], float] = time.time) -> dict[str, Any]:
+def loopback_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+def root_backend_url(port: int) -> str:
+    query = urllib.parse.urlencode({
+        "type": "git", "repository": f"https://github.com/{ROOT_STATE_BACKEND['repository']}.git",
+        "ref": ROOT_STATE_BACKEND["ref"].removeprefix("refs/heads/"), "state": ROOT_STATE_BACKEND["state_path"],
+    })
+    return f"http://127.0.0.1:{port}/?{query}"
+
+
+def root_backend_config(url: str) -> list[str]:
+    # The standard HTTP backend's own state and lock protocol against the loopback child.
+    return [f"-backend-config=address={url}", f"-backend-config=lock_address={url}",
+            f"-backend-config=unlock_address={url}", "-backend-config=lock_method=LOCK",
+            "-backend-config=unlock_method=UNLOCK"]
+
+
+def root_ref_principal(root: Path) -> str:
+    token = os.environ.get(ROOT_STATE_GIT_TOKEN, "")
+    require(BEARER.fullmatch(token) is not None, "rent-root state ref principal is not bound")
+    reject_live_values(root, ROOT_STATE_GIT_TOKEN, [token])
+    return token
+
+
+def start_root_backend(tools: Mapping[str, str], home: Path, token: str, spawn: Spawn, local_get: LocalGet,
+                       sleep: Callable[[float], None]) -> tuple[Any, str, str]:
+    # One transient upstream child on loopback for this one operation; only it receives the ref principal. Its GET is
+    # the standard HTTP backend read: 200 with a body is PRESENT, 204 or 404 ABSENT, anything else UNKNOWN.
+    port = loopback_port()
+    url = root_backend_url(port)
+    process = spawn([tools["terraform_backend_git"], "--address", f"127.0.0.1:{port}"],
+                    clean_env(tools, {"HOME": str(home), "GIT_USERNAME": ROOT_STATE_GIT_USERNAME,
+                                      ROOT_STATE_GIT_TOKEN: token}))
+    try:
+        for _ in range(ROOT_BACKEND_READY_ATTEMPTS):
+            require(process.poll() is None, "rent-root state backend exited")
+            status, body = local_get(url)
+            if status == 200 and body.strip():
+                return process, url, "PRESENT"
+            if status in (204, 404):
+                return process, url, "ABSENT"
+            require(status == 0, "rent-root GitHub-ref state is UNKNOWN")
+            sleep(0.2)
+        raise EnvsError("rent-root state backend not ready")
+    except BaseException:
+        stop(process)
+        raise
+
+
+def root_s3_inventory(tools: Mapping[str, str], inputs: Mapping[str, str], runner: Runner) -> None:
+    key = inputs["RENT_STATE_KEY"]
+    require(root_state_key_ok(key), "rent-root requires the declared old-S3 state key")
+    require(rent_inspect_head(tools, inputs, runner, key) == "PRESENT", "rent-root old-S3 state missing or UNKNOWN")
+    require(rent_inspect_head(tools, inputs, runner, key + ROOT_LOCK_SUFFIX) == "ABSENT",
+            "rent-root old-S3 lock present or UNKNOWN")
+
+
+def rent_root_migrate(root: Path = ROOT, *, runner: Runner = default_runner, spawn: Spawn = default_spawn,
+                      local_get: LocalGet = default_local_get, sleep: Callable[[float], None] = time.sleep,
+                      progress: dict[str, str] | None = None) -> dict[str, Any]:
+    # Standard OpenTofu backend migration of the existing state from the former S3 backend to the GitHub-ref HTTP
+    # backend, holding both native locks: same lineage and resources, the serial kept or advanced once by the
+    # migration write. The former object is retained; no plan, apply, import, unlock or retry.
+    progress = {} if progress is None else progress
+    progress["stage"] = "source_guard"
+    require(ROOT_MIGRATE_SOURCE_ACTIVE, "rent-root backend migration is source-hard-inactive")
+    progress["stage"] = "contracts"
     contracts = validate_contracts(root)
     tools = toolchain(root)
-    inputs = gate(root, contracts, STATE_PLANE)
-    token, account, parent = (inputs[name] for name in ("R2_PARENT_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID",
-                                                        "R2_PARENT_ACCESS_KEY_ID"))
-    # Secrets are not covered by the gate's Variable check: a token or its ID already in Git is RED before any call.
-    reject_live_values(root, "R2_PARENT_API_TOKEN", [token])
-    reject_live_values(root, "R2_PARENT_ACCESS_KEY_ID", [parent])
-    run = run_identity(os.environ)
-    names = state_bucket_names(run)
-    result: dict[str, Any] = {
-        "kind": "envs.rentStateProofResult.v1", "status": "UNKNOWN", "stage": "preflight", "buckets": names,
-        "parent": verify_parent(api, account, token, parent, clock()), "checks": None, "negatives": None,
-        "credential": "NOT_ATTEMPTED", "credential_control": None, "cleanup": "NOT_STARTED",
-        "production_state": "UNTOUCHED", "existing_buckets": "UNTOUCHED",
-        "diagnostics": {"negatives": None, "credential_probe": probe_evidence("not_run")},
+    inputs = gate(root, contracts, ROOT_PLANE)
+    require(ROOT_PASSPHRASE.fullmatch(inputs["RENT_STATE_PASSPHRASE"]) is not None,
+            "rent-root migration encryption input invalid")
+    for name in ROOT_SECRETS:
+        reject_live_values(root, name, [inputs[name]])
+    token = root_ref_principal(root)
+    progress["stage"] = "s3_head"
+    root_s3_inventory(tools, inputs, runner)
+    progress["stage"] = "state_read"
+    home, work = root_scratch("envs-rent-migrate-")
+    env = legacy_root_env(tools, inputs, home)
+    before = legacy_root_state(tools, inputs, work, env, runner)
+    progress["stage"] = "backend"
+    process, url, target = start_root_backend(tools, home, token, spawn, local_get, sleep)
+    try:
+        require(target == "ABSENT", "rent-root GitHub-ref state already present or UNKNOWN; no overwrite")
+        progress["stage"] = "migrate"
+        (work / "main.tf").write_bytes((root / ROOT_CONFIG).read_bytes())
+        tofu(tools, work, env, runner, "init", "-input=false", "-no-color", "-migrate-state", "-force-copy",
+             "-lock=true", *root_backend_config(url))
+        progress["stage"] = "readback"
+        after = root_state_identity(tofu(tools, work, env, runner, "state", "pull"))
+    finally:
+        stop(process)
+    require(after["lineage"] == before["lineage"] and after["resources"] == before["resources"]
+            and after["serial"] in (before["serial"], before["serial"] + 1),
+            "rent-root migrated state identity differs")
+    progress["stage"] = "complete"
+    return {
+        "kind": "envs.rentRootMigrate.v1", "status": "BACKEND_MIGRATED", "lineage": "UNCHANGED",
+        "resources": "UNCHANGED", "serial": "UNCHANGED" if after["serial"] == before["serial"] else "MIGRATION_WRITE",
+        "old_state": "RETAINED", "plan": "NOT_RUN", "apply": "NOT_RUN",
     }
-    for name in names.values():
-        require(bucket_creation(api, account, token, name) is None, "a per-run bucket name already exists")
-    with tempfile.TemporaryDirectory(prefix="envs-state-proof-") as temporary:
-        scratch = Path(temporary)
-        outer, home = scratch / "outer", scratch / "home-outer"
-        outer.mkdir()
-        home.mkdir(mode=0o700)
-        (outer / "main.tf").write_bytes((root / STATE_CONFIG).read_bytes())
-        outer_env = clean_env(tools, {"CLOUDFLARE_API_TOKEN": token, "TF_VAR_account_id": account,
-                                      "TF_VAR_run": run["scope"], "TF_IN_AUTOMATION": "1", "TF_INPUT": "0",
-                                      "HOME": str(home)})
-        created: dict[str, str] | None = {}
-        issued: float | None = None
-        credentials: dict[str, str] | None = None
-        s3: S3 | None = None
-        attempted: dict[str, set[str]] = {name: set() for name in names.values()}
-        control = False
-        try:
-            tofu(tools, outer, outer_env, runner, "init", "-input=false", "-no-color")
-            result["stage"] = "create"
-            # The first bounded create is the only capability probe: no decoy, credential or state before it.
-            for decoy, label in (("false", "the first bounded bucket create"), ("true", "the decoy bucket create")):
-                applied = True
-                try:
-                    tofu(tools, outer, outer_env, runner, "apply", "-input=false", "-auto-approve", "-no-color",
-                         "-var", f"decoy={decoy}")
-                except EnvsError:
-                    applied = False
-                finally:
-                    created = record_created(tools, outer, outer_env, runner, run, created)
-                require(applied and created is not None and names["proof"] in created, f"{label} did not succeed")
-            require(created is not None and set(created) == set(names.values()), "created bucket set differs")
-            result["stage"] = "credential"
-            # Recorded before the one POST: after any failure the provider may still have issued a credential.
-            result["credential"] = "ATTEMPTED"
-            try:
-                credentials = temporary_credentials(api, account, token, parent, names["proof"])
-            except STATE_FAILURES:
-                result["credential"] = "ISSUANCE_UNKNOWN"
-                raise
-            issued = clock()
-            result["credential"] = "ISSUED"
-            endpoint, issued_credentials = r2_endpoint(account), credentials
 
-            def s3(method: str, bucket: str, key: str, body: bytes | None = None) -> dict[str, Any]:
-                return s3_object(tools, runner, endpoint, issued_credentials, method, bucket, key, body)
 
-            # The credential control: the proof marker written and read back exactly; the post-TTL probe reads it again.
-            control = marker_written(s3, names["proof"], attempted)["ok"] and marker_read(s3, names["proof"])
-            result["credential_control"] = "USABLE" if control else "UNKNOWN"
-            result["stage"] = "proof"
-            checks, negatives, evidence = state_checks(root, scratch, tools, account, token, names, credentials,
-                                                       runner, spawn, sleep, s3, attempted)
-            result["checks"], result["negatives"] = checks, negatives
-            result["diagnostics"]["negatives"] = evidence
-            if not all(checks.values()) or "ADMITTED" in negatives.values():
-                result["status"] = "STATE_BACKEND_RED"
-            elif control and set(negatives.values()) == {"REFUSED"}:
-                result["status"] = "STATE_BACKEND_PROVEN"
-            else:
-                result["status"] = "UNKNOWN"
-        except EnvsError as exc:
-            # The stage says where; the receipt carries only the closed failure kind, never exception text.
-            result["error"] = failure_class(exc)
-            result["status"] = "STATE_BACKEND_RED"
-        except (OSError, subprocess.SubprocessError) as exc:
-            # A local launch or storage failure proves nothing about R2: UNKNOWN, named by its closed kind only.
-            result["error"] = failure_class(exc)
-            result["status"] = "UNKNOWN"
-        finally:
-            report = state_cleanup(tools, scratch, account, token, run, names, outer, outer_env, created,
-                                   result["credential"], control, issued, s3, attempted, runner, api, sleep, clock)
-            result["diagnostics"]["credential_probe"] = report.pop("credential_probe")
-            result.update(report)
-    # Absent negatives or entries are fine for a run that stopped early; a proof needs every negative's evidence and
-    # the observed post-TTL 401, all inside the closed sets. A proof without its evidence is not a proof.
-    diagnostics = result["diagnostics"]
-    finite = diagnostics_finite(diagnostics)
-    complete = finite and isinstance(diagnostics["negatives"], dict) and None not in diagnostics["negatives"].values() \
-        and diagnostics["credential_probe"]["status"] == "401"
-    if not finite:
-        # A value outside the closed sets is never emitted.
-        result["diagnostics"] = None
-    if result["status"] == "STATE_BACKEND_PROVEN" and not complete:
-        result["status"] = "UNKNOWN"
-    if result["cleanup"] != "ABSENT":
-        # Resources or a usable credential may remain: no proof outcome stands as the status.
-        result["status"] = result["cleanup"]
-    return result
+def rent_root_plan(root: Path = ROOT, *, runner: Runner = default_runner, spawn: Spawn = default_spawn,
+                   local_get: LocalGet = default_local_get, sleep: Callable[[float], None] = time.sleep,
+                   progress: dict[str, str] | None = None) -> dict[str, Any]:
+    # Backend-only proof: the unchanged root planned by standard OpenTofu against the existing GitHub-ref state must
+    # be empty. Any planned change, or a plan failure, refuses. Nothing is applied, imported or saved.
+    progress = {} if progress is None else progress
+    progress["stage"] = "source_guard"
+    require(ROOT_PLAN_SOURCE_ACTIVE, "rent-root backend-only plan is source-hard-inactive")
+    progress["stage"] = "contracts"
+    contracts = validate_contracts(root)
+    tools = toolchain(root)
+    inputs = gate(root, contracts, ROOT_PLANE)
+    require(ROOT_PASSPHRASE.fullmatch(inputs["RENT_STATE_PASSPHRASE"]) is not None,
+            "rent-root plan encryption input invalid")
+    for name in ROOT_SECRETS:
+        reject_live_values(root, name, [inputs[name]])
+    token = root_ref_principal(root)
+    home, work = root_scratch("envs-rent-plan-")
+    (work / "main.tf").write_bytes((root / ROOT_CONFIG).read_bytes())
+    env = {key: value for key, value in root_env(tools, inputs, home).items() if not key.startswith("AWS_")}
+    progress["stage"] = "backend"
+    process, url, target = start_root_backend(tools, home, token, spawn, local_get, sleep)
+    try:
+        require(target == "PRESENT", "rent-root GitHub-ref state absent or UNKNOWN; nothing to plan against")
+        progress["stage"] = "init"
+        tofu(tools, work, env, runner, "init", "-input=false", "-no-color", "-lock=true", *root_backend_config(url))
+        progress["stage"] = "plan"
+        result = runner([tools["tofu"], f"-chdir={work}", "plan", "-input=false", "-no-color", "-lock=true",
+                         "-detailed-exitcode"], None, env)
+    finally:
+        stop(process)
+    require(result.returncode == 0, "rent-root backend-only plan is not empty or failed; no apply")
+    progress["stage"] = "complete"
+    return {"kind": "envs.rentRootPlan.v1", "status": "EMPTY_PLAN", "apply": "NOT_RUN", "saved_plan": "NONE"}
+
+
+# One bounded Cloudflare inventory page holds at most this many items; the route asks for exactly this page size.
+ROOT_CLOUDFLARE_PAGE = 50
+# Closed HTTP reasons; every other non-200 status is http_other. The number itself never leaves.
+ROOT_CLOUDFLARE_HTTP = {401: "http_auth", 403: "http_auth", 404: "http_not_found", 429: "http_rate"}
+
+
+def rent_inspect_page(label: str, path: str, token: str, api: Api, progress: dict[str, str]) -> int:
+    # One GET of one route's first page. Each refusal names its route and closed reason as the stage, in this order:
+    # token_shape, request, http_*, response, page_shape, completeness. No status, message, body or identifier leaves.
+    def reason(name: str) -> None:
+        progress["stage"] = f"cloudflare_{label}_{name}"
+
+    reason("token_shape")
+    require(BEARER.fullmatch(token) is not None, "rent-root Cloudflare token shape is invalid")
+    reason("request")
+    status, reply = api("GET", path, token, None)
+    if status != 200:
+        reason(ROOT_CLOUDFLARE_HTTP.get(status, "http_other"))
+        raise EnvsError("rent-root Cloudflare read status is not 200")
+    reason("response")
+    require(isinstance(reply, dict) and reply.get("success") is True, "rent-root Cloudflare read is UNKNOWN")
+    # Only the fields every route's public schema declares: page, count and total_count, each an int and never a
+    # bool. total_pages is optional (the tunnel list does not declare it) and, when present, an int too.
+    reason("page_shape")
+    values, page = reply.get("result"), reply.get("result_info")
+    require(isinstance(values, list) and isinstance(page, dict)
+            and all(type(page.get(name)) is int for name in ("page", "count", "total_count"))
+            and ("total_pages" not in page or type(page["total_pages"]) is int),
+            "rent-root Cloudflare inventory page shape is UNKNOWN")
+    # The whole inventory is this one first page: no other page is followed and the bound is not raised. An empty
+    # list may report total_pages 0 or 1; a non-empty one only 1.
+    reason("completeness")
+    require(len(values) <= ROOT_CLOUDFLARE_PAGE and page["page"] == 1
+            and page["count"] == len(values) and page["total_count"] == len(values)
+            and ("total_pages" not in page or page["total_pages"] in ((1,) if values else (0, 1))),
+            "rent-root Cloudflare inventory is not one complete page")
+    return len(values)
+
+
+def rent_root_inspect(root: Path = ROOT, *, runner: Runner = default_runner,
+                      api: Api = default_api, progress: dict[str, str] | None = None) -> dict[str, Any]:
+    # First gate is compile-time/source-owned and cannot be flipped by env,
+    # a workflow input or CLI argument. Tests patch it only with fake children.
+    progress = {} if progress is None else progress
+    progress["stage"] = "source_guard"
+    require(ROOT_INSPECT_SOURCE_ACTIVE, "rent-root inspect is source-hard-inactive")
+    # Each preflight names its own closed stage, so a refusal says which check failed and never with what value.
+    progress["stage"] = "contracts"
+    contracts = validate_contracts(root)
+    progress["stage"] = "toolchain"
+    tools = toolchain(root)
+    progress["stage"] = "inputs"
+    inputs = gate(root, contracts, ROOT_PLANE)
+    progress["stage"] = "encryption_input"
+    require(ROOT_PASSPHRASE.fullmatch(inputs["RENT_STATE_PASSPHRASE"]) is not None,
+            "rent-root inspect encryption input invalid")
+    progress["stage"] = "secret_live"
+    for name in ROOT_SECRETS:
+        reject_live_values(root, name, [inputs[name]])
+    progress["stage"] = "state_key"
+    key = inputs["RENT_STATE_KEY"]
+    require(root_state_key_ok(key), "rent-root inspect requires the declared old-S3 state key")
+
+    # The old S3 state and its native lock are each classified PRESENT or ABSENT; only an unanswerable HEAD is
+    # UNKNOWN and stops red here. An absent state or a held lock is reported, and the state is then not read.
+    progress["stage"] = "s3_head"
+    old_state = rent_inspect_head(tools, inputs, runner, key)
+    old_lock = rent_inspect_head(tools, inputs, runner, key + ROOT_LOCK_SUFFIX)
+    identity: dict[str, Any] = {"old_state_read": "NOT_READ", "lineage": None, "serial": None,
+                                "managed_root_resources": None}
+    if old_state == "PRESENT" and old_lock == "ABSENT":
+        # Existing RootRunner/standard OpenTofu, in an owner-only scratch: init
+        # configures ONLY old S3 and state pull reads it; no plan/apply/import/write.
+        # State plaintext remains in process memory; the receipt carries only its identity.
+        progress["stage"] = "state_read"
+        home, work = root_scratch("envs-rent-inspect-")
+        state = legacy_root_state(tools, inputs, work, legacy_root_env(tools, inputs, home), runner)
+        require(ROOT_STATE_LINEAGE.fullmatch(state["lineage"]) is not None, "rent-root state lineage UNKNOWN")
+        managed = [item for item in state["resources"] if item.get("mode") == "managed"]
+        identity = {"old_state_read": "ENCRYPTED_READ", "lineage": state["lineage"], "serial": state["serial"],
+                    "managed_root_resources": len(managed)}
+
+    # Cloudflare GET-only bounded pages. Counts intentionally do not claim
+    # object identity, equality to state, complete Q or an accepted delta.
+    progress["stage"] = "cloudflare_read"
+    account, zone, token = (inputs[name] for name in
+                            ("RENT_CLOUDFLARE_ACCOUNT_ID", "RENT_CLOUDFLARE_ZONE_ID", "RENT_CLOUDFLARE_API_TOKEN"))
+    routes = (
+        ("tunnels", f"/accounts/{account}/cfd_tunnel?per_page=50"),
+        ("applications", f"/accounts/{account}/access/apps?per_page=50"),
+        ("service_tokens", f"/accounts/{account}/access/service_tokens?per_page=50"),
+        ("dns", f"/zones/{zone}/dns_records?per_page=50"),
+    )
+    # The tunnel list is unfiltered, so its count includes deleted tunnels: a count, not a live inventory.
+    counts: dict[str, int] = {}
+    for label, path in routes:
+        counts[label] = rent_inspect_page(label, path, token, api, progress)
+    progress["stage"] = "complete"
+    return {
+        "kind": "envs.rentRootInspect.v1", "status": "BOUNDED_READ_ONLY",
+        "old_state": old_state, "old_lock": old_lock, **identity, "cloudflare_counts": counts,
+        "world_state_equivalence": "NOT_PROVEN", "provider_delta_F": "NOT_PROVEN",
+        "native_migration": "NOT_RUN", "effect": "NONE",
+    }
+
+def failure_class(error: BaseException) -> str:
+    # One of the handled failure kinds, never its message or class name.
+    return "envs" if isinstance(error, EnvsError) else "subprocess" if isinstance(error, subprocess.SubprocessError) \
+        else "os"
 
 
 def walk_receipt(value: Any) -> None:
@@ -2744,9 +2249,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     sub.add_parser("rent-client")
     # Applies the persistent root and seals both envelopes; its inputs come only from the declared environment.
     sub.add_parser("rent-root")
-    sub.add_parser("rent-access-probe")
-    sub.add_parser("rent-access-locate")
-    sub.add_parser("rent-state-proof")
+    # S2 source composes the closed future read-only entry, never activates it.
+    sub.add_parser("rent-root-inspect")
+    # S2 source composes the backend-only migration and empty-plan proof onto the GitHub ref; neither is activated.
+    sub.add_parser("rent-root-migrate")
+    sub.add_parser("rent-root-plan")
     sub.add_parser("linode-read-probe")
     project_parser = sub.add_parser("project")
     project_parser.add_argument("--envs-sha", required=True)
@@ -2800,25 +2307,32 @@ def main(argv: Sequence[str] | None = None) -> int:
                     print(f"RENT_ROOT_INIT_HINT_UNVERIFIED={progress['init_hint']}", file=sys.stderr)
                 return 1
             print(json.dumps(result, indent=2, sort_keys=True))
-        elif args.command in {"rent-access-probe", "rent-access-locate"}:
-            result = access_probe(root, locate_only=args.command == "rent-access-locate")
-            print(json.dumps(result, indent=2, sort_keys=True))
-            passed = result["status"] == "NONE_LOCATED" if args.command == "rent-access-locate" else (
-                result["status"] == "TOKEN_REACHED_NEGATIVES_REFUSED" and result.get("cleanup") == "ABSENT")
-            return 0 if passed else 1
+        elif args.command == "rent-root-inspect":
+            # Closed source/phase gate runs before any contract, env, tool,
+            # secret read or child. Never disclose traceback or secret input.
+            progress: dict[str, str] = {}
+            try:
+                result = rent_root_inspect(root, progress=progress)
+            except Exception as exc:
+                kind = failure_class(exc) if isinstance(exc, STATE_FAILURES) else "other"
+                print(f"RENT_ROOT_INSPECT=RED: {kind} at {progress.get('stage', 'source_guard')}", file=sys.stderr)
+                return 1
+            print(json.dumps(result, sort_keys=True))
+        elif args.command in {"rent-root-migrate", "rent-root-plan"}:
+            # Same closed failure surface: a kind and a stage, never a message, child output or value.
+            progress = {}
+            label = "RENT_ROOT_MIGRATE" if args.command == "rent-root-migrate" else "RENT_ROOT_PLAN"
+            try:
+                result = (rent_root_migrate if args.command == "rent-root-migrate" else rent_root_plan)(
+                    root, progress=progress)
+            except Exception as exc:
+                kind = failure_class(exc) if isinstance(exc, STATE_FAILURES) else "other"
+                print(f"{label}=RED: {kind} at {progress.get('stage', 'source_guard')}", file=sys.stderr)
+                return 1
+            print(json.dumps(result, sort_keys=True))
         elif args.command == "linode-read-probe":
             print(json.dumps(linode_read_probe(root), indent=2, sort_keys=True))
             return 0
-        elif args.command == "rent-state-proof":
-            # Its failure line names only a closed kind; no exception text, class name or traceback reaches the log.
-            try:
-                result = state_proof(root)
-            except Exception as exc:
-                kind = failure_class(exc) if isinstance(exc, STATE_FAILURES) else "other"
-                print(f"RENT_STATE_PROOF=RED: {kind}", file=sys.stderr)
-                return 1
-            print(json.dumps(result, indent=2, sort_keys=True))
-            return 0 if result["status"] == "STATE_BACKEND_PROVEN" and result["cleanup"] == "ABSENT" else 1
         else:
             receipt = project(
                 envs_sha=args.envs_sha, run_id=args.run_id, run_attempt=args.run_attempt,
@@ -2826,8 +2340,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             print(json.dumps({"kind": receipt["kind"], "status": "PASS", "output": str(args.output)}, sort_keys=True))
     except (EnvsError, OSError) as exc:
-        label = {"rent-tunnel": "RENT_TUNNEL", "rent-client": "RENT_CLIENT", "rent-access-probe": "RENT_ACCESS_PROBE",
-                 "rent-access-locate": "RENT_ACCESS_PROBE", "rent-state-proof": "RENT_STATE_PROOF",
+        label = {"rent-tunnel": "RENT_TUNNEL", "rent-client": "RENT_CLIENT",
                  "linode-read-probe": "LINODE_READ_PROBE"}.get(args.command, "JEV_API")
         print(f"{label}=RED: {exc}", file=sys.stderr)
         return 1

@@ -10,15 +10,11 @@ on:
         type: string
         required: true
       operation:
-        description: Qualify, seal recovery, preview, or apply the approved declaration
+        description: Qualify, preview, or apply the approved declaration
         type: choice
-        options: [qualify, recover, preview, apply]
+        options: [qualify, preview, apply]
         default: qualify
         required: true
-      recipient:
-        description: Existing owner public age recipient for recovery; never a private key
-        type: string
-        default: ''
 
 permissions:
   actions: read
@@ -31,10 +27,10 @@ concurrency:
 jobs:
   operate:
     # Reject stale source, another actor and re-runs before resolving Secrets.
-    if: ${{ github.repository == 'roccho-org/envs' && github.ref_name == 'proposals' && github.sha == inputs.expected_source_sha && github.run_attempt == 1 && github.actor == 'roccho-dev' && github.actor_id == '40359643' && github.triggering_actor == 'roccho-dev' && contains(fromJSON('["qualify","recover","preview","apply"]'), inputs.operation) }}
+    if: ${{ github.repository == 'roccho-org/envs' && github.ref_name == 'proposals' && github.sha == inputs.expected_source_sha && github.run_attempt == 1 && github.actor == 'roccho-dev' && github.actor_id == '40359643' && github.triggering_actor == 'roccho-dev' && contains(fromJSON('["qualify","preview","apply"]'), inputs.operation) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    environment: ${{ inputs.operation == 'recover' && 'dev-rent-tunnel' || 'dev-projection' }}
+    environment: dev-projection
     steps:
       - name: Checkout exact canonical revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -104,26 +100,6 @@ jobs:
             done
           fi
           echo "MAIL_HOME=$home" >>"$GITHUB_ENV"
-
-      # The historical rent Environment produces only an encrypted envelope.
-      # Its token, private age identity and provider resources are untouched.
-      - name: Seal unchanged state inputs to existing owner recipient
-        if: inputs.operation == 'recover'
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          RENT_STATE_PASSPHRASE: ${{ secrets.RENT_STATE_PASSPHRASE }}
-          MAIL_STATE_AGE_RECIPIENT: ${{ inputs.recipient }}
-        run: '"$ENVS_EFFECT_BIN/mail-routing-root" --operation recover'
-
-      - name: Provide encrypted recovery envelope only
-        if: inputs.operation == 'recover'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: mail-state-${{ github.sha }}-${{ github.run_id }}
-          path: ${{ env.MAIL_HOME }}/mail-state.sops.json
-          if-no-files-found: error
-          retention-days: 1
 
       - name: Qualify projection with GET only
         if: inputs.operation == 'qualify'

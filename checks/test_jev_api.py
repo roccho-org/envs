@@ -141,7 +141,8 @@ def copy_root() -> Path:
     target = Path(tempfile.mkdtemp(prefix="envs-jev-test-")) / "repo"
     shutil.copytree(ROOT, target, ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".git"))
     (target / jev.OCI_CIPHERTEXT).unlink(missing_ok=True)
-    (target / jev.GO_CIPHERTEXT).unlink(missing_ok=True)
+    for path in jev.GO_CIPHERTEXTS.values():
+        (target / path).unlink(missing_ok=True)
     return target
 
 
@@ -167,8 +168,9 @@ def go_fixture_clear(root: Path) -> None:
     baseline = [p for p in ROOT.rglob("*") if included(p.relative_to(ROOT))]
     known_files = {p.relative_to(ROOT) for p in baseline if p.is_file()}
     known_dirs = {p.relative_to(ROOT) for p in baseline if p.is_dir()}
-    known_files.add(jev.GO_CIPHERTEXT)
-    known_dirs.add(jev.GO_CIPHERTEXT.parent)
+    for path in jev.GO_CIPHERTEXTS.values():
+        known_files.add(path)
+        known_dirs.add(path.parent)
     observed = list(root.rglob("*"))
     for path in observed:
         relative = path.relative_to(root)
@@ -337,6 +339,7 @@ def test_targets_are_separate() -> None:
         "jev-api": ["JEV_API_KEY", "SOPS_AGE_RECIPIENTS"],
         jev.OCI_BINDING: ["JEV_API_KEY", jev.OCI_RECIPIENT],
         jev.GO_BINDING: [jev.GO_KEY, jev.OCI_RECIPIENT],
+        jev.OWN_GO_BINDING: [jev.GO_KEY, jev.OWN_GO_RECIPIENT],
     }
     try:
         jev.authoring_inputs(contracts, "rent-tunnel")
@@ -451,6 +454,130 @@ def expect_go_red(values: dict[str, str], *, mutate=None, output: bytes | None =
         assert snapshot(root) == before, "RED Go authoring changed repository state"
     finally:
         go_fixture_clear(root)
+
+
+OWN_RECIPIENT = "age1" + "".join(secrets.choice(BECH32) for _ in range(58))
+
+
+def own_go_env(**overrides: str) -> dict[str, str]:
+    values = {jev.GO_KEY: GO_KEY, jev.OWN_GO_RECIPIENT: OWN_RECIPIENT, "ENVS_EFFECT_TOOLCHAIN": MANIFEST}
+    values.update(overrides)
+    return values
+
+
+def test_author_own_go() -> None:
+    # The own OCI target reads the same Go key but only its own recipient, and writes only its own ciphertext.
+    root = copy_root()
+    calls: list[tuple[list[str], bytes | None, dict[str, str]]] = []
+    try:
+        before = snapshot(root)
+
+        def runner(argv, input_data, env):
+            calls.append((list(argv), input_data, dict(env)))
+            return subprocess.CompletedProcess(argv, 0, stdout=oci_ciphertext((OWN_RECIPIENT,), key=jev.GO_KEY),
+                                               stderr=b"")
+
+        with environment(own_go_env(**{jev.OCI_RECIPIENT: OCI_RECIPIENT, "JEV_API_KEY": "not-go-input"})):
+            result = jev.author_oci(root, runner, target=jev.OWN_GO_BINDING)
+        assert result == {
+            "kind": "envs.targetAuthoringResult.v1", "status": "PASS", "binding": jev.OWN_GO_BINDING,
+            "ciphertext": jev.OWN_GO_CIPHERTEXT.as_posix(), "recipient_count": 1,
+            "target_apply": "NOT_RUN", "application_runtime": "NOT_RUN",
+        }
+        assert len(calls) == 1
+        argv, stdin, env = calls[0]
+        assert json.loads(stdin) == {jev.GO_KEY: GO_KEY}
+        assert env["SOPS_AGE_RECIPIENTS"] == OWN_RECIPIENT, "own target encrypted to another recipient"
+        for secret in (jev.GO_KEY, "JEV_API_KEY", jev.OCI_RECIPIENT, jev.OWN_GO_RECIPIENT):
+            assert secret not in env
+        after = snapshot(root)
+        assert set(after) - set(before) == {jev.OWN_GO_CIPHERTEXT.as_posix()}
+        assert not (root / jev.GO_CIPHERTEXT).exists() and not (root / jev.OCI_CIPHERTEXT).exists()
+        binding = jev.validate_contracts(root)["bindings"][jev.OWN_GO_BINDING]
+        assert binding["target"] == {"repository": "roccho-dev/resources", "host": "versapro-own-oci",
+                                     "kind": "pi_auth_command"}
+        assert binding["required_variables"] == [
+            {"name": jev.OWN_GO_RECIPIENT, "type": "age_recipient", "lifecycle": "persistent"}]
+    finally:
+        go_fixture_clear(root)
+
+
+def expect_own_go_red(values: dict[str, str], *, output: bytes | None = None, mutate=None) -> None:
+    root = copy_root()
+    calls: list[list[str]] = []
+    try:
+        if mutate is not None:
+            mutate(root)
+        before = snapshot(root)
+
+        def runner(argv, input_data, env):
+            calls.append(list(argv))
+            return subprocess.CompletedProcess(
+                argv, 0, stdout=output if output is not None else oci_ciphertext((OWN_RECIPIENT,), key=jev.GO_KEY),
+                stderr=b"")
+
+        with environment(values):
+            try:
+                jev.author_oci(root, runner, target=jev.OWN_GO_BINDING)
+            except jev.EnvsError as error:
+                message = str(error)
+            else:
+                raise AssertionError("invalid own OCI Go authoring input accepted")
+        assert GO_KEY not in message, "Go secret leaked into failure"
+        assert output is not None or not calls, "SOPS ran before the own OCI Go input gate"
+        assert snapshot(root) == before, "RED own OCI Go authoring changed repository state"
+    finally:
+        go_fixture_clear(root)
+
+
+def test_author_own_go_red() -> None:
+    # The OCI dev recipient is never a fallback for the own target, nor the reverse.
+    expect_own_go_red(own_go_env(**{jev.OWN_GO_RECIPIENT: "", jev.OCI_RECIPIENT: OCI_RECIPIENT}))
+    expect_own_go_red(own_go_env(**{jev.OWN_GO_RECIPIENT: "", "SOPS_AGE_RECIPIENTS": OWN_RECIPIENT}))
+    expect_own_go_red(own_go_env(**{jev.GO_KEY: ""}))
+    for value in (f"{OWN_RECIPIENT},{OCI_RECIPIENT}", OWN_RECIPIENT.upper(), f" {OWN_RECIPIENT}", "not-an-age-recipient"):
+        expect_own_go_red(own_go_env(**{jev.OWN_GO_RECIPIENT: value}))
+    expect_own_go_red(own_go_env(), mutate=lambda root: append(root / "README.md", f"\n{OWN_RECIPIENT}\n"))
+    for output in (
+        oci_ciphertext((OCI_RECIPIENT,), key=jev.GO_KEY),
+        oci_ciphertext((OWN_RECIPIENT, OCI_RECIPIENT), key=jev.GO_KEY),
+        oci_ciphertext((OWN_RECIPIENT,)),
+        oci_ciphertext((OWN_RECIPIENT,), key=jev.GO_KEY, extra="note: plain\n"),
+    ):
+        expect_own_go_red(own_go_env(), output=output)
+    # A selected oci-dev Go dispatch never reads the own recipient.
+    expect_go_red(go_env(**{jev.OCI_RECIPIENT: "", jev.OWN_GO_RECIPIENT: OWN_RECIPIENT}))
+    # Malformed committed own ciphertext is RED even when unselected.
+    for data in (b"OPENCODE_API_KEY: plain\n", oci_ciphertext((OWN_RECIPIENT, OCI_RECIPIENT), key=jev.GO_KEY)):
+        root = copy_root()
+        try:
+            (root / jev.OWN_GO_CIPHERTEXT).parent.mkdir(exist_ok=True)
+            (root / jev.OWN_GO_CIPHERTEXT).write_bytes(data)
+            try:
+                jev.validate_contracts(root)
+            except jev.EnvsError:
+                pass
+            else:
+                raise AssertionError("invalid committed own OCI Go ciphertext accepted")
+        finally:
+            go_fixture_clear(root)
+    # The own binding row never names the host-native versapro or the oci-dev target.
+    for host in ("versapro", "oci-dev"):
+        root = copy_root()
+        try:
+            path = root / jev.BINDINGS
+            text = path.read_text()
+            own = '"repository":"roccho-dev/resources","host":"versapro-own-oci"'
+            assert text.count(own) == 1
+            path.write_text(text.replace(own, f'"repository":"roccho-dev/resources","host":"{host}"'))
+            try:
+                jev.validate_contracts(root)
+            except jev.EnvsError:
+                pass
+            else:
+                raise AssertionError(f"own OCI Go binding retargeted to {host} accepted")
+        finally:
+            go_fixture_clear(root)
 
 
 def test_author_go_red() -> None:
@@ -1422,6 +1549,8 @@ def main() -> None:
         test_targets_are_separate()
         test_author_oci_red()
         test_author_go_red()
+        test_author_own_go()
+        test_author_own_go_red()
         test_committed_oci_state()
         test_author_target_cli()
         test_project()

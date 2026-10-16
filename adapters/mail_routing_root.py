@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Explicit Mail qualification, encrypted recovery and projection.
+"""Explicit Mail qualification and projection.
 
-No arguments refuse before protected inputs. Qualification uses GET only;
-recovery seals unchanged state inputs for local restoration. Projection
-consumes only its state-input Secret, then performs one preview/apply without a
-saved plan or retry. These operations never activate one another.
+No arguments refuse before protected inputs. Qualification uses GET only.
+Projection consumes only its state-input Secret, then performs one
+preview/apply without a saved plan or retry. These operations never activate
+one another. The completed one-time recovery is retired; its sealed carrier
+stays in ciphertexts/dev-mail-state.sops.json.
 """
 from __future__ import annotations
 
@@ -408,7 +409,7 @@ MAIL_METHOD_NAME = "mail_m0"
 STATE_INPUT_KEYS = MAIL_AFTER_SLOTS - {"CLOUDFLARE_API_TOKEN"}
 STATE_CIPHERTEXT = Path("ciphertexts/dev-mail-state.sops.json")
 AGE_RECIPIENT = re.compile(r"^age1[023456789acdefghjklmnpqrstuvwxyz]{58}$")
-MAIL_OPERATIONS = ("qualify", "recover", "preview", "apply")
+MAIL_OPERATIONS = ("qualify", "preview", "apply")
 MAIL_ZONE_NAME = re.compile(
     r"(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+"
     r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
@@ -782,21 +783,6 @@ def _sops(tools: NativeToolset, home: Path, data: bytes, *,
         raise NativeSourceHold("MAIL_SOPS_UNPROVEN") from None
 
 
-def recover_state(environ: Mapping[str, str], tools: NativeToolset, home: Path) -> tuple[str, int]:
-    values = _state_values({name: environ.get(name, "") for name in STATE_INPUT_KEYS})
-    recipient = environ.get("MAIL_STATE_AGE_RECIPIENT", "")
-    payload = json.dumps(values, separators=(",", ":")).encode("utf-8")
-    encrypted = _sops(tools, home, payload, recipient=recipient)
-    state_ciphertext(encrypted, recipient, values)
-    target = home / "mail-state.sops.json"
-    private_output_sink(target)
-    fd = os.open(str(target), os.O_WRONLY | os.O_CREAT | os.O_EXCL |
-                 os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
-    with os.fdopen(fd, "wb") as stream:
-        stream.write(encrypted)
-    return "STATE_INPUTS_SEALED", 0
-
-
 def _decode_state(data: bytes) -> dict[str, str]:
     try:
         if not isinstance(data, bytes) or not 0 < len(data) <= 65536:
@@ -823,23 +809,28 @@ def preview_summary(path: Path, code: int) -> dict:
         "data.cloudflare_email_routing_address.checked[0]": "verified_destination",
         "data.cloudflare_email_routing_settings.checked[0]": "routing_settings",
     }
+    reason = "CAPTURE"
     try:
         if code not in (0, 2):
             raise ValueError("native preview failed")
         _owner_home(path.parent)
         rows = _owner_file(path, path.parent, 8388608).decode("utf-8").splitlines()
         events = [_json_object(row.encode("utf-8")) for row in rows]
+        reason = "VERSION"
         if (events[0].get("type") != "version" or events[0].get("tofu") != "1.12.3"
                 or re.fullmatch(r"1\.[0-9]+", events[0].get("ui", "")) is None):
             raise ValueError("unsupported native stream")
-        actions, drift, summaries = {}, {}, []
+        actions, drift, summaries, reads = {}, {}, [], {}
         totals = {"add": 0, "change": 0, "remove": 0}
         for event in events[1:]:
             kind = event.get("type")
+            reason = "EVENT"
             if kind not in ("planned_change", "change_summary", "resource_drift", "refresh_start", "refresh_complete",
-                            "state_lock_acquire", "state_lock_release", "log", "diagnostic", "outputs"):
+                            "state_lock_acquire", "state_lock_release", "log", "diagnostic", "outputs",
+                            "apply_start", "apply_progress", "apply_complete"):
                 raise ValueError("unexpected plan event")
             if kind == "planned_change":
+                reason = "CHANGE"
                 change = event["change"]
                 label = labels[change["resource"]["addr"]]
                 action = change["action"]
@@ -851,19 +842,42 @@ def preview_summary(path: Path, code: int) -> dict:
                 totals["change"] += action == "update"
                 totals["remove"] += action in ("delete", "replace")
             elif kind == "resource_drift":
+                reason = "DRIFT"
                 change = event["change"]
                 label, action = labels[change["resource"]["addr"]], change["action"]
                 if label in drift or action not in ("update", "delete"):
                     raise ValueError("unrecognized drift")
                 drift[label] = action
             elif kind in ("refresh_start", "refresh_complete"):
+                reason = "REFRESH"
                 if event["hook"]["resource"]["addr"] not in labels:
                     raise ValueError("unrecognized refresh")
+            elif kind in ("apply_start", "apply_progress", "apply_complete"):
+                # OpenTofu uses apply hooks for data-source reads during plan.
+                # Admit only the two fixed verification reads, never mutations.
+                reason = "DATA_READ"
+                hook = event["hook"]
+                label = labels[hook["resource"]["addr"]]
+                if (label not in ("verified_destination", "routing_settings")
+                        or hook.get("action") != "read" or summaries):
+                    raise ValueError("unrecognized data read")
+                if kind == "apply_start":
+                    if label in reads:
+                        raise ValueError("repeated data read")
+                    reads[label] = "started"
+                else:
+                    if reads.get(label) != "started":
+                        raise ValueError("unpaired data read")
+                    if kind == "apply_complete":
+                        reads[label] = "complete"
             elif kind == "change_summary":
                 summaries.append(event["changes"])
             elif kind == "diagnostic" and event.get("@level") == "error":
+                reason = "NATIVE_ERROR"
                 raise ValueError("native diagnostic")
+        reason = "SUMMARY"
         if (len(summaries) != 1 or summaries[0].get("operation") != "plan"
+                or any(phase != "complete" for phase in reads.values())
                 or any(type(summaries[0].get(k)) is not int or summaries[0][k] != v for k, v in totals.items())
                 or any(type(summaries[0].get(k, 0)) is not int or summaries[0].get(k, 0) != 0 for k in ("import", "forget"))
                 or (code == 0 and (any(totals.values()) or any(a not in ("noop", "read") for a in actions.values())))
@@ -872,7 +886,7 @@ def preview_summary(path: Path, code: int) -> dict:
         return {"kind": "envs.mailM0.preview.v1", "status": "NO_OP" if code == 0 else "DELTA",
                 "changes": actions, "drift": drift, "totals": totals}
     except Exception:
-        raise NativeSourceHold("MAIL_PREVIEW_UNPROVEN") from None
+        raise NativeSourceHold("MAIL_PREVIEW_UNPROVEN_" + reason) from None
 
 
 def apply_failure_summary(path: Path) -> dict:
@@ -935,15 +949,13 @@ def apply_failure_summary(path: Path) -> dict:
 def manual_entry(operation: str, environ: Mapping[str, str]) -> tuple[str, int] | dict:
     """Consume the selected Environment slots without credential discovery.
 
-    The workflow prepares an absent owner-only home. Recovery seals unchanged
-    input slots for local restoration; projection parses its state-input Secret.
-    No persistent key is generated or rotated, and no plaintext file is made.
+    The workflow prepares an absent owner-only home; projection parses its
+    state-input Secret. No persistent key is generated or rotated, and no
+    plaintext file is made.
     """
     if operation not in MAIL_OPERATIONS:
         raise NativeSourceHold("MAIL_OPERATION_UNSELECTED")
-    names = {"MAIL_HOME", "ENVS_EFFECT_TOOLCHAIN"}
-    names |= (STATE_INPUT_KEYS | {"MAIL_STATE_AGE_RECIPIENT"} if operation == "recover" else
-              {"MAIL_CONFIG", "CLOUDFLARE_API_TOKEN"})
+    names = {"MAIL_HOME", "ENVS_EFFECT_TOOLCHAIN", "MAIL_CONFIG", "CLOUDFLARE_API_TOKEN"}
     if operation in ("preview", "apply"):
         names.add("MAIL_STATE_INPUTS")
     selected = {name: environ.get(name, "") for name in names}
@@ -951,8 +963,6 @@ def manual_entry(operation: str, environ: Mapping[str, str]) -> tuple[str, int] 
     tools = provided_native_tools(source, selected.get("ENVS_EFFECT_TOOLCHAIN", ""), sys.executable)
     home = Path(selected.get("MAIL_HOME", ""))
     _owner_home(home)
-    if operation == "recover":
-        return recover_state(selected, tools, home)
     if operation == "qualify":
         return qualify(selected, tools, home)
     ops_root = home / "root"
@@ -985,8 +995,12 @@ def manual_entry(operation: str, environ: Mapping[str, str]) -> tuple[str, int] 
     if operation == "preview" and result[1] in (0, 2):
         try:
             return preview_summary(home / "preview.out", result[1])
-        except NativeSourceHold:
-            return "PREVIEW_UNPROVEN", 1
+        except NativeSourceHold as error:
+            reason = str(error).removeprefix("MAIL_PREVIEW_UNPROVEN_")
+            if reason not in ("CAPTURE", "VERSION", "EVENT", "CHANGE", "DRIFT", "REFRESH", "DATA_READ", "NATIVE_ERROR", "SUMMARY"):
+                reason = "UNCLASSIFIED"
+            return {"kind": "envs.mailM0.manual.v1", "status": "PREVIEW_UNPROVEN",
+                    "reason": reason, "native_exit": result[1], "_code": 1}
     if operation == "apply" and result[1] != 0:
         return {"kind": "envs.mailM0.manual.v1", "status": result[0],
                 "stage": "init" if result[0] == "INIT_UNPROVEN" else "apply",

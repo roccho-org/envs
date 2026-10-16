@@ -82,6 +82,31 @@ def check_preview_summary(mail) -> None:
             assert result["totals"] == {"add": 2 if code == 2 else 0, "change": 0, "remove": 0}
             assert result["changes"] == ({"destination": "create", "dns": "create"} if code == 2 else {})
             assert marker not in repr(result)
+        base_events = [json.loads(row) for row in preview_journal(True, marker).splitlines()]
+        hooks = []
+        for address in ("data.cloudflare_email_routing_address.checked[0]",
+                        "data.cloudflare_email_routing_settings.checked[0]"):
+            for kind in ("apply_start", "apply_progress", "apply_complete"):
+                hooks.append({"type": kind, "@message": marker,
+                              "hook": {"resource": {"addr": address}, "action": "read", "id_value": marker}})
+        data_events = base_events[:2] + hooks + base_events[2:]
+        data_journal = "\n".join(json.dumps(event) for event in data_events) + "\n"
+        capture.write_text(data_journal, encoding="utf-8")
+        assert mail.preview_summary(capture, 2)["totals"] == {"add": 2, "change": 0, "remove": 0}
+        assert marker not in repr(mail.preview_summary(capture, 2))
+        for bad in (data_journal.replace('"action": "read"', '"action": "create"'),
+                    data_journal.replace('data.cloudflare_email_routing_address.checked[0]', marker),
+                    data_journal.replace('data.cloudflare_email_routing_address.checked[0]', 'cloudflare_email_routing_dns.zone[0]'),
+                    data_journal.replace('"apply_start"', '"apply_progress"'),
+                    data_journal.replace('"apply_complete"', '"apply_progress"'),
+                    data_journal.replace('"apply_progress"', '"apply_errored"'),
+                    preview_journal(True) + "\n".join(json.dumps(event) for event in hooks)):
+            capture.write_text(bad, encoding="utf-8")
+            try:
+                mail.preview_summary(capture, 2)
+                raise AssertionError("unsafe preview data hook accepted")
+            except mail.NativeSourceHold as error:
+                assert marker not in str(error)
         for bad in (journal.replace('"1.0"', '"2.0"'), journal.replace('"1.12.3"', '"1.12.2"'),
                     journal.replace('"add": 2', '"add": true'), journal.replace('"add": 2', '"add": 1'),
                     journal.replace('"create"', '"unknown"'), journal.replace('"create"', '"update"'),
@@ -249,7 +274,7 @@ def check_native_entry() -> None:
             assert done.stdout == json.dumps(CLOSED, separators=(",", ":")) + "\n"
             assert marker not in done.stdout
             assert not child.exists(), "a child ran before the independent source refusal"
-        for operation in ("qualify", "recover", "preview", "apply"):
+        for operation in ("qualify", "preview", "apply"):
             done = subprocess.run(
                 [sys.executable, "-I", str(ADAPTER), "--operation", operation],
                 cwd=home, env=env, capture_output=True, text=True, timeout=6, check=False,
@@ -257,6 +282,13 @@ def check_native_entry() -> None:
             assert done.returncode == 78 and done.stderr == ""
             assert json.loads(done.stdout)["status"] == "INPUT_UNPROVEN"
             assert marker not in done.stdout and not child.exists()
+        # The completed recovery is retired: it is an unsupported operation, refused before any input is read.
+        done = subprocess.run(
+            [sys.executable, "-I", str(ADAPTER), "--operation", "recover"],
+            cwd=home, env=env, capture_output=True, text=True, timeout=6, check=False,
+        )
+        assert done.returncode == 78 and done.stderr == ""
+        assert json.loads(done.stdout) == CLOSED and marker not in done.stdout and not child.exists()
         assert sorted(p.name for p in home.iterdir()) == ["bin"], "unexpected state/output file"
 
 
@@ -268,8 +300,8 @@ def check_manual_job() -> None:
     assert content.count("\n    if:") == 1
     assert "on:\n  workflow_dispatch:" in content
     assert "      expected_source_sha:" in content
-    for name, count in (("MAIL_CONFIG", 2), ("CLOUDFLARE_API_TOKEN", 2), ("AWS_ACCESS_KEY_ID", 1),
-                        ("AWS_SECRET_ACCESS_KEY", 1), ("RENT_STATE_PASSPHRASE", 1), ("MAIL_STATE_INPUTS", 1)):
+    for name, count in (("MAIL_CONFIG", 2), ("CLOUDFLARE_API_TOKEN", 2), ("AWS_ACCESS_KEY_ID", 0),
+                        ("AWS_SECRET_ACCESS_KEY", 0), ("RENT_STATE_PASSPHRASE", 0), ("MAIL_STATE_INPUTS", 1)):
         assert content.count("${{ secrets." + name + " }}") == count
     assert "secrets.SOPS_AGE_KEY" not in content and "secrets.MAIL_STATE_AGE_KEY" not in content
     for clause in ("github.sha == inputs.expected_source_sha", "github.run_attempt == 1",
@@ -277,11 +309,12 @@ def check_manual_job() -> None:
                    "github.triggering_actor == 'roccho-dev'"):
         assert clause in content
     assert "${{ vars." not in content
-    assert "options: [qualify, recover, preview, apply]" in content and "default: qualify" in content
+    assert "options: [qualify, preview, apply]" in content and "default: qualify" in content
     assert "ref: afd831dba8f401fb37fc20c27ab8d1f176102050" in content
-    assert "path: ${{ env.MAIL_HOME }}/mail-state.sops.json" in content and "cancel-in-progress: false" in content
-    assert "contains(fromJSON('[\"qualify\",\"recover\",\"preview\",\"apply\"]'), inputs.operation)" in content
-    assert "environment: ${{ inputs.operation == 'recover' && 'dev-rent-tunnel' || 'dev-projection' }}" in content
+    assert "mail-state.sops.json" not in content and "cancel-in-progress: false" in content
+    assert "contains(fromJSON('[\"qualify\",\"preview\",\"apply\"]'), inputs.operation)" in content
+    assert "    environment: dev-projection\n" in content and "dev-rent-" not in content
+    assert "recover" not in content and "recipient" not in content
     assert "    needs:" not in content
     assert content.count('"$ENVS_EFFECT_BIN/mail-routing-root" --operation "$MAIL_OPERATION"') == 1
 
@@ -899,14 +932,17 @@ def check_manual_integration(mail, manifest: str, identity: str, recipient: str)
             mail.STATE_CIPHERTEXT.write_bytes(encrypted)
             recovery = Path(directory) / "recovery"
             recovery.mkdir(mode=0o700)
-            sealed_env = {**values, "MAIL_STATE_AGE_RECIPIENT": recipient,
-                          "MAIL_HOME": str(recovery), "ENVS_EFFECT_TOOLCHAIN": manifest,
-                          "CLOUDFLARE_API_TOKEN": "UNUSED_CF_INPUT", "MAIL_STATE_AGE_KEY": "UNUSED_AGE_INPUT"}
-            assert mail.manual_entry("recover", sealed_env) == ("STATE_INPUTS_SEALED", 0)
-            recovered_cipher = (recovery / "mail-state.sops.json").read_bytes()
-            mail.state_ciphertext(recovered_cipher, recipient, values)
-            assert mail._decode_state(mail._sops(tools, recovery, recovered_cipher, identity=identity)) == values
-            assert stat.S_IMODE((recovery / "mail-state.sops.json").stat().st_mode) == 0o600
+            # The completed one-time recovery is retired: the operation is refused before any slot or child.
+            retired_env = {**values, "MAIL_STATE_AGE_RECIPIENT": recipient,
+                           "MAIL_HOME": str(recovery), "ENVS_EFFECT_TOOLCHAIN": manifest,
+                           "CLOUDFLARE_API_TOKEN": "UNUSED_CF_INPUT", "MAIL_STATE_AGE_KEY": "UNUSED_AGE_INPUT"}
+            try:
+                mail.manual_entry("recover", retired_env)
+                raise AssertionError("retired recovery operation accepted")
+            except mail.NativeSourceHold as error:
+                assert str(error) == "MAIL_OPERATION_UNSELECTED"
+            assert list(recovery.iterdir()) == [], "the retired recovery wrote an output"
+            recovered_cipher = encrypted
             assert all(value.encode() not in recovered_cipher for value in values.values())
             for bad in (b"{}", b"[]", json.dumps(list(values.items())).encode(),
                         b'{"RENT_STATE_PASSPHRASE":"x","RENT_STATE_PASSPHRASE":"y"}',
@@ -917,8 +953,8 @@ def check_manual_integration(mail, manifest: str, identity: str, recipient: str)
                 except mail.NativeSourceHold:
                     pass
             try:
-                mail._sops(tools, recovery, recovered_cipher, identity="AGE-SECRET-KEY-INVALID")
-                raise AssertionError("wrong identity decrypted recovery")
+                mail._sops(tools, cipher_home, recovered_cipher, identity="AGE-SECRET-KEY-INVALID")
+                raise AssertionError("wrong identity decrypted the carrier")
             except mail.NativeSourceHold:
                 pass
 
@@ -1185,6 +1221,44 @@ def check_provided_native_toolchain() -> None:
                     assert native.returncode == (0 if stage == 0 else expected), (
                         "provided native no-op fixture returned unexpected finite code")
                 assert not list(fixture.glob("*.tfstate*")), "test plan persisted state"
+        # Native data reads use apply-style hooks even during plan. The local
+        # synthetic input state contains no credentials and contacts no service.
+        with tempfile.TemporaryDirectory(prefix="mail-native-data-read-") as directory:
+            fixture = Path(directory)
+            canary = "SYNTHETIC_PRIVATE_DATA_READ"
+            (fixture / "input.tfstate").write_text(json.dumps({
+                "version": 4, "terraform_version": "1.12.3", "serial": 1,
+                "lineage": "00000000-0000-4000-8000-000000000000",
+                "outputs": {"canary": {"value": canary, "type": "string", "sensitive": True}},
+                "resources": [],
+            }), encoding="utf-8")
+            (fixture / "main.tf").write_text(
+                'data "terraform_remote_state" "fixture" {\n  backend = "local"\n'
+                '  config = { path = "${path.module}/input.tfstate" }\n}\n'
+                'resource "terraform_data" "fixture" { input = data.terraform_remote_state.fixture.outputs.canary }\n',
+                encoding="utf-8")
+            env = {"HOME": str(fixture), "TMPDIR": str(fixture), "LANG": "C",
+                   "TF_INPUT": "0", "TF_IN_AUTOMATION": "1", "CHECKPOINT_DISABLE": "1"}
+            for stage, args, code in (("init", ("init", "-backend=false", "-input=false"), 0),
+                                      ("preview", mail.NOOP_PLAN_ARGS, 2)):
+                native = subprocess.run([selection.tofu, "-chdir=" + str(fixture), *args], env=env,
+                                        stdin=subprocess.DEVNULL, capture_output=True, check=False, timeout=15)
+                assert native.returncode == code, "native data-read fixture failed"
+            journal = native.stdout.decode("utf-8")
+            events = [json.loads(row) for row in journal.splitlines()]
+            reads = [event for event in events if event.get("type") in ("apply_start", "apply_complete")]
+            assert {event["type"] for event in reads} == {"apply_start", "apply_complete"}
+            assert all(event["hook"]["action"] == "read" for event in reads)
+            home = fixture / "private-summary"
+            home.mkdir(mode=0o700)
+            capture = home / "data.jsonl"
+            capture.write_text(journal.replace("data.terraform_remote_state.fixture", "data.cloudflare_email_routing_address.checked[0]")
+                               .replace("terraform_data.fixture", "cloudflare_email_routing_rule.literal[0]"), encoding="utf-8")
+            capture.chmod(0o600)
+            result = mail.preview_summary(capture, native.returncode)
+            assert result["changes"] == {"rule": "create"} and result["totals"] == {"add": 1, "change": 0, "remove": 0}
+            assert canary not in repr(result)
+            assert not (fixture / "terraform.tfstate").exists() and not list(fixture.glob("*.tfplan"))
         # An actual provider-free native apply re-plans, writes encrypted local
         # TEST state and converges. No saved plan, HTTP backend or provider is
         # involved; this proves command behavior, not the real Mail effect.

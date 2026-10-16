@@ -76,11 +76,9 @@ jobs:
       - name: Test rent tunnel adapter
         run: python3 checks/test_rent_tunnel.py
 
-      - name: Test access probe adapter
-        run: python3 checks/test_rent_access_probe.py
-
-      - name: Test state proof adapter
-        run: python3 checks/test_rent_state_proof.py
+      # TEMPORARY: the one-time rent Secret relocation entry's guards, inputs and receipt (retired with it).
+      - name: Test rent Secret relocation guards
+        run: python3 checks/test_relocate_rent_secrets.py
 
       - name: Test Linode read probe adapter
         run: python3 checks/test_linode_read_probe.py
@@ -845,10 +843,9 @@ jobs:
           done
           "$tool/wrangler" pages secret put --help 2>&1 | grep -Ei 'pages secret put <key>' >/dev/null
 
-      # The probe tools come from the built closure: the exact client version and its service-token flags, the provider
-      # declaration and the persistent root initialized and validated with every network route closed, and a real
-      # localhost sshd/ssh exchange.
-      - name: Access probe tools from the closure without network or credentials
+      # The closure client and the persistent root: the exact client version and its service-token flags, and the root
+      # initialized and validated with every network route closed. The disposable probe and state proof are retired.
+      - name: Closure client and rent root without network or credentials
         run: |
           set -euo pipefail
           tool="$RUNNER_TEMP/envs-effect/bin"
@@ -857,11 +854,6 @@ jobs:
           "$tool/cloudflared" access ssh --help >"$RUNNER_TEMP/access-ssh.help" 2>&1 || true
           grep -qF -- --service-token-id "$RUNNER_TEMP/access-ssh.help"
           grep -qF -- --service-token-secret "$RUNNER_TEMP/access-ssh.help"
-          probe="$RUNNER_TEMP/probe-config"
-          mkdir "$probe"
-          cp providers/dev-rent-access-probe/main.tf "$probe/"
-          HTTPS_PROXY=http://127.0.0.1:9 HTTP_PROXY=http://127.0.0.1:9 "$tool/tofu" -chdir="$probe" init -input=false -no-color
-          "$tool/tofu" -chdir="$probe" validate -no-color
           # The persistent root is declaration only: initialized without its backend and validated, never planned.
           rent="$RUNNER_TEMP/rent-cloudflare"
           mkdir "$rent"
@@ -869,31 +861,18 @@ jobs:
           HTTPS_PROXY=http://127.0.0.1:9 HTTP_PROXY=http://127.0.0.1:9 "$tool/tofu" -chdir="$rent" init -backend=false -input=false -no-color
           "$tool/tofu" -chdir="$rent" validate -no-color
           "$tool/ssh" -V
-          "$tool/python3" -I checks/test_rent_access_probe.py --real-ssh "$tool"
+          "$tool/curl" --version
 
-      # The state proof roots come from the same closure: both initialized and validated with every network route
-      # closed (the backend root without a backend), the Wrangler raw-read and marker-write argv shapes, and the
-      # self-test with real OpenTofu and the real closure curl against a loopback HTTP fixture.
-      - name: State proof roots from the closure without network or credentials
+      # TEMPORARY: the relocation entry on the same locked-nixpkgs Python with PyNaCl the relocation run builds, with
+      # ephemeral synthetic keys and values only (retired with it).
+      - name: Test rent Secret relocation crypto with locked PyNaCl
         run: |
           set -euo pipefail
-          tool="$RUNNER_TEMP/envs-effect/bin"
-          state="$RUNNER_TEMP/state-config"
-          mkdir -p "$state/backend"
-          cp providers/dev-rent-state-proof/main.tf "$state/"
-          cp providers/dev-rent-state-proof/backend/main.tf "$state/backend/"
-          HTTPS_PROXY=http://127.0.0.1:9 HTTP_PROXY=http://127.0.0.1:9 "$tool/tofu" -chdir="$state" init -input=false -no-color
-          "$tool/tofu" -chdir="$state" validate -no-color
-          HTTPS_PROXY=http://127.0.0.1:9 HTTP_PROXY=http://127.0.0.1:9 "$tool/tofu" -chdir="$state/backend" init -backend=false -input=false -no-color
-          "$tool/tofu" -chdir="$state/backend" validate -no-color
-          "$tool/tofu" version
-          "$tool/wrangler" r2 object get --help >"$RUNNER_TEMP/r2-object-get.help" 2>&1 || true
-          grep -qF -- --pipe "$RUNNER_TEMP/r2-object-get.help"
-          grep -qF -- --remote "$RUNNER_TEMP/r2-object-get.help"
-          "$tool/wrangler" r2 object put --help >"$RUNNER_TEMP/r2-object-put.help" 2>&1 || true
-          grep -qF -- --pipe "$RUNNER_TEMP/r2-object-put.help"
-          "$tool/curl" --version
-          "$tool/python3" -I checks/test_rent_state_proof.py --real-tofu "$tool/tofu" --real-s3 "$tool/curl"
+          flake="builtins.getFlake \"path:$GITHUB_WORKSPACE\""
+          pkgs="import ($flake).inputs.nixpkgs { system = \"x86_64-linux\"; }"
+          python="$(nix build --impure --no-link --print-out-paths --expr "($pkgs).python3.withPackages (ps: [ ps.pynacl ])")/bin/python3"
+          "$python" -I adapters/relocate_rent_secrets.py selftest
+          "$python" -I checks/test_relocate_rent_secrets.py --require-nacl
 
       - name: Test Jev adapter on the toolchain interpreter
         run: '"$RUNNER_TEMP/envs-effect/bin/python3" -I checks/test_jev_api.py'
@@ -938,6 +917,137 @@ jobs:
           set -euo pipefail
           tool="$RUNNER_TEMP/envs-effect/bin"
           "$tool/python3" -I checks/test_jev_api.py --sops "$tool/sops" --age-keygen "$RUNNER_TEMP/check-age/bin/age-keygen"
+
+      # agent-opencode-go-source-composition: the windows Pi resolver of the job-contract pin, built from that exact
+      # fetched tree, consumes this exact commit's contracts/bindings.jsonl in a throwaway local envs authority with a
+      # fixture identity and dummy key. No real ciphertext, credential, provider or OCI target is read; the fixture
+      # never enters the provided artifact and this checkout stays clean. Missing, stale, different and uncomposed
+      # inputs and a mismatched windows object identity must each be refused in this same run.
+      - name: Compose the pinned windows Pi resolver with this commit's Go binding
+        run: |
+          set -euo pipefail
+          windows_commit=b63be11dc4dd75978ed703d40fea999690ea5a66
+          windows_tree=6f4488eddd16b09d0a2089b374a5cea6d67e860e
+          binding=opencode-go.oci-dev
+          fx="$RUNNER_TEMP/agent-composition"
+          win="$fx/windows-src"
+          envs="$fx/envs"
+          mkdir "$fx" "$win" "$fx/out"
+          g() { git -c user.name=composition -c user.email=composition@invalid -c gc.auto=0 -c maintenance.auto=false "$@"; }
+
+          # The windows input is the declared object, fetched by id: no floating branch, tag or local copy.
+          g init -q --bare --template= "$fx/windows.git"
+          g -C "$fx/windows.git" fetch -q --no-tags --depth=1 https://github.com/roccho-dev/windows "$windows_commit"
+          windows_identity() {
+            test "$(g -C "$fx/windows.git" rev-parse --verify --quiet "$1^{commit}")" = "$windows_commit" &&
+              test "$(g -C "$fx/windows.git" rev-parse --verify --quiet "$1^{tree}")" = "$2"
+          }
+          windows_identity FETCH_HEAD "$windows_tree"
+          if windows_identity FETCH_HEAD 0000000000000000000000000000000000000000; then
+            echo "a windows input whose tree differs from the pin was accepted" >&2
+            exit 1
+          fi
+          if windows_identity refs/heads/absent "$windows_tree"; then
+            echo "an absent windows input was accepted" >&2
+            exit 1
+          fi
+          g -C "$fx/windows.git" archive "$windows_commit" | tar -x -C "$win"
+          echo "COMPOSITION_STAGE windows commit=$windows_commit tree=$windows_tree"
+
+          # Same pi.nix, nixpkgs and resolver code as windows ships; only the remote, identity and agent dir differ.
+          pkgs="import (builtins.getFlake \"path:$win\").inputs.nixpkgs { system = \"x86_64-linux\"; }"
+          expr="import $win/oci/dev/pi.nix { pkgs = $pkgs; envsRemote = \"file://$envs\"; identity = \"$fx/age.key\"; agentDir = \"$fx/agent\"; }"
+          resolver=$(nix build --impure --no-link --print-out-paths --expr "($expr).resolver")/bin/pi-opencode-go-key
+          tools=$(nix build --impure --no-link --print-out-paths --expr "($expr).fixtureTools")
+          grep -qxE "[[:space:]]*binding='?${binding//./[.]}'?" "$resolver"
+          echo "COMPOSITION_STAGE resolver built from the pinned tree"
+
+          "$tools/bin/age-keygen" -o "$fx/age.key" >/dev/null 2>&1
+          chmod 600 "$fx/age.key"
+          recipient=$("$tools/bin/age-keygen" -y "$fx/age.key")
+          key="composition-fixture-$RANDOM$RANDOM$RANDOM"
+          cipher=$("$tools/bin/jq" -er --arg id "$binding" 'select(.id == $id) | .ciphertext' contracts/bindings.jsonl)
+          encrypt() {
+            printf '{"OPENCODE_API_KEY":"%s"}\n' "$key" |
+              SOPS_AGE_RECIPIENTS="$recipient" "$tools/bin/sops" --encrypt --input-type json --output-type yaml /dev/stdin
+          }
+          commit() {
+            g -C "$envs" add -A
+            g -C "$envs" commit -q -m "$1"
+            g -C "$envs" rev-parse HEAD
+          }
+          # Composed only when the fixture authority carries this exact commit's bindings blob, not a hand-written row.
+          bound() {
+            test "$(g -C "$envs" rev-parse "$1:contracts/bindings.jsonl")" = "$(git rev-parse HEAD:contracts/bindings.jsonl)"
+          }
+          refused() {
+            local name=$1
+            shift
+            if "$resolver" --envs-sha "$@" >"$fx/out/$name" 2>&1; then
+              echo "the resolver accepted a $name input" >&2
+              exit 1
+            fi
+            if grep -qF "$key" "$fx/out/$name"; then
+              echo "the $name refusal exposed the fixture key" >&2
+              exit 1
+            fi
+          }
+          g init -q --template= -b proposals "$envs"
+          mkdir -p "$envs/contracts" "$envs/${cipher%/*}"
+          cp contracts/bindings.jsonl "$envs/contracts/bindings.jsonl"
+          encrypt >"$envs/$cipher"
+          composed=$(commit composed)
+          bound "$composed"
+          test "$("$resolver" --envs-sha "$composed")" = "$key"
+          echo "COMPOSITION_STAGE composed"
+
+          # Only the Go line changes or disappears; every other line of this commit's file keeps its exact bytes, so
+          # the bindings-blob check below can only fail because of the Go row itself.
+          go_line() {
+            local line
+            while IFS= read -r line; do
+              if [ "$(printf '%s\n' "$line" | "$tools/bin/jq" -r .id)" = "$binding" ]; then
+                [ "$1" = drop ] || printf '%s\n' "$line" | "$tools/bin/jq" -c '.target.kind = "process_env"'
+              else
+                printf '%s\n' "$line"
+              fi
+            done <contracts/bindings.jsonl >"$envs/contracts/bindings.jsonl"
+            test "$( (diff contracts/bindings.jsonl "$envs/contracts/bindings.jsonl" || true) | grep -c '^[<>]' || true)" = "$2"
+          }
+
+          # Stale ciphertext: the ciphertext changed after the requested revision.
+          encrypt >"$envs/$cipher"
+          refreshed=$(commit refreshed)
+          refused stale "$composed"
+          # Different: this commit's Go row with another target kind is neither bound nor accepted.
+          go_line kind 2
+          different=$(commit different)
+          if bound "$different"; then
+            echo "a different Go row was treated as this commit's bindings" >&2
+            exit 1
+          fi
+          refused different "$different"
+          # Stale binding: the Go row changed on proposals after the requested revision.
+          refused stale-binding "$refreshed"
+          # Missing: this commit's bindings without the Go row.
+          go_line drop 1
+          missing=$(commit missing)
+          refused missing "$missing"
+          # Uncomposed: no envs authority at all, and a revision that the envs authority does not contain.
+          mv "$envs" "$fx/envs-away"
+          refused uncomposed "$refreshed"
+          mv "$fx/envs-away" "$envs"
+          refused unknown "$(printf unknown | sha1sum | cut -c1-40)"
+          echo "COMPOSITION_STAGE missing stale stale-binding different uncomposed refused"
+
+          # Restored to this commit's exact bindings, the same composition is accepted again.
+          cp contracts/bindings.jsonl "$envs/contracts/bindings.jsonl"
+          encrypt >"$envs/$cipher"
+          restored=$(commit restored)
+          bound "$restored"
+          test "$("$resolver" --envs-sha "$restored")" = "$key"
+          test -z "$(git status --porcelain)"
+          echo "PASS agent-opencode-go-source-composition: windows $windows_commit tree $windows_tree resolver x envs $(git rev-parse HEAD) contracts/bindings.jsonl $(git rev-parse HEAD:contracts/bindings.jsonl); missing/stale/stale-binding/different/uncomposed/OID refused; fixture only"
 
       # Throwaway identities for the placement gate only, made by the check-only age; the gate's envelopes are
       # encrypted to them. They never enter the effect toolchain or the placement distribution.

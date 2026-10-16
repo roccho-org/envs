@@ -36,8 +36,8 @@ SOPS_ENV_KEYS = {"HOME", "TMPDIR", "LANG", "LC_ALL", "CI", "PATH", "SOPS_AGE_REC
 def rent_env(**overrides: str) -> dict[str, str]:
     values = {
         "ENVS_EFFECT_TOOLCHAIN": fixtures.MANIFEST,
-        "CLOUDFLARE_API_TOKEN": API_TOKEN,
-        "CLOUDFLARE_ACCOUNT_ID": ACCOUNT_ID,
+        "RENT_CLOUDFLARE_API_TOKEN": API_TOKEN,
+        "RENT_CLOUDFLARE_ACCOUNT_ID": ACCOUNT_ID,
         "RENT_TUNNEL_ID": TUNNEL_ID,
         "RENT_AGE_RECIPIENT": RECIPIENT,
     }
@@ -193,8 +193,11 @@ def rent_red_case(root: Path, values: dict[str, str], mutate, body: bytes | Exce
 
 
 def test_rent_red_inputs() -> None:
-    for name in ("CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID", "RENT_TUNNEL_ID", "RENT_AGE_RECIPIENT"):
+    for name in ("RENT_CLOUDFLARE_API_TOKEN", "RENT_CLOUDFLARE_ACCOUNT_ID", "RENT_TUNNEL_ID", "RENT_AGE_RECIPIENT"):
         expect_rent_red(rent_env(**{name: ""}))
+    # The shared dev-projection Pages/Mail slots are never a fallback for the distinct rent slots.
+    pages_only = {key: value for key, value in rent_env().items() if not key.startswith("RENT_CLOUDFLARE_")}
+    expect_rent_red({**pages_only, "CLOUDFLARE_API_TOKEN": API_TOKEN, "CLOUDFLARE_ACCOUNT_ID": ACCOUNT_ID})
     # Exactly one target recipient: lists, duplicates and malformed recipients are RED before any effect.
     expect_rent_red(rent_env(RENT_AGE_RECIPIENT=f"{RECIPIENT},{OTHER_RECIPIENT}"))
     expect_rent_red(rent_env(RENT_AGE_RECIPIENT=f"{RECIPIENT},{RECIPIENT}"))
@@ -202,9 +205,9 @@ def test_rent_red_inputs() -> None:
     expect_rent_red(rent_env(RENT_AGE_RECIPIENT=f" {RECIPIENT}"))
     expect_rent_red(rent_env(RENT_TUNNEL_ID=TUNNEL_ID.upper()))
     expect_rent_red(rent_env(RENT_TUNNEL_ID=TUNNEL_ID.replace("-", "")))
-    expect_rent_red(rent_env(CLOUDFLARE_ACCOUNT_ID=ACCOUNT_ID[:31]))
-    expect_rent_red(rent_env(CLOUDFLARE_API_TOKEN="two words"))
-    expect_rent_red(rent_env(CLOUDFLARE_API_TOKEN=API_TOKEN + "\n"))
+    expect_rent_red(rent_env(RENT_CLOUDFLARE_ACCOUNT_ID=ACCOUNT_ID[:31]))
+    expect_rent_red(rent_env(RENT_CLOUDFLARE_API_TOKEN="two words"))
+    expect_rent_red(rent_env(RENT_CLOUDFLARE_API_TOKEN=API_TOKEN + "\n"))
     # Live Variable values must not be stored in Git.
     for value in (RECIPIENT, TUNNEL_ID, ACCOUNT_ID):
         expect_rent_red(rent_env(), mutate=lambda root, value=value: fixtures.append(root / "README.md", f"\n{value}\n"))
@@ -416,12 +419,13 @@ def test_client_red() -> None:
 # Persistent root (windows #8/#14): every input generated per run; the client envelope has its own recipient.
 ROOT_CLIENT_RECIPIENT = "age1" + "".join(secrets.choice(fixtures.BECH32) for _ in range(58))
 ROOT_VALUES = {
-    "CLOUDFLARE_API_TOKEN": API_TOKEN, "AWS_ACCESS_KEY_ID": secrets.token_hex(16),
+    "RENT_CLOUDFLARE_API_TOKEN": API_TOKEN, "AWS_ACCESS_KEY_ID": secrets.token_hex(16),
     "AWS_SECRET_ACCESS_KEY": secrets.token_hex(32), "RENT_STATE_PASSPHRASE": secrets.token_hex(32),
-    "CLOUDFLARE_ACCOUNT_ID": ACCOUNT_ID, "CLOUDFLARE_ZONE_ID": secrets.token_hex(16),
+    "RENT_CLOUDFLARE_ACCOUNT_ID": ACCOUNT_ID, "RENT_CLOUDFLARE_ZONE_ID": secrets.token_hex(16),
     "RENT_HOSTNAME": f"rent-{secrets.token_hex(4)}.example.invalid", "RENT_ORIGIN_SERVICE": f"ssh://origin-{secrets.token_hex(4)}:2222",
     "RENT_SERVICE_TOKEN_DURATION": f"{1000 + secrets.randbelow(8000)}h", "RENT_STATE_BUCKET": f"rent-state-{secrets.token_hex(6)}",
-    "RENT_STATE_KEY": f"state/{secrets.token_hex(6)}.tfstate", "RENT_AGE_RECIPIENT": RECIPIENT,
+    # Unprefixed and multi-segment like the deployed old-S3 key: the source assumes no "state/" prefix.
+    "RENT_STATE_KEY": f"dev/rent-{secrets.token_hex(6)}/root.tfstate", "RENT_AGE_RECIPIENT": RECIPIENT,
     jev.CLIENT_RECIPIENT: ROOT_CLIENT_RECIPIENT,
 }
 ROOT_SECRET_VALUES = [ROOT_VALUES[name] for name in jev.ROOT_SECRETS]
@@ -882,6 +886,506 @@ def real_root_roundtrip(sops_bin: str, keygen_bin: str, tofu_bin: str) -> None:
     print(f"real root output to both envelopes: PASS (tofu={tofu_path}, sops={sops_path}); identities removed")
 
 
+
+# Real read-only inspector wired through the existing root tool port, with every remote child replaced by finite
+# synthetic fixture results. The readiness grant opens this one entry; apply, migration and plan stay closed.
+def test_root_inspect_source_gate() -> None:
+    assert jev.ROOT_INSPECT_SOURCE_ACTIVE is True
+    assert not any((jev.ROOT_APPLY_SOURCE_ACTIVE, jev.ROOT_MIGRATE_SOURCE_ACTIVE, jev.ROOT_PLAN_SOURCE_ACTIVE))
+    # Closed again, the gate is still the entry's first line: a refusal before any contract, input or child.
+    root = fresh_root()
+    before = snapshot(root)
+    out, err = io.StringIO(), io.StringIO()
+    jev.ROOT_INSPECT_SOURCE_ACTIVE = False
+    try:
+        with fixtures.environment(root_env()), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = jev.main(["--root", str(root), "rent-root-inspect"])
+    finally:
+        jev.ROOT_INSPECT_SOURCE_ACTIVE = True
+    assert code == 1 and out.getvalue() == ""
+    assert err.getvalue() == "RENT_ROOT_INSPECT=RED: envs at source_guard\n", err.getvalue()
+    assert snapshot(root) == before
+
+
+def test_root_inspect_bounded_fixture() -> None:
+    # Sentinels stand in for the 13 inputs, the decrypted state and the Cloudflare world. Through the real CLI, every
+    # branch prints only the closed receipt or a closed kind and stage, never a sentinel.
+    root = fresh_root()
+    before = snapshot(root)
+    lineage = str(uuid.uuid4())
+    state_sentinel = "STATE-SENTINEL-" + secrets.token_hex(12)
+    world_sentinel = "WORLD-SENTINEL-" + secrets.token_hex(12)
+    managed = [{"mode": "managed", "type": kind, "name": "rent",
+                "instances": [{"attributes": {"id": state_sentinel, "value": state_sentinel}}]}
+               for kind in sorted(jev.ROOT_INSPECT_RESOURCE_TYPES)]
+    state = json.dumps({"lineage": lineage, "serial": 3, "resources": managed}).encode()
+    sentinels = [*ROOT_VALUES.values(), state_sentinel, world_sentinel]
+
+    class InspectRunner:
+        def __init__(self, state_reply: bytes = state, head: str = "200", lock: str = "404", head_exit: int = 0) -> None:
+            self.calls: list[tuple[list[str], bytes | None, dict[str, str]]] = []
+            self.state_reply, self.head, self.lock, self.head_exit = state_reply, head, lock, head_exit
+
+        def __call__(self, argv, input_data, env):
+            self.calls.append((list(argv), input_data, dict(env or {})))
+            if argv[0] == fixtures.TOOLS["curl"]:
+                config = input_data.decode()
+                assert argv == [fixtures.TOOLS["curl"], "-q", "-I", "--config", "-"]
+                assert 'request = "HEAD"' in config
+                assert "aws-sigv4" in config and "data-binary" not in config
+                assert not any(value in str(argv) for value in ROOT_SECRET_VALUES)
+                assert set(env or {}).isdisjoint(jev.ROOT_SECRETS)
+                code = self.lock if ".tflock" in config else self.head
+                # A child's own output carries a sentinel; it must never reach the CLI streams.
+                return subprocess.CompletedProcess(argv, self.head_exit, stdout=state_sentinel.encode(),
+                                                   stderr=code.encode())
+            assert argv[0] == fixtures.TOOLS["tofu"]
+            if argv[2] == "init":
+                assert "-backend-config=bucket=" + ROOT_VALUES["RENT_STATE_BUCKET"] in argv
+                assert "-backend-config=key=" + ROOT_VALUES["RENT_STATE_KEY"] in argv
+                # The former S3 backend comes only from the source-declared legacy root, never the root's main.tf.
+                work = Path(argv[1].split("=", 1)[1])
+                assert (work / "main.tf").read_text(encoding="utf-8") == jev.ROOT_LEGACY_S3_CONFIG
+                return subprocess.CompletedProcess(argv, 0, stdout=b"", stderr=state_sentinel.encode())
+            assert argv[2:] == ["state", "pull"]
+            assert env["TF_ENCRYPTION"] == jev.encryption_config("k0", ROOT_VALUES["RENT_STATE_PASSPHRASE"])
+            assert "CLOUDFLARE_API_TOKEN" not in env
+            return subprocess.CompletedProcess(argv, 0, stdout=self.state_reply, stderr=state_sentinel.encode())
+
+    # The four exact route URLs, and one first page shaped as each route's public schema declares: the tunnel list
+    # declares no total_pages, the other three do. Every item carries the world sentinel.
+    account, zone = ROOT_VALUES["RENT_CLOUDFLARE_ACCOUNT_ID"], ROOT_VALUES["RENT_CLOUDFLARE_ZONE_ID"]
+    routes = {"tunnels": f"/accounts/{account}/cfd_tunnel?per_page=50",
+              "applications": f"/accounts/{account}/access/apps?per_page=50",
+              "service_tokens": f"/accounts/{account}/access/service_tokens?per_page=50",
+              "dns": f"/zones/{zone}/dns_records?per_page=50"}
+    missing = object()
+
+    def page_reply(label: str, items: int = 1, **info: object) -> dict[str, object]:
+        result_info: dict[str, object] = {"page": 1, "per_page": 50, "count": items, "total_count": items}
+        if label != "tunnels":
+            result_info["total_pages"] = 1 if items else 0
+        for name, value in info.items():
+            if value is missing:
+                result_info.pop(name, None)
+            else:
+                result_info[name] = value
+        return {"success": True, "errors": [], "messages": [], "result_info": result_info,
+                "result": [{"id": world_sentinel, "name": world_sentinel} for _ in range(items)]}
+
+    def world(replies: dict[str, object] | None = None):
+        calls: list[tuple[str, str, str, object]] = []
+
+        def api(method, path, token, body):
+            calls.append((method, path, token, body))
+            assert method == "GET" and token == ROOT_VALUES["RENT_CLOUDFLARE_API_TOKEN"] and body is None
+            assert path in routes.values(), "a route URL or its query changed"
+            label = next(name for name, route in routes.items() if route == path)
+            reply = (replies or {}).get(label, (200, page_reply(label)))
+            if isinstance(reply, BaseException):
+                raise reply
+            return reply
+
+        api.calls = calls
+        return api
+
+    def run_cli(runner, api, cli_root: Path | None = None, **overrides: str) -> tuple[int, str, str]:
+        saved = jev.rent_root_inspect
+        jev.rent_root_inspect = lambda root, progress=None: saved(root, runner=runner, api=api, progress=progress)
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            with fixtures.environment(root_env(**overrides)), contextlib.redirect_stdout(out), \
+                    contextlib.redirect_stderr(err):
+                code = jev.main(["--root", str(cli_root or root), "rent-root-inspect"])
+        finally:
+            jev.rent_root_inspect = saved
+        for sentinel in sentinels:
+            assert sentinel not in out.getvalue() and sentinel not in err.getvalue(), "a sentinel reached the CLI"
+        return code, out.getvalue(), err.getvalue()
+
+    common = {"kind": "envs.rentRootInspect.v1", "status": "BOUNDED_READ_ONLY",
+              "cloudflare_counts": {"tunnels": 1, "applications": 1, "service_tokens": 1, "dns": 1},
+              "world_state_equivalence": "NOT_PROVEN", "provider_delta_F": "NOT_PROVEN",
+              "native_migration": "NOT_RUN", "effect": "NONE"}
+    positive, api = InspectRunner(), world()
+    code, out, err = run_cli(positive, api)
+    assert code == 0 and err == "", err
+    assert json.loads(out) == {**common, "old_state": "PRESENT", "old_lock": "ABSENT", "old_state_read": "ENCRYPTED_READ",
+                               "lineage": lineage, "serial": 3, "managed_root_resources": 6}
+    assert len(positive.calls) == 4 and [call[1] for call in api.calls] == list(routes.values())
+    assert not any(c in {"apply", "plan", "import", "destroy", "force-unlock", "push"}
+                   for args, _, _ in positive.calls for c in args)
+    # One complete first page is any 0..50 items: an empty list reports total_pages 0 or 1, and total_pages is optional
+    # on every route (present on the tunnel list too, or absent from another).
+    for replies, counts in (({"tunnels": (200, page_reply("tunnels", 0)),
+                              "applications": (200, page_reply("applications", 0)),
+                              "service_tokens": (200, page_reply("service_tokens", 0, total_pages=1)),
+                              "dns": (200, page_reply("dns", 0, total_pages=1))},
+                             {"tunnels": 0, "applications": 0, "service_tokens": 0, "dns": 0}),
+                            ({"tunnels": (200, page_reply("tunnels", 50, total_pages=1)),
+                              "applications": (200, page_reply("applications", 50)),
+                              "service_tokens": (200, page_reply("service_tokens", 2, total_pages=missing)),
+                              "dns": (200, page_reply("dns", 0, total_pages=missing))},
+                             {"tunnels": 50, "applications": 50, "service_tokens": 2, "dns": 0})):
+        code, out, err = run_cli(InspectRunner(), world(replies))
+        assert code == 0 and err == "", err
+        assert json.loads(out)["cloudflare_counts"] == counts
+    # An absent state or a held lock is a classification: reported, and the state is then not read.
+    for runner, old_state, old_lock in ((InspectRunner(head="404"), "ABSENT", "ABSENT"),
+                                        (InspectRunner(lock="200"), "PRESENT", "PRESENT"),
+                                        (InspectRunner(head="404", lock="200"), "ABSENT", "PRESENT")):
+        code, out, err = run_cli(runner, world())
+        assert code == 0 and err == "", err
+        assert json.loads(out) == {**common, "old_state": old_state, "old_lock": old_lock, "old_state_read": "NOT_READ",
+                                   "lineage": None, "serial": None, "managed_root_resources": None}
+        assert [args[0] for args, _, _ in runner.calls] == [fixtures.TOOLS["curl"]] * 2, "state read without a clear lock"
+    # UNKNOWN is red at its stage with a closed kind only: an unanswerable HEAD, an unreadable or unidentified state.
+    bad_lineage = json.dumps({"lineage": state_sentinel, "serial": 3, "resources": managed}).encode()
+    for runner, api, stage in ((InspectRunner(head="500"), world(), "s3_head"),
+                               (InspectRunner(lock="403"), world(), "s3_head"),
+                               (InspectRunner(head_exit=7), world(), "s3_head"),
+                               (InspectRunner(state_reply=b"{}"), world(), "state_read"),
+                               (InspectRunner(state_reply=bad_lineage), world(), "state_read")):
+        code, out, err = run_cli(runner, api)
+        assert code == 1 and out == "" and err == f"RENT_ROOT_INSPECT=RED: envs at {stage}\n", (stage, err)
+
+    # Each route's refusal names that route and one closed reason, never the status, message, body or an item, and no
+    # later route is asked. Every bool below would equal 1 if it were not refused as a type.
+    def without(body: dict[str, object], name: str) -> dict[str, object]:
+        return {key: value for key, value in body.items() if key != name}
+
+    def refusals(label: str) -> list[tuple[str, object]]:
+        page = page_reply(label)
+        return [("request", jev.EnvsError(world_sentinel)),
+                ("http_auth", (401, page)), ("http_auth", (403, page)), ("http_not_found", (404, page)),
+                ("http_rate", (429, page)), ("http_other", (500, page)), ("http_other", (302, page)),
+                ("response", (200, None)), ("response", (200, [world_sentinel])),
+                ("response", (200, {**page, "success": False})), ("response", (200, without(page, "success"))),
+                ("page_shape", (200, without(page, "result"))), ("page_shape", (200, without(page, "result_info"))),
+                ("page_shape", (200, {**page, "result": {"id": world_sentinel}})),
+                ("page_shape", (200, {**page, "result_info": [world_sentinel]})),
+                ("page_shape", (200, page_reply(label, page=True))),
+                ("page_shape", (200, page_reply(label, count=True))),
+                ("page_shape", (200, page_reply(label, total_count=True))),
+                ("page_shape", (200, page_reply(label, total_pages=True))),
+                ("page_shape", (200, page_reply(label, page="1"))),
+                ("page_shape", (200, page_reply(label, count=1.0))),
+                ("page_shape", (200, page_reply(label, total_count=None))),
+                ("page_shape", (200, page_reply(label, total_pages="1"))),
+                ("page_shape", (200, page_reply(label, page=missing))),
+                ("page_shape", (200, page_reply(label, count=missing))),
+                ("page_shape", (200, page_reply(label, total_count=missing))),
+                ("completeness", (200, page_reply(label, page=2))),
+                ("completeness", (200, page_reply(label, page=0))),
+                ("completeness", (200, page_reply(label, count=2))),
+                ("completeness", (200, page_reply(label, total_count=2))),
+                ("completeness", (200, page_reply(label, 0, total_count=1))),
+                ("completeness", (200, page_reply(label, 51, total_pages=1))),
+                ("completeness", (200, page_reply(label, total_pages=0))),
+                ("completeness", (200, page_reply(label, total_pages=2))),
+                ("completeness", (200, page_reply(label, 0, total_pages=2)))]
+
+    for index, label in enumerate(routes):
+        for reason, reply in refusals(label):
+            api = world({label: reply})
+            code, out, err = run_cli(InspectRunner(), api)
+            stage = f"cloudflare_{label}_{reason}"
+            assert code == 1 and out == "" and err == f"RENT_ROOT_INSPECT=RED: envs at {stage}\n", (stage, err)
+            assert [call[1] for call in api.calls] == list(routes.values())[:index + 1], f"{stage} asked another route"
+    # A token outside the closed bearer shape is refused before any Cloudflare request is made.
+    token_sentinels = ["TOKEN SENTINEL-" + secrets.token_hex(12), "TOKEN-SENTINEL-é" + secrets.token_hex(12)]
+    sentinels.extend(token_sentinels)
+    for token in token_sentinels:
+        api = world()
+        code, out, err = run_cli(InspectRunner(), api, RENT_CLOUDFLARE_API_TOKEN=token)
+        assert code == 1 and out == "" and err == "RENT_ROOT_INSPECT=RED: envs at cloudflare_tunnels_token_shape\n", err
+        assert api.calls == [], "a Cloudflare request was made with a malformed token"
+    # Each preflight is its own closed stage, refused before any child: invalid contracts, a missing toolchain, an
+    # invalid input, an invalid encryption input, a secret stored in the checkout, an unsafe state key.
+    broken = fresh_root()
+    rows = [json.loads(line) for line in (broken / jev.ENVIRONMENTS).read_text(encoding="utf-8").splitlines() if line]
+    for row in rows:
+        if row["id"] == "dev.authoring":
+            row["github_environment"] = "dev-other"
+    (broken / jev.ENVIRONMENTS).write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    leaked = fresh_root()
+    (leaked / "notes.txt").write_text(ROOT_VALUES["AWS_SECRET_ACCESS_KEY"] + "\n", encoding="utf-8")
+    recipient_sentinel = "RECIPIENT-SENTINEL-" + secrets.token_hex(12)
+    passphrase_sentinel = "PASSPHRASE-SENTINEL-" + secrets.token_hex(12)
+    key_sentinel = f"../KEY-SENTINEL-{secrets.token_hex(12)}.tfstate"
+    sentinels.extend((recipient_sentinel, passphrase_sentinel, key_sentinel))
+    for cli_root, overrides, stage in ((broken, {}, "contracts"),
+                                       (None, {"ENVS_EFFECT_TOOLCHAIN": ""}, "toolchain"),
+                                       (None, {"RENT_AGE_RECIPIENT": recipient_sentinel}, "inputs"),
+                                       (None, {"RENT_STATE_PASSPHRASE": passphrase_sentinel}, "encryption_input"),
+                                       (leaked, {}, "secret_live"),
+                                       (None, {"RENT_STATE_KEY": key_sentinel}, "state_key")):
+        runner = InspectRunner()
+        code, out, err = run_cli(runner, world(), cli_root, **overrides)
+        assert code == 1 and out == "" and err == f"RENT_ROOT_INSPECT=RED: envs at {stage}\n", (stage, err)
+        assert runner.calls == [], f"a child ran before the {stage} preflight passed"
+    assert snapshot(root) == before and jev.ROOT_INSPECT_SOURCE_ACTIVE is True
+
+
+def test_root_state_key_shape() -> None:
+    # The shared closed predicate of the inspect HEAD, the inspect entry and the closed migrate inventory: the
+    # declared key in any shape inside the closed charset, never a path, escape or extension trick.
+    stem = "a" * (180 - len(".tfstate"))
+    for key in ("state/x.tfstate", "dev/rent-0a1b/root.tfstate", "root.tfstate", "a_b-c.d/e.tfstate",
+                ROOT_VALUES["RENT_STATE_KEY"], stem + ".tfstate"):
+        assert jev.root_state_key_ok(key), key
+    for key in ("", "x.json", "x.tfstate.bak", "x.tflock", "../x.tfstate", "a/../x.tfstate", "a..b.tfstate",
+                "a//x.tfstate", "/x.tfstate", "x.tfstate/", "./x.tfstate", "a/./x.tfstate", "a b.tfstate",
+                "a%2Fb.tfstate", "a?b.tfstate", "a#b.tfstate", "a\\b.tfstate", "a\nb.tfstate", "é.tfstate",
+                "a" + stem + ".tfstate"):
+        assert not jev.root_state_key_ok(key), key
+    # The HEAD accepts exactly an accepted key or that key with the native lock suffix appended once (at most 187).
+    seen: list[str] = []
+
+    def head(argv, input_data, env):
+        seen.append(input_data.decode())
+        return subprocess.CompletedProcess(argv, 0, stdout=b"", stderr=b"404")
+
+    tools = {"curl": fixtures.TOOLS["curl"]}
+    key = ROOT_VALUES["RENT_STATE_KEY"]
+    with fixtures.environment(root_env()):
+        for object_key in (key, key + jev.ROOT_LOCK_SUFFIX, stem + ".tfstate" + jev.ROOT_LOCK_SUFFIX):
+            assert jev.rent_inspect_head(tools, ROOT_VALUES, head, object_key) == "ABSENT", object_key
+        for object_key in (key + ".tflock.tflock", key + ".tflockx", "x.tflock", "../" + key + jev.ROOT_LOCK_SUFFIX,
+                           key[:-1], "a" + stem + ".tfstate" + jev.ROOT_LOCK_SUFFIX):
+            try:
+                jev.rent_inspect_head(tools, ROOT_VALUES, head, object_key)
+            except jev.EnvsError:
+                pass
+            else:
+                raise AssertionError(f"unbounded object key accepted: {object_key!r}")
+    assert len(seen) == 3, "an unbounded object key reached the HEAD child"
+
+
+@contextlib.contextmanager
+def source_active(name: str):
+    # Tests alone open a closed entry, only around fake children; the deployed source keeps it False.
+    saved = getattr(jev, name)
+    assert saved is False, f"{name} is not source-hard-inactive"
+    setattr(jev, name, True)
+    try:
+        yield
+    finally:
+        setattr(jev, name, saved)
+
+
+# S2: the root declares the GitHub-ref HTTP backend. Apply, backend migration and the backend-only plan are closed in
+# source: with every input present they refuse at their first line, before any contract, tool, secret or child.
+REF_TOKEN = "ref-principal-" + secrets.token_urlsafe(24)
+GATED_ENTRIES = (("rent-root", "RENT_ROOT", "ROOT_APPLY_SOURCE_ACTIVE"),
+                 ("rent-root-migrate", "RENT_ROOT_MIGRATE", "ROOT_MIGRATE_SOURCE_ACTIVE"),
+                 ("rent-root-plan", "RENT_ROOT_PLAN", "ROOT_PLAN_SOURCE_ACTIVE"))
+
+
+def test_root_source_gates() -> None:
+    root = fresh_root()
+    before = snapshot(root)
+    for command, label, gate in GATED_ENTRIES:
+        assert getattr(jev, gate) is False
+        out, err = io.StringIO(), io.StringIO()
+        with fixtures.environment(root_env(**{jev.ROOT_STATE_GIT_TOKEN: REF_TOKEN})), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = jev.main(["--root", str(root), command])
+        assert code == 1 and out.getvalue() == "", (command, out.getvalue())
+        assert err.getvalue() == f"{label}=RED: envs at source_guard\n", err.getvalue()
+    assert snapshot(root) == before
+    assert (ROOT / jev.ROOT_CONFIG).read_text(encoding="utf-8").count('backend "http" {}') == 1
+
+
+OLD_STATE = {"lineage": "fixture-lineage", "serial": 7,
+             "resources": [{"mode": "managed", "type": kind, "name": "rent", "instances": [{"attributes": {"id": kind}}]}
+                           for kind in sorted(jev.ROOT_INSPECT_RESOURCE_TYPES)]}
+
+
+class Backend:
+    # A fake loopback upstream child: its GET reply decides PRESENT/ABSENT/UNKNOWN; stop is recorded.
+    def __init__(self, reply: tuple[int, bytes] = (204, b"")) -> None:
+        self.reply, self.spawned, self.gets, self.stopped = reply, [], [], False
+
+    def spawn(self, argv, env):
+        self.spawned.append((list(argv), dict(env)))
+        backend = self
+
+        class Process:
+            def poll(self):
+                return None
+
+            def terminate(self):
+                backend.stopped = True
+
+            def wait(self, timeout=None):
+                return 0
+
+            def kill(self):
+                backend.stopped = True
+
+        return Process()
+
+    def get(self, url):
+        self.gets.append(url)
+        return self.reply
+
+
+class StateRunner:
+    # Fake curl HEAD and OpenTofu for migrate/plan. fail names a step to return non-zero; heads sets the HEAD codes.
+    def __init__(self, *, heads: tuple[str, str] = ("200", "404"), after: dict | None = None, fail: str | None = None,
+                 plan_code: int = 0) -> None:
+        self.heads, self.after, self.fail, self.plan_code = heads, after or OLD_STATE, fail, plan_code
+        self.calls: list[tuple[list[str], bytes | None, dict[str, str]]] = []
+        self.migrated = False
+
+    def step(self, argv) -> str:
+        if argv[0] == fixtures.TOOLS["curl"]:
+            return "head"
+        if argv[2] == "init":
+            return "migrate" if "-migrate-state" in argv else "init"
+        return argv[2] if argv[2] != "state" else "pull"
+
+    def __call__(self, argv, input_data, env):
+        self.calls.append((list(argv), input_data, dict(env or {})))
+        step = self.step(argv)
+        assert not any(value in item for value in [*ROOT_SECRET_VALUES, REF_TOKEN] for item in argv), argv
+        assert jev.ROOT_STATE_GIT_TOKEN not in (env or {}), "the ref principal reached a non-backend child"
+        if step == "head":
+            code = self.heads[1] if ".tflock" in input_data.decode() else self.heads[0]
+            return subprocess.CompletedProcess(argv, 0, stdout=b"", stderr=code.encode())
+        if step == self.fail:
+            return subprocess.CompletedProcess(argv, 1, stdout=b"", stderr=b"synthetic failure")
+        work = Path(argv[1].split("=", 1)[1])
+        text = (work / "main.tf").read_text(encoding="utf-8")
+        if step == "init":
+            if "-backend-config=bucket=" + ROOT_VALUES["RENT_STATE_BUCKET"] in argv:
+                assert text == jev.ROOT_LEGACY_S3_CONFIG
+            else:
+                assert text == (ROOT / jev.ROOT_CONFIG).read_text(encoding="utf-8") and "-lock=true" in argv
+        elif step == "migrate":
+            assert text == (ROOT / jev.ROOT_CONFIG).read_text(encoding="utf-8")
+            assert argv[3:9] == ["-input=false", "-no-color", "-migrate-state", "-force-copy", "-lock=true",
+                                 argv[8]] and len(argv) == 13, argv
+            self.migrated = True
+        elif step == "pull":
+            body = self.after if self.migrated else OLD_STATE
+            return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(body).encode(), stderr=b"")
+        elif step == "plan":
+            assert argv[3:] == ["-input=false", "-no-color", "-lock=true", "-detailed-exitcode"], argv
+            return subprocess.CompletedProcess(argv, self.plan_code, stdout=b"", stderr=b"")
+        else:
+            raise AssertionError(f"unexpected child {argv}")
+        return subprocess.CompletedProcess(argv, 0, stdout=b"", stderr=b"")
+
+    def steps(self) -> list[str]:
+        return [self.step(argv) for argv, _, _ in self.calls]
+
+
+def backend_argv(backend: Backend) -> None:
+    # The upstream child: the pinned closure binary on loopback only, holding the ref principal and nothing else.
+    (argv, env), = backend.spawned
+    assert argv[:2] == [fixtures.TOOLS["terraform_backend_git"], "--address"] and argv[2].startswith("127.0.0.1:")
+    assert env[jev.ROOT_STATE_GIT_TOKEN] == REF_TOKEN and set(env).isdisjoint(jev.ROOT_SECRETS)
+    # Upstream v0.1.12 HTTPS auth needs a username with the token; nothing else private reaches the child.
+    assert set(env) - {"TMPDIR", "LANG", "LC_ALL", "CI"} == {"PATH", "HOME", "GIT_USERNAME", jev.ROOT_STATE_GIT_TOKEN}, \
+        sorted(env)
+    assert env["GIT_USERNAME"] == jev.ROOT_STATE_GIT_USERNAME == "x-access-token"
+    url = backend.gets[0]
+    assert url.startswith(f"http://{argv[2]}/?type=git&repository=https%3A%2F%2Fgithub.com%2Froccho-org%2Fenvs.git"
+                          "&ref=tofu-state&state=state%2Fdev-rent-cloudflare.json"), url
+
+
+def root_operation(entry, runner: StateRunner, backend: Backend, values: dict[str, str]) -> tuple[dict | None, dict]:
+    root = fresh_root()
+    before = snapshot(root)
+    progress: dict[str, str] = {}
+    result = None
+    with fixtures.environment(values):
+        try:
+            result = entry(root, runner=runner, spawn=backend.spawn, local_get=backend.get, sleep=lambda _: None,
+                           progress=progress)
+        except jev.EnvsError as exc:
+            assert not any(value in str(exc) for value in [*ROOT_SECRET_VALUES, REF_TOKEN]), str(exc)
+    assert snapshot(root) == before, "a backend operation changed a data file"
+    assert not {"apply", "import", "destroy", "force-unlock"} & set(runner.steps()), runner.steps()
+    assert not backend.spawned or backend.stopped, "the loopback backend outlived its operation"
+    return result, progress
+
+
+def test_root_migrate_fixture() -> None:
+    values = root_env(**{jev.ROOT_STATE_GIT_TOKEN: REF_TOKEN})
+    with source_active("ROOT_MIGRATE_SOURCE_ACTIVE"):
+        runner, backend = StateRunner(), Backend()
+        result, progress = root_operation(jev.rent_root_migrate, runner, backend, values)
+        assert result == {"kind": "envs.rentRootMigrate.v1", "status": "BACKEND_MIGRATED", "lineage": "UNCHANGED",
+                          "resources": "UNCHANGED", "serial": "UNCHANGED", "old_state": "RETAINED",
+                          "plan": "NOT_RUN", "apply": "NOT_RUN"}, result
+        assert runner.steps() == ["head", "head", "init", "pull", "migrate", "pull"], runner.steps()
+        backend_argv(backend)
+        migrate = runner.calls[4][0]
+        assert migrate[8:] == jev.root_backend_config(backend.gets[0]), migrate
+        assert "CLOUDFLARE_API_TOKEN" not in runner.calls[4][2]
+        # A migration write may advance the serial once; the lineage and resources never change.
+        advanced = StateRunner(after={**OLD_STATE, "serial": OLD_STATE["serial"] + 1})
+        assert root_operation(jev.rent_root_migrate, advanced, Backend(), values)[0]["serial"] == "MIGRATION_WRITE"
+        reds = (
+            # Missing or malformed key, unbound ref principal: refused before any child.
+            (root_env(RENT_STATE_PASSPHRASE="", **{jev.ROOT_STATE_GIT_TOKEN: REF_TOKEN}), StateRunner(), Backend(), "contracts", []),
+            (root_env(RENT_STATE_PASSPHRASE="z" * 64, **{jev.ROOT_STATE_GIT_TOKEN: REF_TOKEN}), StateRunner(), Backend(), "contracts", []),
+            (root_env(**{jev.ROOT_STATE_GIT_TOKEN: ""}), StateRunner(), Backend(), "contracts", []),
+            # Old state missing or UNKNOWN, old lock held: refused at inventory.
+            (values, StateRunner(heads=("404", "404")), Backend(), "s3_head", ["head"]),
+            (values, StateRunner(heads=("500", "404")), Backend(), "s3_head", ["head"]),
+            (values, StateRunner(heads=("200", "200")), Backend(), "s3_head", ["head", "head"]),
+            # Wrong key: the former state cannot be read, so nothing is migrated.
+            (values, StateRunner(fail="pull"), Backend(), "state_read", ["head", "head", "init", "pull"]),
+            # The ref already holds a state, or its state is UNKNOWN: never overwritten.
+            (values, StateRunner(), Backend((200, b'{"lineage":"other"}')), "backend", ["head", "head", "init", "pull"]),
+            (values, StateRunner(), Backend((500, b"")), "backend", ["head", "head", "init", "pull"]),
+            # A held lock (or any migration failure) and a changed identity after migration refuse.
+            (values, StateRunner(fail="migrate"), Backend(), "migrate", ["head", "head", "init", "pull", "migrate"]),
+            (values, StateRunner(after={**OLD_STATE, "lineage": "other"}), Backend(), "readback",
+             ["head", "head", "init", "pull", "migrate", "pull"]),
+            (values, StateRunner(after={**OLD_STATE, "serial": OLD_STATE["serial"] + 2}), Backend(), "readback",
+             ["head", "head", "init", "pull", "migrate", "pull"]),
+            (values, StateRunner(after={**OLD_STATE, "resources": OLD_STATE["resources"][1:]}), Backend(), "readback",
+             ["head", "head", "init", "pull", "migrate", "pull"]),
+        )
+        for case_values, runner, backend, stage, steps in reds:
+            result, progress = root_operation(jev.rent_root_migrate, runner, backend, case_values)
+            assert result is None and progress["stage"] == stage and runner.steps() == steps, (stage, progress,
+                                                                                               runner.steps())
+    assert jev.ROOT_MIGRATE_SOURCE_ACTIVE is False
+
+
+def test_root_plan_fixture() -> None:
+    values = root_env(**{jev.ROOT_STATE_GIT_TOKEN: REF_TOKEN})
+    present = (200, json.dumps(OLD_STATE).encode())
+    with source_active("ROOT_PLAN_SOURCE_ACTIVE"):
+        runner, backend = StateRunner(), Backend(present)
+        result, _ = root_operation(jev.rent_root_plan, runner, backend, values)
+        assert result == {"kind": "envs.rentRootPlan.v1", "status": "EMPTY_PLAN", "apply": "NOT_RUN",
+                          "saved_plan": "NONE"}, result
+        assert runner.steps() == ["init", "plan"], runner.steps()
+        backend_argv(backend)
+        assert runner.calls[0][0][3:] == ["-input=false", "-no-color", "-lock=true",
+                                          *jev.root_backend_config(backend.gets[0])]
+        for _, _, env in runner.calls:
+            assert not any(name.startswith("AWS_") for name in env) and env["CLOUDFLARE_API_TOKEN"] == API_TOKEN
+        reds = (
+            (StateRunner(plan_code=2), Backend(present), "plan", ["init", "plan"]),
+            (StateRunner(plan_code=1), Backend(present), "plan", ["init", "plan"]),
+            (StateRunner(fail="init"), Backend(present), "init", ["init"]),
+            (StateRunner(), Backend((204, b"")), "backend", []),
+            (StateRunner(), Backend((500, b"")), "backend", []),
+        )
+        for runner, backend, stage, steps in reds:
+            result, progress = root_operation(jev.rent_root_plan, runner, backend, values)
+            assert result is None and progress["stage"] == stage and runner.steps() == steps, (stage, progress)
+    assert jev.ROOT_PLAN_SOURCE_ACTIVE is False
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--sops")
@@ -900,11 +1404,19 @@ def main() -> None:
         test_fetch_boundary()
         test_client_author()
         test_client_red()
-        test_root_author()
-        test_root_red()
-        test_root_after_write()
-        test_root_main()
-        test_root_init_hint()
+        # The S3-era apply is closed in source; its existing behavior stays covered behind fake children.
+        with source_active("ROOT_APPLY_SOURCE_ACTIVE"):
+            test_root_author()
+            test_root_red()
+            test_root_after_write()
+            test_root_main()
+            test_root_init_hint()
+        test_root_inspect_source_gate()
+        test_root_inspect_bounded_fixture()
+        test_root_state_key_shape()
+        test_root_source_gates()
+        test_root_migrate_fixture()
+        test_root_plan_fixture()
         if args.sops is None:
             print("real SOPS roundtrip: NOT RUN (the check workflow runs it with --sops, --age-keygen and --tofu)")
         else:
