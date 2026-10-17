@@ -61,6 +61,40 @@ checks     = executable repository and adapter specifications
 
 `envs` does not own application runtime acceptance, independent consumer execution, generic deployment, UI meaning, live target observation, secret issuance, or target runtime state.
 
+## Pi Worker OAuth preview
+
+`deploy-pi-worker-preview.yml` is a manual, owner-only projection of the exact
+current `roccho-org/ops#563` candidate to the single
+`roccho-pi-worker-preview` Worker. It uses the existing
+`dev-projection/CLOUDFLARE_API_TOKEN` and
+`dev-projection/CLOUDFLARE_ACCOUNT_ID` in one final native Wrangler step;
+neither input is copied to Ops or application bindings. The candidate must
+already have successful Pi proof, flake-check and review-consumer checks.
+The workflow consumes the CI-built screen-only artifact, verifies its native
+Actions identity/digest and source, and dry-runs it with the already-provided
+envs toolchain before mapping provider inputs. It does not rebuild the app.
+
+The preview is limited to opening the real OAuth screen using existing Pi.
+It issues no subscription token and performs no model inference. Worker URL
+acceptance and browser proof belong to Ops. Actual subscription credential
+persistence, owner-only conversation access and the complete runtime remain
+separate acceptance conditions. A stable, non-secret host UUID derives from
+this exact account and Worker name and is supplied as `PI_OAUTH_HOST_ID`.
+The admitted package contains no chat, DO, asset, secret or service bindings.
+This workflow does not change GitHub
+Environment branch policies, Cloudflare Access, DNS or other Workers.
+
+After this workflow is accepted on `proposals`, select the reviewed candidate:
+
+```sh
+gh workflow run deploy-pi-worker-preview.yml --repo roccho-org/envs --ref proposals \
+  -f ops_sha=<exact-current-reviewed-ops-563-head>
+```
+
+Before acceptance, the Environment's existing `proposals`-only branch policy
+keeps the effect unavailable from a candidate branch. A source PR or CI PASS
+does not establish an actual deployment or a functioning public URL.
+
 ## Durable tree
 
 ```text

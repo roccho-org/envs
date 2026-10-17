@@ -216,6 +216,19 @@ def main() -> None:
     ):
         expect_red(replace_text(calendar, old, new))
 
+    pi_preview = ".github/workflows/deploy-pi-worker-preview.yml"
+    for old, new in (
+        ("github.ref == 'refs/heads/proposals'", "github.ref == 'refs/heads/main'"),
+        ("github.actor_id == '40359643'", "github.actor_id == '1'"),
+        ("github.run_attempt == 1", "github.run_attempt >= 1"),
+        ("  contents: read", "  contents: write"),
+        ("roccho-pi-worker-preview", "unrelated-worker"),
+        ("PI_OAUTH_HOST_ID", "PI_CHATGPT_BOOTSTRAP"),
+        ("secrets.CLOUDFLARE_API_TOKEN", "secrets.RENT_CLOUDFLARE_API_TOKEN"),
+        ('--config "$PI_SCREEN_DIR/wrangler.json" --name roccho-pi-worker-preview', '--config unsafe.json'),
+    ):
+        expect_red(replace_text(pi_preview, old, new))
+
     def add_database_path(root: Path) -> None:
         name = "duck" + "db"
         (root / f"contracts/{name}.jsonl").write_text("{}\n")
