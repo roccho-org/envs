@@ -1,0 +1,31 @@
+name: Pi screen cross-repository transport preflight
+
+on:
+  push:
+    branches: [codex/pi-worker-transport-preflight-20261017]
+    paths: [.github/workflows/pi-worker-transport-preflight.yml]
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  observe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - name: Observe artifact access with the actual repository-scoped token
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          auth="Authorization: Bearer $GH_TOKEN"
+          metadata="$(curl -sS -H "$auth" -o "$RUNNER_TEMP/meta.json" -w '%{http_code}' "$GITHUB_API_URL/repos/roccho-org/ops/actions/artifacts/12101118998")"
+          archive="$(curl -sS -H "$auth" -D "$RUNNER_TEMP/private-download-headers" -o /dev/null -w '%{http_code}' "$GITHUB_API_URL/repos/roccho-org/ops/actions/artifacts/12101118998/zip")"
+          jq -n --arg metadata "$metadata" --arg archive "$archive" '{caller:"roccho-org/envs", credential:"native GITHUB_TOKEN; actions:read, contents:read", source_repository:"roccho-org/ops", source_artifact:12101118998, metadata_http:$metadata, archive_http:$archive, cloudflare_credentials_used:false, permissions_changed:false}' | tee "$RUNNER_TEMP/transport-receipt.json"
+      - name: Preserve only the closed non-secret observation
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: pi-screen-transport-observation
+          path: ${{ runner.temp }}/transport-receipt.json
+          retention-days: 3
