@@ -112,6 +112,20 @@ LICENSE_POLICY.md
 THIRD_PARTY_NOTICES.md
 ```
 
+## Host Tool D/q candidate — SOURCE-only, NOT_ADMITTED
+
+[Windows #88](https://github.com/roccho-dev/windows/issues/88) and [PR #91's independent review](https://github.com/roccho-dev/windows/pull/91#pullrequestreview-5514695879) require a target-specific Tool version **D** and selection revision **q** before a real rent update may be considered. This repository's current rent target identifies a token slot and observation owner, not an approved Tool choice.
+
+- `contracts/proposals/host-tool-selection.jsonl`: **one non-authoritative example** for existing `pc7337-rent`, pointing to exact `roccho-dev/windows@355b038bcbe2b24a8ad0121f79b7cc4c72b76b3f` output `packages.x86_64-linux.rent-tool-profile`. It is **not** inserted into `targets.jsonl` or existing accepted Binding/provider contracts.
+- `adapters/host_tool_selection.py`: pure, explicitly invoked **fixture projection**, never called by `envs-effect`, deployment, a provider, or the accepted `envs-contract-projection`. Its `proposed_q` is a content hash of `{target_ref, material}`. `accepted_q=null`, `admission=NOT_ADMITTED`, `observation=NOT_READ`, `target_noop=UNPROVEN`, `effect=FORBIDDEN`; q is **not** adoption.
+- `checks/test_host_tool_selection.py`: validates source/target identity, immutable producer reference, q changes and per-target isolation; refuses altered admission, unrelated targets, mutable refs, extra secret/status fields, malformed inputs and duplicate identities. Only public synthetic SOURCE files are used; the existing `check.yml` repository job runs it without new permissions.
+
+**SOURCE-only guard and composite:** `adapters/host_tool_guard.py` and `checks/test_host_tool_guard.py` use *in-memory synthetic* admitted D, observation O, read/change authority and previous effects to classify READ/CHANGE/UNKNOWN scenarios. Only `SYNTHETIC_CHANGE_CANDIDATE` or `SYNTHETIC_READBACK_CANDIDATE` may appear even when every synthetic precondition is true; **all results retain `admission=NOT_ADMITTED`, `accepted_q=null`, `target_noop=UNPROVEN`, `effect=FORBIDDEN`**. None are an executable command, receipt or trusted authority. The composite fixture requires three SOURCE owners and matching exact head/tree/job claims; mismatched resources→windows producer pin yields `SOURCE_PIN_MISMATCH`. It never queries GitHub or claims a real composite has passed. The accepted envs-effect/provider/normal projection imports none of these candidate helpers.
+
+**S2/S4 boundary:** Proposal q only hashes the target reference and immutable material, not all Target attributes or observed effects; real success requires an independently accepted current D/revision and fresh O. Even `SYNTHETIC_SOURCE_SET_CANDIDATE` is not cross-repo adoption, real proof, or merge permission. [resources Native-only VM proposal](https://github.com/roccho-dev/resources/pull/15) tests NixOS T generations independently of optional OCI but still pins an earlier windows Producer; the mismatch is a concrete open S4 dependency, not a reason to re-pin without owner approval.
+
+**Owner boundary:** Producer windows supplies immutable candidate **C**. envs owns the accepted desired selection **D** and admission process, but no accepted D or current q exists in the examined contracts. The caller/Target owner, not envs proposal projection, must separately establish exact Host identity, permission to read, fresh observed **O**, quiet/single-writer and conditional change authority; new Target effects and receipts are separate. Nothing here executes `nix-env`, invokes the Host observer, reads a secret, changes legacy auth or authorizes LIVE, merge or deploy. Formal D shape/meaning remains subject to envs owner/P review and [ADRS #215](https://github.com/roccho-dev/adrs/issues/215); proposal/CI success is not admission or Target success.
+
 ## Contracts
 
 - `contracts/environments.jsonl` — stage and secret-plane ownership
