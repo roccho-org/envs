@@ -223,9 +223,9 @@ def main() -> None:
         ("github.run_attempt == 1", "github.run_attempt >= 1"),
         ("  contents: read", "  contents: write"),
         ("roccho-pi-worker-preview", "unrelated-worker"),
-        ("PI_OAUTH_SCREEN_ONLY", "PI_CHATGPT_BOOTSTRAP"),
+        ("PI_OAUTH_HOST_ID", "PI_CHATGPT_BOOTSTRAP"),
         ("secrets.CLOUDFLARE_API_TOKEN", "secrets.RENT_CLOUDFLARE_API_TOKEN"),
-        ("--config ../pi-preview/wrangler.json --no-bundle", "--config ../upstream/wrangler.jsonc"),
+        ('--config "$PI_SCREEN_DIR/wrangler.json" --name roccho-pi-worker-preview', '--config unsafe.json'),
     ):
         expect_red(replace_text(pi_preview, old, new))
 

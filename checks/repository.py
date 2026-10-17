@@ -669,7 +669,6 @@ def check_workflows(root: Path, environments: dict[str, dict[str, Any]],
                 require(re.fullmatch(r"[0-9a-f]{40}", ref) is not None, f"{name}: mutable Action {action}@{ref}")
 
     check = texts["check.yml"]
-    check_pi_worker_preview(texts["deploy-pi-worker-preview.yml"])
     check_relocation(root, texts[RELOCATION_WORKFLOW], check)
     require("pull_request:" in check and "proposals" in check, "check workflow must validate proposals PRs")
     require("${{ secrets." not in check, "check workflow must be secret-free")
@@ -793,6 +792,7 @@ def check_workflows(root: Path, environments: dict[str, dict[str, Any]],
 
     require(consumer_run(effect_shape, "check.yml effect-shape") == canonical, "effect-shape must run the canonical consumer")
     check_calendar_pages_workflow(texts["deploy-calendar-pages.yml"], canonical)
+    check_pi_worker_preview(texts["deploy-pi-worker-preview.yml"], canonical)
     for token in ("nix ", "install-nix"):
         require(token not in effect_shape, f"effect-shape must not use {token.strip()}")
     for marker in (
@@ -1015,7 +1015,7 @@ def check_relocation(root: Path, source: str, check: str) -> None:
         require(marker in check, f"check must test the relocation entry with the locked PyNaCl: {marker}")
 
 
-def check_pi_worker_preview(source: str) -> None:
+def check_pi_worker_preview(source: str, canonical_consumer: str) -> None:
     """One manual, owner-controlled preview; existing secret stays in envs."""
     require("on:\n  workflow_dispatch:\n    inputs:\n      ops_sha:\n" in source,
             "Pi preview must take only an exact source selection on manual dispatch")
@@ -1035,11 +1035,18 @@ def check_pi_worker_preview(source: str) -> None:
     require(source.count("secrets.CLOUDFLARE_API_TOKEN") == 1
             and source.count("vars.CLOUDFLARE_ACCOUNT_ID") == 1,
             "Pi preview must map credentials to one effect step only")
-    require(source.index("pnpm exec wrangler deploy --dry-run") < source.index("secrets.CLOUDFLARE_API_TOKEN"),
-            "Pi preview must build and dry-run before provider credentials")
+    require(consumer_run(source, "deploy-pi-worker-preview.yml") == canonical_consumer,
+            "Pi preview must reuse the already-checked native toolchain")
+    require(source.index("--no-bundle --dry-run") < source.index("secrets.CLOUDFLARE_API_TOKEN"),
+            "Pi preview must verify and dry-run before provider credentials")
+    require("npm install" not in source and "pnpm install" not in source,
+            "Pi projection must consume the checked artifact rather than rebuild app source")
     for marker in ("repos/roccho-org/ops/pulls/563", "flake-check", "jev-review-fresh-consumer",
-                   "roccho-pi-worker-preview", "PI_OAUTH_SCREEN_ONLY", "no_bundle=True",
-                   "preview_urls=False", "--config ../pi-preview/wrangler.json --no-bundle"):
+                   "roccho-pi-worker-preview", "PI_OAUTH_HOST_ID", "pi-worker-screen-$OPS_SHA",
+                   '".github/workflows/pi-worker-proof.yml"', '"SCREEN_ONLY_NO_TOKEN_EXCHANGE_OR_STORAGE"',
+                   '.preview_urls == false', 'has("durable_objects")', 'has("assets")',
+                   'has("services")', 'has("vars")', 'has("routes")',
+                   '--config "$PI_SCREEN_DIR/wrangler.json" --name roccho-pi-worker-preview'):
         require(marker in source, f"Pi preview source/target boundary lost: {marker}")
 
 

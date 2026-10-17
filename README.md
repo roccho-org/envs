@@ -70,13 +70,18 @@ current `roccho-org/ops#563` candidate to the single
 `dev-projection/CLOUDFLARE_ACCOUNT_ID` in one final native Wrangler step;
 neither input is copied to Ops or application bindings. The candidate must
 already have successful Pi proof, flake-check and review-consumer checks.
-Build and dry-run run before the provider inputs are mapped.
+The workflow consumes the CI-built screen-only artifact, verifies its native
+Actions identity/digest and source, and dry-runs it with the already-provided
+envs toolchain before mapping provider inputs. It does not rebuild the app.
 
 The preview is limited to opening the real OAuth screen using existing Pi.
 It issues no subscription token and performs no model inference. Worker URL
 acceptance and browser proof belong to Ops. Actual subscription credential
 persistence, owner-only conversation access and the complete runtime remain
-separate acceptance conditions. This workflow does not change GitHub
+separate acceptance conditions. A stable, non-secret host UUID derives from
+this exact account and Worker name and is supplied as `PI_OAUTH_HOST_ID`.
+The admitted package contains no chat, DO, asset, secret or service bindings.
+This workflow does not change GitHub
 Environment branch policies, Cloudflare Access, DNS or other Workers.
 
 After this workflow is accepted on `proposals`, select the reviewed candidate:
