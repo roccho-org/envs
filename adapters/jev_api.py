@@ -438,12 +438,12 @@ def expected_root_boundary() -> dict[str, Any]:
 
 
 def expected_windows_consumer(source: str) -> dict[str, Any]:
-    # The exact windows source whose published Release (windows-<source>) the placement gate binds.
+    # The exact resources source whose published Windows Release (windows-<source>) the placement gate binds.
     return {
         "id": WINDOWS_CONSUMER,
         "kind": "envs.providerConsumerBoundary.v1",
         "role": "consumer",
-        "repository": "roccho-dev/windows",
+        "repository": "roccho-dev/resources",
         "stage": "dev",
         "capability": "rent-client",
         "distribution_source": source,
