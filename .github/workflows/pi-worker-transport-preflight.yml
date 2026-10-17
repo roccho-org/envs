@@ -12,7 +12,7 @@ permissions:
 jobs:
   observe:
     runs-on: ubuntu-24.04
-    timeout-minutes: 3
+    timeout-minutes: 15
     steps:
       - name: Observe artifact access with the actual repository-scoped token
         env:
@@ -23,9 +23,98 @@ jobs:
           metadata="$(curl -sS -H "$auth" -o "$RUNNER_TEMP/meta.json" -w '%{http_code}' "$GITHUB_API_URL/repos/roccho-org/ops/actions/artifacts/12101118998")"
           archive="$(curl -sS -H "$auth" -D "$RUNNER_TEMP/private-download-headers" -o /dev/null -w '%{http_code}' "$GITHUB_API_URL/repos/roccho-org/ops/actions/artifacts/12101118998/zip")"
           jq -n --arg metadata "$metadata" --arg archive "$archive" '{caller:"roccho-org/envs", credential:"native GITHUB_TOKEN; actions:read, contents:read", source_repository:"roccho-org/ops", source_artifact:12101118998, metadata_http:$metadata, archive_http:$archive, cloudflare_credentials_used:false, permissions_changed:false}' | tee "$RUNNER_TEMP/transport-receipt.json"
-      - name: Preserve only the closed non-secret observation
+      - name: Obtain provided effect artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ENVS_SOURCE_SHA: 7d4120fbe0cfba7fef8af80d85f633e0c173bd8b
+        run: |
+          set -euo pipefail
+          echo "platform: $ImageOS $ImageVersion"
+          api="$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions"
+          auth="Authorization: Bearer $GH_TOKEN"
+          art="$(mktemp -d)"
+          curl -fsSL -H "$auth" -o "$art/list.json" "$api/artifacts?name=envs-effect-$ENVS_SOURCE_SHA&per_page=100"
+          jq -e '[.artifacts[] | select(.expired | not)] | length == 1 and (.[0].digest | test("^sha256:[0-9a-f]{64}$"))' "$art/list.json" >/dev/null
+          jq '[.artifacts[] | select(.expired | not)][0]' "$art/list.json" >"$art/artifact.json"
+          id="$(jq -r '.id' "$art/artifact.json")"
+          digest="$(jq -r '.digest' "$art/artifact.json")"
+          run_id="$(jq -r '.workflow_run.id' "$art/artifact.json")"
+          curl -fsSL -H "$auth" -o "$art/run.json" "$api/runs/$run_id"
+          jq -e --arg sha "$ENVS_SOURCE_SHA" --arg branch "codex/pi-worker-preview-20261017" --arg repo "$GITHUB_REPOSITORY" --arg current "$GITHUB_RUN_ID" \
+            '.path == ".github/workflows/check.yml" and .head_sha == $sha and .head_branch == $branch and .repository.full_name == $repo and .head_repository.full_name == $repo and (.id == 39033151294 and .event == "pull_request" and .conclusion == "success")' \
+            "$art/run.json" >/dev/null
+          curl -fsSL -H "$auth" -o "$art/envs-effect.zip" "$api/artifacts/$id/zip"
+          echo "${digest#sha256:}  $art/envs-effect.zip" | sha256sum -c -
+          unzip -q "$art/envs-effect.zip" -d "$art/content"
+          test "$(ls -A "$art/content")" = envs-effect.tar
+          test "$(tar -xOf "$art/content/envs-effect.tar" SOURCE)" = "$ENVS_SOURCE_SHA"
+          entry="$(tar -xOf "$art/content/envs-effect.tar" ENTRY)"
+          [[ "$entry" =~ ^/nix/store/[0-9a-z]{32}-envs-effect-toolchain/bin/envs-effect$ ]]
+          sudo mkdir -p /nix/store
+          sudo tar -x -C / -f "$art/content/envs-effect.tar" nix/store
+          test -x "$entry"
+          echo "artifact: run=$run_id id=$id digest=$digest entry=$entry"
+          echo "ENVS_EFFECT_BIN=${entry%/envs-effect}" >>"$GITHUB_ENV"
+          echo "ENVS_EFFECT_DIGEST=$digest" >>"$GITHUB_ENV"
+          echo "ENVS_EFFECT_ZIP=$art/envs-effect.zip" >>"$GITHUB_ENV"
+
+      - name: Require the current reviewed Pi candidate and successful checks
+        env:
+          OPS_SHA: 98f238b8c195d2b86f6bde52112523339c583dad
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$OPS_SHA" =~ ^[0-9a-f]{40}$ ]]
+          gh api repos/roccho-org/ops/pulls/563 > "$RUNNER_TEMP/pi-pr.json"
+          jq -e --arg sha "$OPS_SHA" '.head.sha == $sha and .head.repo.full_name == "roccho-org/ops" and .head.ref == "poc/pi-worker-oauth-20261017"' "$RUNNER_TEMP/pi-pr.json" >/dev/null
+          gh api "repos/roccho-org/ops/commits/$OPS_SHA/check-runs?per_page=100" > "$RUNNER_TEMP/pi-checks.json"
+          jq -e '[.check_runs[] | select(.name == "proof" or .name == "flake-check" or .name == "jev-review-fresh-consumer")] | (map(.name) | unique | sort) == ["flake-check", "jev-review-fresh-consumer", "proof"] and all(.status == "completed" and .conclusion == "success")' "$RUNNER_TEMP/pi-checks.json" >/dev/null
+
+      - name: Obtain the exact CI-built screen-only Worker
+        env:
+          OPS_SHA: 98f238b8c195d2b86f6bde52112523339c583dad
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          api="$GITHUB_API_URL/repos/roccho-org/ops/actions"
+          auth="Authorization: Bearer $GH_TOKEN"
+          art="$(mktemp -d)"
+          curl -fsSL -H "$auth" "$api/artifacts?name=pi-worker-screen-$OPS_SHA&per_page=100" > "$art/list.json"
+          jq -e '[.artifacts[] | select(.expired | not)] | length > 0' "$art/list.json" >/dev/null
+          jq '[.artifacts[] | select(.expired | not)] | sort_by(.created_at) | last' "$art/list.json" > "$art/artifact.json"
+          id="$(jq -r .id "$art/artifact.json")"
+          digest="$(jq -r .digest "$art/artifact.json")"
+          run="$(jq -r .workflow_run.id "$art/artifact.json")"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          curl -fsSL -H "$auth" "$api/runs/$run" > "$art/run.json"
+          jq -e --arg sha "$OPS_SHA" '.head_sha == $sha and .path == ".github/workflows/pi-worker-proof.yml" and .head_branch == "poc/pi-worker-oauth-20261017" and .event == "push" and .conclusion == "success" and .repository.full_name == "roccho-org/ops" and .head_repository.full_name == "roccho-org/ops"' "$art/run.json" >/dev/null
+          curl -fsSL -H "$auth" -o "$art/screen.zip" "$api/artifacts/$id/zip"
+          echo "${digest#sha256:}  $art/screen.zip" | sha256sum -c -
+          unzip -q "$art/screen.zip" -d "$art/screen"
+          jq -e --arg sha "$OPS_SHA" '.schema == "pi-worker-screen-source.v1" and .ops_sha == $sha and .upstream_sha == "dcb56ce2d174babb3f00112ac5b8cd597e58ab45" and .scope == "SCREEN_ONLY_NO_TOKEN_EXCHANGE_OR_STORAGE"' "$art/screen/source.json" >/dev/null
+          jq -e '.main == "screen-entry.js" and .no_bundle == true and .preview_urls == false and .observability.enabled == false and (has("durable_objects") or has("assets") or has("services") or has("vars") or has("routes") | not)' "$art/screen/wrangler.json" >/dev/null
+          echo "PI_SCREEN_DIR=$art/screen" >> "$GITHUB_ENV"
+          echo "Pi screen artifact: run=$run id=$id digest=$digest source=$OPS_SHA"
+
+      - name: Native Wrangler dry-run before mapping Cloudflare credentials
+        env:
+          WRANGLER_SEND_METRICS: 'false'
+        run: |
+          set -euo pipefail
+          "$ENVS_EFFECT_BIN/envs-effect" toolchain > "$RUNNER_TEMP/toolchain-identity.json"
+          "$ENVS_EFFECT_BIN/wrangler" --version
+          readlink -f "$ENVS_EFFECT_BIN/wrangler"
+          "$ENVS_EFFECT_BIN/wrangler" deploy --config "$PI_SCREEN_DIR/wrangler.json" --name roccho-pi-worker-preview --no-bundle --dry-run 2>&1 | tee "$RUNNER_TEMP/pi-actual-dryrun.log"
+          jq '. + {toolchain_source:"7d4120fbe0cfba7fef8af80d85f633e0c173bd8b", source_sha:"98f238b8c195d2b86f6bde52112523339c583dad", actual_provided_toolchain_dry_run:"PASS", cloudflare_credentials_used:false}' "$RUNNER_TEMP/transport-receipt.json" > "$RUNNER_TEMP/receipt.next"
+          mv "$RUNNER_TEMP/receipt.next" "$RUNNER_TEMP/transport-receipt.json"
+
+      - name: Preserve only the closed non-secret observations
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: pi-screen-transport-observation
-          path: ${{ runner.temp }}/transport-receipt.json
+          path: |
+            ${{ runner.temp }}/transport-receipt.json
+            ${{ runner.temp }}/toolchain-identity.json
+            ${{ runner.temp }}/pi-actual-dryrun.log
           retention-days: 3
