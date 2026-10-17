@@ -215,10 +215,10 @@ jobs:
           name: placement-identities-${{ env.ENVS_SOURCE_SHA }}
           path: ${{ runner.temp }}/placement-identities
 
-      # Gate A: the windows Release of the exact declared source, published by github-actions[bot] from a push run whose
-      # publication chain passed (scope, build, the Windows proof, the rent image job, publish), with every asset equal to
-      # GitHub's own asset digest; the client distribution's bytes equal its .sha256, rent-image.json names this source.
-      - name: Bind the exact published windows Release
+      # Gate A: resources publishes the declared Windows source after its existing publication chain passed.
+      # Every asset equals GitHub's digest; the ZIP manifest and image descriptors bind the same source.
+      # Tool-only releases omit own-image.json; a release with a new own Base also proves its own publication jobs.
+      - name: Bind the exact published resources Windows Release
         id: release
         shell: pwsh
         env:
@@ -232,39 +232,69 @@ jobs:
             return $text | ConvertFrom-Json
           }
           function Sha([string]$Path) { (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
+          function Assert-Assets([string[]]$Names) {
+            $actual = @($Names | Sort-Object) -join ','
+            if ($actual -cnotin @('rent-image.json,windows-dist.zip,windows-dist.zip.sha256', 'own-image.json,rent-image.json,windows-dist.zip,windows-dist.zip.sha256')) { throw 'the Release asset set differs' }
+          }
+          function Assert-Image($image, [ValidateSet('own', 'rent')][string]$role, [string]$source) {
+            if ($image.kind -isnot [string] -or $image.source -isnot [string] -or $image.image -isnot [string] -or $image.kind -cne "windows.${role}Image.v1" -or $image.source -cne $source -or $image.image -cnotmatch "^ghcr\.io/roccho-dev/windows-$role@sha256:[0-9a-f]{64}$") { throw "$role-image.json does not bind this source to one pushed image" }
+          }
           $consumer = @(Get-Content contracts/provider-consumer.jsonl | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.id -ceq 'windows.rent.consumer' })
-          $source = $consumer[0].distribution_source
-          if ($consumer.Count -ne 1 -or $source -cnotmatch '^[0-9a-f]{40}$') { throw 'no exact windows distribution source' }
-          $repo, $tag = 'repos/roccho-dev/windows', "windows-$source"
+          if ($consumer.Count -ne 1) { throw 'no single Windows distribution consumer' }
+          $source, $provider = $consumer[0].distribution_source, $consumer[0].repository
+          if ($provider -isnot [string] -or $provider -cne 'roccho-dev/resources' -or $source -isnot [string] -or $source -cnotmatch '^[0-9a-f]{40}$') { throw 'no exact resources distribution source' }
+          $repo, $tag = "repos/$provider", "windows-$source"
           $ref = Api "$repo/git/ref/tags/$tag"
-          if ($ref.object.type -cne 'commit' -or $ref.object.sha -cne $source) { throw 'the Release tag does not name the exact windows commit' }
+          if ($ref.object.type -cne 'commit' -or $ref.object.sha -cne $source) { throw 'the Release tag does not name the exact resources commit' }
           $release = Api "$repo/releases/tags/$tag"
-          if ($release.author.login -cne 'github-actions[bot]' -or $release.draft) { throw 'the Release is not a published github-actions[bot] Release' }
+          if ($release.author.login -cne 'github-actions[bot]' -or $release.draft -or $release.prerelease) { throw 'the Release is not a published github-actions[bot] Release' }
           $assets = @($release.assets)
-          if ((@($assets.name | Sort-Object) -join ',') -cne 'rent-image.json,windows-dist.zip,windows-dist.zip.sha256') { throw 'the Release asset set differs' }
+          Assert-Assets @($assets.name)
+          # Exercise this same closed-set validator; do not loosen it merely to accept the fourth asset.
+          Assert-Assets @('rent-image.json', 'windows-dist.zip', 'windows-dist.zip.sha256')
+          Assert-Assets @('own-image.json', 'rent-image.json', 'windows-dist.zip', 'windows-dist.zip.sha256')
+          foreach ($invalid in @('rent-image.json,windows-dist.zip', 'own-image.json,rent-image.json,windows-dist.zip', 'rent-image.json,rent-image.json,windows-dist.zip,windows-dist.zip.sha256', 'own-image.json,own-image.json,rent-image.json,windows-dist.zip,windows-dist.zip.sha256', 'extra.json,rent-image.json,windows-dist.zip,windows-dist.zip.sha256')) {
+            $refused = $false
+            try { Assert-Assets ($invalid -split ',') } catch { $refused = $true }
+            if (-not $refused) { throw 'an incomplete, duplicate or extra Release asset set was accepted' }
+          }
           foreach ($asset in $assets) {
             if ($asset.uploader.login -cne 'github-actions[bot]' -or [string]$asset.digest -cnotmatch '^sha256:[0-9a-f]{64}$') { throw "asset $($asset.name) has no trusted uploader or digest" }
           }
           $required = 'scope', 'build', 'windows', 'rent / build-test-publish', 'publish'
+          if ('own-image.json' -cin $assets.name) { $required += 'own / build-test', 'own / publish' }
           $published = $null
           foreach ($run in @((Api "$repo/actions/runs" @("head_sha=$source", 'event=push', 'per_page=20')).workflow_runs)) {
-            if ($run.path -cne '.github/workflows/ci.yml' -or $run.head_branch -cne 'proposals' -or $run.head_sha -cne $source) { continue }
+            if ($run.path -cne '.github/workflows/ci.yml' -or $run.head_branch -cne 'proposals' -or $run.head_sha -cne $source -or $run.event -cne 'push' -or $run.status -cne 'completed' -or $run.conclusion -cne 'success' -or $run.repository.full_name -cne $provider -or $run.head_repository.full_name -cne $provider) { continue }
             $jobs = @((Api "$repo/actions/runs/$($run.id)/jobs" @('per_page=100')).jobs)
             if (@($required | Where-Object { $name = $_; -not @($jobs | Where-Object { $_.name -ceq $name -and $_.conclusion -ceq 'success' }).Count }).Count -eq 0) { $published = $run; break }
           }
-          if ($null -eq $published) { throw 'no push run of the exact windows source passed its publication chain' }
+          if ($null -eq $published) { throw 'no successful push run of the exact resources source passed its publication chain' }
           $dir = Join-Path $env:RUNNER_TEMP 'windows-release'
-          & gh release download $tag --repo roccho-dev/windows --dir $dir
+          & gh release download $tag --repo $provider --dir $dir
           if ($LASTEXITCODE -ne 0) { throw 'the Release assets could not be read' }
           foreach ($asset in $assets) {
             if ('sha256:' + (Sha (Join-Path $dir $asset.name)) -cne $asset.digest) { throw "asset $($asset.name) differs from its GitHub digest" }
           }
           $zip = Join-Path $dir 'windows-dist.zip'
           if ((Get-Content -LiteralPath "$zip.sha256" -Raw).Split(' ')[0] -cne (Sha $zip)) { throw 'windows-dist.zip differs from its published .sha256' }
-          $image = Get-Content -LiteralPath (Join-Path $dir 'rent-image.json') -Raw | ConvertFrom-Json
-          if ($image.kind -cne 'windows.rentImage.v1' -or $image.source -cne $source -or $image.image -cnotmatch '^ghcr\.io/roccho-dev/windows-rent@sha256:[0-9a-f]{64}$') { throw 'rent-image.json does not bind this source to one pushed image' }
+          foreach ($role in 'rent', 'own') {
+            if ($role -ceq 'own' -and 'own-image.json' -cnotin $assets.name) { continue }
+            $descriptor = Get-Content -LiteralPath (Join-Path $dir "$role-image.json") -Raw | ConvertFrom-Json
+            Assert-Image $descriptor $role $source
+            foreach ($field in 'kind', 'source', 'image') {
+              $invalid = $descriptor | ConvertTo-Json | ConvertFrom-Json
+              $invalid.$field = 'invalid'
+              $refused = $false
+              try { Assert-Image $invalid $role $source } catch { $refused = $true }
+              if (-not $refused) { throw "$role descriptor with a wrong $field was accepted" }
+            }
+            if ($role -ceq 'rent') { $image = $descriptor }
+          }
           Expand-Archive -LiteralPath $zip -DestinationPath (Join-Path $env:RUNNER_TEMP 'windows-dist')
-          "windows Release ${tag}: run $($published.id), windows-dist.zip $(Sha $zip), rent image $($image.image)"
+          $manifest = Get-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'windows-dist/manifest.json') -Raw | ConvertFrom-Json
+          if ($manifest.schemaVersion -ne 3 -or $manifest.source -isnot [string] -or $manifest.source -cne $source) { throw 'windows-dist manifest does not name the selected resources source' }
+          "resources Windows Release ${tag}: run $($published.id), windows-dist.zip $(Sha $zip), rent image $($image.image); asset-set and descriptor refusal checks passed"
           "rent_image=$($image.image)" >> $env:GITHUB_OUTPUT
           "windows_source=$source" >> $env:GITHUB_OUTPUT
 
