@@ -1,0 +1,109 @@
+name: Pi Worker OAuth preview deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      ops_sha:
+        description: Exact independently reviewed ops PR 563 head
+        type: string
+        required: true
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: pi-worker-oauth-preview
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: ${{ github.repository == 'roccho-org/envs' && github.ref == 'refs/heads/proposals' && github.event_name == 'workflow_dispatch' && github.actor == 'roccho-dev' && github.actor_id == '40359643' && github.triggering_actor == 'roccho-dev' && github.run_attempt == 1 }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: dev-projection
+    steps:
+      - name: Checkout exact envs source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Require the current reviewed Pi candidate and successful checks
+        env:
+          OPS_SHA: ${{ inputs.ops_sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$OPS_SHA" =~ ^[0-9a-f]{40}$ ]]
+          gh api repos/roccho-org/ops/pulls/563 > "$RUNNER_TEMP/pi-pr.json"
+          jq -e --arg sha "$OPS_SHA" '.head.sha == $sha and .head.repo.full_name == "roccho-org/ops" and .head.ref == "poc/pi-worker-oauth-20261017"' "$RUNNER_TEMP/pi-pr.json" >/dev/null
+          gh api "repos/roccho-org/ops/commits/$OPS_SHA/check-runs?per_page=100" > "$RUNNER_TEMP/pi-checks.json"
+          jq -e '[.check_runs[] | select(.name == "proof" or .name == "flake-check" or .name == "jev-review-fresh-consumer")] | (map(.name) | unique | sort) == ["flake-check", "jev-review-fresh-consumer", "proof"] and all(.status == "completed" and .conclusion == "success")' "$RUNNER_TEMP/pi-checks.json" >/dev/null
+
+      - name: Checkout the exact Pi integration
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: roccho-org/ops
+          ref: ${{ inputs.ops_sha }}
+          path: ops
+          persist-credentials: false
+
+      - name: Checkout the fixed upstream
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: earendil-works/pi-durable-cloudflare
+          ref: dcb56ce2d174babb3f00112ac5b8cd597e58ab45
+          path: upstream
+          persist-credentials: false
+
+      - name: Use the Pi checked Node version
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.21.0'
+
+      - name: Build the candidate before mapping any Cloudflare credential
+        working-directory: upstream
+        env:
+          WRANGLER_SEND_METRICS: 'false'
+        run: |
+          set -euo pipefail
+          npm install --global pnpm@11.15.1 --ignore-scripts
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('pnpm-workspace.yaml')
+          s = p.read_text()
+          assert s.count('allowBuilds:\n') == 1
+          p.write_text(s.replace('allowBuilds:\n', 'allowBuilds:\n  "@google/genai@2.21.0": false\n  protobufjs@7.6.6: false\n', 1))
+          PY
+          pnpm install --frozen-lockfile
+          python3 ../ops/experiments/pi-worker-proof/apply.py
+          pnpm exec tsc
+          pnpm exec tsc -p tsconfig.client.json
+          pnpm build
+          pnpm exec wrangler deploy --dry-run --outdir .wrangler/dry-run
+
+      - name: Prepare the single new preview Worker
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          source = json.loads(Path('upstream/dist/pi_durable_cloudflare_do/wrangler.json').read_text())
+          keep = ('compatibility_date', 'compatibility_flags', 'rules', 'exports', 'migrations')
+          config = {key: source[key] for key in keep if key in source}
+          config.update(name='roccho-pi-worker-preview', main='../upstream/.wrangler/dry-run/index.js', no_bundle=True, workers_dev=True, preview_urls=False)
+          config['durable_objects'] = {'bindings': [{'name': 'SESSIONS', 'class_name': 'Session'}]}
+          config['assets'] = {**source['assets'], 'directory': '../upstream/dist/client'}
+          config['vars'] = {'PI_OAUTH_SCREEN_ONLY': 'true'}
+          Path('pi-preview').mkdir()
+          Path('pi-preview/wrangler.json').write_text(json.dumps(config))
+          PY
+
+      - name: Deploy only the preview with the existing native credential
+        working-directory: upstream
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          WRANGLER_SEND_METRICS: 'false'
+        run: pnpm exec wrangler deploy --config ../pi-preview/wrangler.json --no-bundle

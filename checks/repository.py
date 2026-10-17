@@ -23,6 +23,7 @@ REQUIRED_FILES = {
     ".github/workflows/probe-dev-mail-routing.yml",
     ".github/workflows/operate-dev-mail-routing.yml",
     ".github/workflows/deploy-calendar-pages.yml",
+    ".github/workflows/deploy-pi-worker-preview.yml",
     ".gitignore",
     "LICENSE_POLICY.md",
     "LICENSES/README.md",
@@ -633,7 +634,7 @@ def check_workflows(root: Path, environments: dict[str, dict[str, Any]],
     workflow_root = root / ".github/workflows"
     names = {path.name for path in workflow_root.iterdir() if path.is_file()}
     require(
-        names == {"check.yml", "jev-issue-comment.yml", "deploy-calendar-pages.yml", "operate-dev-mail-routing.yml",
+        names == {"check.yml", "jev-issue-comment.yml", "deploy-calendar-pages.yml", "deploy-pi-worker-preview.yml", "operate-dev-mail-routing.yml",
                   RELOCATION_WORKFLOW, *EFFECT_WORKFLOWS},
         f"workflow set differs: {sorted(names)}",
     )
@@ -668,6 +669,7 @@ def check_workflows(root: Path, environments: dict[str, dict[str, Any]],
                 require(re.fullmatch(r"[0-9a-f]{40}", ref) is not None, f"{name}: mutable Action {action}@{ref}")
 
     check = texts["check.yml"]
+    check_pi_worker_preview(texts["deploy-pi-worker-preview.yml"])
     check_relocation(root, texts[RELOCATION_WORKFLOW], check)
     require("pull_request:" in check and "proposals" in check, "check workflow must validate proposals PRs")
     require("${{ secrets." not in check, "check workflow must be secret-free")
@@ -1011,6 +1013,34 @@ def check_relocation(root: Path, source: str, check: str) -> None:
                    '"$python" -I checks/test_relocate_rent_secrets.py --require-nacl', RELOCATION_PYTHON,
                    "run: python3 checks/test_relocate_rent_secrets.py\n"):
         require(marker in check, f"check must test the relocation entry with the locked PyNaCl: {marker}")
+
+
+def check_pi_worker_preview(source: str) -> None:
+    """One manual, owner-controlled preview; existing secret stays in envs."""
+    require("on:\n  workflow_dispatch:\n    inputs:\n      ops_sha:\n" in source,
+            "Pi preview must take only an exact source selection on manual dispatch")
+    require("\n  push:" not in source and "\n  pull_request:" not in source,
+            "Pi preview must not deploy on a push or PR")
+    for guard in ("github.repository == 'roccho-org/envs'", "github.ref == 'refs/heads/proposals'",
+                  "github.event_name == 'workflow_dispatch'", "github.actor == 'roccho-dev'",
+                  "github.actor_id == '40359643'", "github.triggering_actor == 'roccho-dev'",
+                  "github.run_attempt == 1"):
+        require(guard in source, f"Pi preview owner admission lost: {guard}")
+    require("permissions:\n  actions: read\n  contents: read\n" in source
+            and "    environment: dev-projection\n" in source,
+            "Pi preview must preserve read-only repository and the existing Environment")
+    require(set(INPUT_REFERENCE.findall(source)) == {
+                ("secrets", "CLOUDFLARE_API_TOKEN"), ("vars", "CLOUDFLARE_ACCOUNT_ID")},
+            "Pi preview may use only the existing Cloudflare pair")
+    require(source.count("secrets.CLOUDFLARE_API_TOKEN") == 1
+            and source.count("vars.CLOUDFLARE_ACCOUNT_ID") == 1,
+            "Pi preview must map credentials to one effect step only")
+    require(source.index("pnpm exec wrangler deploy --dry-run") < source.index("secrets.CLOUDFLARE_API_TOKEN"),
+            "Pi preview must build and dry-run before provider credentials")
+    for marker in ("repos/roccho-org/ops/pulls/563", "flake-check", "jev-review-fresh-consumer",
+                   "roccho-pi-worker-preview", "PI_OAUTH_SCREEN_ONLY", "no_bundle=True",
+                   "preview_urls=False", "--config ../pi-preview/wrangler.json --no-bundle"):
+        require(marker in source, f"Pi preview source/target boundary lost: {marker}")
 
 
 def check_calendar_pages_workflow(source: str, canonical_consumer: str) -> None:
