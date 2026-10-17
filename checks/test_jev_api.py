@@ -76,6 +76,7 @@ OCI_OTHER = "age1" + "".join(secrets.choice(BECH32) for _ in range(58))
 # Generated per run: the OCI source value never appears in tracked source.
 OCI_KEY = "jev-" + secrets.token_urlsafe(24)
 GO_KEY = "go-" + secrets.token_urlsafe(24)
+TYPELLM_KEY = "tl-" + secrets.token_urlsafe(24)
 
 
 def go_env(**overrides: str) -> dict[str, str]:
@@ -143,14 +144,15 @@ def copy_root() -> Path:
     (target / jev.OCI_CIPHERTEXT).unlink(missing_ok=True)
     for path in jev.GO_CIPHERTEXTS.values():
         (target / path).unlink(missing_ok=True)
+    (target / jev.TYPELLM_CIPHERTEXT).unlink(missing_ok=True)
     return target
 
 
 def go_fixture_clear(root: Path) -> None:
-    """Clear only the bounded Go source fixture; preserve and refuse any foreign entry.
+    """Clear only the bounded Go/TypeLLM source fixture; refuse any foreign entry.
 
     The private root must be created by copy_root(). All existing source paths are a finite
-    manifest; only the one Go ciphertext path may be new. Inspect everything before unlinking.
+    manifest; only declared Go/TypeLLM ciphertext paths may be new. Inspect before unlinking.
     This does not recursively delete a directory or borrow the legacy generic test cleanup.
     """
     parent = root.parent
@@ -168,7 +170,7 @@ def go_fixture_clear(root: Path) -> None:
     baseline = [p for p in ROOT.rglob("*") if included(p.relative_to(ROOT))]
     known_files = {p.relative_to(ROOT) for p in baseline if p.is_file()}
     known_dirs = {p.relative_to(ROOT) for p in baseline if p.is_dir()}
-    for path in jev.GO_CIPHERTEXTS.values():
+    for path in (*jev.GO_CIPHERTEXTS.values(), jev.TYPELLM_CIPHERTEXT):
         known_files.add(path)
         known_dirs.add(path.parent)
     observed = list(root.rglob("*"))
@@ -340,6 +342,7 @@ def test_targets_are_separate() -> None:
         jev.OCI_BINDING: ["JEV_API_KEY", jev.OCI_RECIPIENT],
         jev.GO_BINDING: [jev.GO_KEY, jev.OCI_RECIPIENT],
         jev.OWN_GO_BINDING: [jev.GO_KEY, jev.OWN_GO_RECIPIENT],
+        jev.TYPELLM_BINDING: [jev.TYPELLM_KEY, jev.OCI_RECIPIENT],
     }
     try:
         jev.authoring_inputs(contracts, "rent-tunnel")
@@ -426,6 +429,77 @@ def test_author_go() -> None:
             assert contracts["environments"][plane]["migration_state"] == "NOT_CONFIGURED"
     finally:
         go_fixture_clear(root)
+
+
+def test_author_typellm() -> None:
+    values = {jev.TYPELLM_KEY: TYPELLM_KEY, jev.OCI_RECIPIENT: OCI_RECIPIENT,
+              "ENVS_EFFECT_TOOLCHAIN": MANIFEST, "JEV_API_KEY": "unselected-jev",
+              jev.GO_KEY: "unselected-go", "SOPS_AGE_RECIPIENTS": "unselected-list"}
+    good = oci_ciphertext(key=jev.TYPELLM_KEY)
+    cases = [(values, good, 0, None, True)]
+    for name in (jev.TYPELLM_KEY, jev.OCI_RECIPIENT):
+        cases.append(({**values, name: ""}, good, 0, None, False))
+    for recipient in (f"{OCI_RECIPIENT},{OCI_OTHER}", "not-a-recipient"):
+        cases.append(({**values, jev.OCI_RECIPIENT: recipient}, good, 0, None, False))
+    for name in (TYPELLM_KEY, OCI_RECIPIENT):
+        cases.append((values, good, 0, name, False))
+    for data in (oci_ciphertext(), oci_ciphertext(key=jev.GO_KEY),
+                 oci_ciphertext(key=jev.TYPELLM_KEY, recipients=(OCI_OTHER,)),
+                 oci_ciphertext(key=jev.TYPELLM_KEY, recipients=(OCI_RECIPIENT, OCI_OTHER)),
+                 oci_ciphertext(key=jev.TYPELLM_KEY, extra="note: plain\n"),
+                 oci_ciphertext(key=jev.TYPELLM_KEY, extra=f"note: {TYPELLM_KEY}\n")):
+        cases.append((values, data, 0, None, False))
+    cases.append((values, good, 1, None, False))
+    for selected, output, code, leaked, success in cases:
+        root = copy_root()
+        calls = []
+        try:
+            if leaked is not None:
+                append(root / "README.md", f"\n{leaked}\n")
+            before = snapshot(root)
+
+            def runner(argv, input_data, env):
+                calls.append((list(argv), input_data, dict(env)))
+                return subprocess.CompletedProcess(argv, code, stdout=output, stderr=b"")
+
+            with environment(selected):
+                try:
+                    result = jev.author_oci(root, runner, target=jev.TYPELLM_BINDING)
+                except jev.EnvsError as error:
+                    assert not success and TYPELLM_KEY not in str(error)
+                    assert snapshot(root) == before, "refused TypeLLM authoring changed source"
+                    if leaked is not None or selected[jev.TYPELLM_KEY] == "" or selected[jev.OCI_RECIPIENT] != OCI_RECIPIENT:
+                        assert not calls, "SOPS ran before the TypeLLM input gate"
+                    continue
+            assert success and len(calls) == 1
+            argv, stdin, env = calls[0]
+            assert json.loads(stdin) == {jev.TYPELLM_KEY: TYPELLM_KEY}
+            assert env["SOPS_AGE_RECIPIENTS"] == OCI_RECIPIENT
+            assert not {jev.TYPELLM_KEY, "JEV_API_KEY", jev.GO_KEY, jev.OCI_RECIPIENT} & env.keys()
+            assert all(TYPELLM_KEY not in item for item in [*argv, *env.values()])
+            assert result["binding"] == jev.TYPELLM_BINDING and result["status"] == "PASS"
+            assert result["target_apply"] == result["application_runtime"] == "NOT_RUN"
+            assert TYPELLM_KEY not in json.dumps(result)
+            after = snapshot(root)
+            assert set(after) - set(before) == {jev.TYPELLM_CIPHERTEXT.as_posix()}
+            assert all(after[name] == data for name, data in before.items())
+            assert jev.validate_contracts(root)["environments"][jev.TYPELLM_PLANE]["migration_state"] == "NOT_CONFIGURED"
+        finally:
+            go_fixture_clear(root)
+
+    for invalid in (b"TYPELLM_API_KEY: plain\n", oci_ciphertext(),
+                    oci_ciphertext(key=jev.TYPELLM_KEY, extra="note: plain\n")):
+        root = copy_root()
+        try:
+            (root / jev.TYPELLM_CIPHERTEXT).write_bytes(invalid)
+            try:
+                jev.validate_contracts(root)
+            except jev.EnvsError:
+                pass
+            else:
+                raise AssertionError("invalid committed TypeLLM envelope was accepted")
+        finally:
+            go_fixture_clear(root)
 
 
 def expect_go_red(values: dict[str, str], *, mutate=None, output: bytes | None = None,
@@ -789,6 +863,23 @@ def real_oci_roundtrip(sops_bin: str, keygen_bin: str) -> None:
             except jev.EnvsError:
                 continue
             raise AssertionError("Go ciphertext was accepted for a different recipient")
+        type_data = jev.encrypt_oci_key(TYPELLM_KEY, recipient, tools, runner, key=jev.TYPELLM_KEY)
+        jev.validate_oci_ciphertext(type_data, TYPELLM_KEY.encode(), recipient, key=jev.TYPELLM_KEY)
+        type_cipher = work / "dev-typellm-api.oci-dev.sops.yaml"
+        type_cipher.write_bytes(type_data)
+        type_open = decrypt(type_cipher, key)
+        assert type_open.returncode == 0 and json.loads(type_open.stdout) == {jev.TYPELLM_KEY: TYPELLM_KEY}
+        type_wrong = decrypt(type_cipher, other_key)
+        assert type_wrong.returncode != 0 and TYPELLM_KEY.encode() not in type_wrong.stdout + type_wrong.stderr
+        type_text = type_data.decode()
+        type_start = type_text.index("ENC[AES256_GCM,data:") + len("ENC[AES256_GCM,data:")
+        type_tampered = work / "tampered-typellm.sops.yaml"
+        type_tampered.write_text(
+            type_text[:type_start] + ("A" if type_text[type_start] != "A" else "B") + type_text[type_start + 1:],
+            encoding="utf-8")
+        type_rejected = decrypt(type_tampered, key)
+        assert type_rejected.returncode != 0 and TYPELLM_KEY.encode() not in type_rejected.stdout + type_rejected.stderr
+        print("real TypeLLM dummy SOPS roundtrip: PASS (single target recipient; wrong identity/tamper RED)")
         print("real Go dummy SOPS roundtrip: PASS (single target recipient; wrong identity/tamper RED)")
         print(f"real OCI SOPS roundtrip: PASS (sops={sops_path}, age-keygen={keygen})")
     finally:
@@ -1545,6 +1636,7 @@ def main() -> None:
         test_author_red_inputs()
         test_author_oci()
         test_author_go()
+        test_author_typellm()
         test_go_fixture_cleanup_refuses_foreign()
         test_targets_are_separate()
         test_author_oci_red()

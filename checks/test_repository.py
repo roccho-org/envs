@@ -216,6 +216,19 @@ def main() -> None:
     ):
         expect_red(replace_text(calendar, old, new))
 
+    pi_preview = ".github/workflows/deploy-pi-worker-preview.yml"
+    for old, new in (
+        ("github.ref == 'refs/heads/proposals'", "github.ref == 'refs/heads/main'"),
+        ("github.actor_id == '40359643'", "github.actor_id == '1'"),
+        ("github.run_attempt == 1", "github.run_attempt >= 1"),
+        ("  contents: read", "  contents: write"),
+        ("roccho-pi-worker-preview", "unrelated-worker"),
+        ("PI_OAUTH_HOST_ID", "PI_CHATGPT_BOOTSTRAP"),
+        ("secrets.CLOUDFLARE_API_TOKEN", "secrets.RENT_CLOUDFLARE_API_TOKEN"),
+        ('--config "$PI_SCREEN_DIR/wrangler.json" --name roccho-pi-worker-preview', '--config unsafe.json'),
+    ):
+        expect_red(replace_text(pi_preview, old, new))
+
     def add_database_path(root: Path) -> None:
         name = "duck" + "db"
         (root / f"contracts/{name}.jsonl").write_text("{}\n")
@@ -523,6 +536,23 @@ def main() -> None:
                             '"binding":"jev-api.oci-dev"'))
     expect_red(replace_text("README.md", "dev-authoring/OPENCODE_API_KEY", "dev-authoring/REMOVED-GO"))
     expect_red(replace_text("README.md", "`author --target opencode-go.oci-dev`", "`author --target anything`"))
+
+    # TypeLLM is selected explicitly and may never receive another provider's secret.
+    type_mapping = "          TYPELLM_API_KEY: ${{ secrets.TYPELLM_API_KEY }}\n"
+    expect_red(replace_text(author, "          - typellm-api.oci-dev\n", ""))
+    expect_red(replace_text(author, "        if: inputs.target == 'typellm-api.oci-dev'\n", ""))
+    expect_red(replace_text(author, "author --target typellm-api.oci-dev'", "author --target jev-api.oci-dev'"))
+    expect_red(replace_text(author, type_mapping, go_mapping))
+    expect_red(replace_text(author, type_mapping, type_mapping + go_mapping))
+    expect_red(mutate_plane("dev.typellm-authoring", lambda row: row["required_secrets"][0].update(
+        {"name": "JEV_API_KEY"})))
+    expect_red(mutate_plane("dev.typellm-authoring", lambda row: row.update({"migration_state": "ACTIVE"})))
+    expect_red(replace_text("README.md", "dev-authoring/TYPELLM_API_KEY", "dev-authoring/REMOVED-TYPELLM"))
+
+    def invalid_type_ciphertext(root: Path) -> None:
+        (root / "ciphertexts/dev-typellm-api.oci-dev.sops.yaml").write_text("TYPELLM_API_KEY: plain\n")
+
+    expect_red(invalid_type_ciphertext)
 
     def invalid_go_ciphertext(root: Path) -> None:
         (root / "ciphertexts").mkdir(exist_ok=True)

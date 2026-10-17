@@ -23,6 +23,7 @@ REQUIRED_FILES = {
     ".github/workflows/probe-dev-mail-routing.yml",
     ".github/workflows/operate-dev-mail-routing.yml",
     ".github/workflows/deploy-calendar-pages.yml",
+    ".github/workflows/deploy-pi-worker-preview.yml",
     ".gitignore",
     "LICENSE_POLICY.md",
     "LICENSES/README.md",
@@ -229,6 +230,7 @@ CIPHERTEXTS = {
     "ciphertexts/dev-jev-api.sops.yaml", "ciphertexts/dev-rent-tunnel.sops.yaml", "ciphertexts/dev-jev-api.oci-dev.sops.yaml",
     "ciphertexts/dev-rent-client.sops.yaml", "ciphertexts/dev-opencode-go.oci-dev.sops.yaml",
     "ciphertexts/dev-opencode-go.versapro-own-oci.sops.yaml",
+    "ciphertexts/dev-typellm-api.oci-dev.sops.yaml",
 }
 # The real SOPS roundtrip runs the locked sops with a check-only age that never enters the effect toolchain; the
 # closure tofu joins it so a real root output reaches the production sealing path.
@@ -438,7 +440,8 @@ def author_target_inputs(adapter, contracts: dict[str, dict[str, dict[str, Any]]
     # Each author target's Environment inputs as the adapter reads them, in (namespace, name) form.
     result = {}
     for target in adapter.AUTHOR_TARGETS:
-        plane_id = adapter.GO_PLANE if target in adapter.GO_CIPHERTEXTS else "dev.authoring"
+        plane_id = (adapter.TYPELLM_PLANE if target == adapter.TYPELLM_BINDING
+                    else adapter.GO_PLANE if target in adapter.GO_CIPHERTEXTS else "dev.authoring")
         secrets = {item["name"] for item in contracts["environments"][plane_id]["required_secrets"]}
         result[target] = {("secrets" if item["name"] in secrets else "vars", item["name"])
                           for item in adapter.authoring_inputs(contracts, target)}
@@ -631,7 +634,7 @@ def check_workflows(root: Path, environments: dict[str, dict[str, Any]],
     workflow_root = root / ".github/workflows"
     names = {path.name for path in workflow_root.iterdir() if path.is_file()}
     require(
-        names == {"check.yml", "jev-issue-comment.yml", "deploy-calendar-pages.yml", "operate-dev-mail-routing.yml",
+        names == {"check.yml", "jev-issue-comment.yml", "deploy-calendar-pages.yml", "deploy-pi-worker-preview.yml", "operate-dev-mail-routing.yml",
                   RELOCATION_WORKFLOW, *EFFECT_WORKFLOWS},
         f"workflow set differs: {sorted(names)}",
     )
@@ -789,6 +792,7 @@ def check_workflows(root: Path, environments: dict[str, dict[str, Any]],
 
     require(consumer_run(effect_shape, "check.yml effect-shape") == canonical, "effect-shape must run the canonical consumer")
     check_calendar_pages_workflow(texts["deploy-calendar-pages.yml"], canonical)
+    check_pi_worker_preview(texts["deploy-pi-worker-preview.yml"], canonical)
     for token in ("nix ", "install-nix"):
         require(token not in effect_shape, f"effect-shape must not use {token.strip()}")
     for marker in (
@@ -1011,6 +1015,41 @@ def check_relocation(root: Path, source: str, check: str) -> None:
         require(marker in check, f"check must test the relocation entry with the locked PyNaCl: {marker}")
 
 
+def check_pi_worker_preview(source: str, canonical_consumer: str) -> None:
+    """One manual, owner-controlled preview; existing secret stays in envs."""
+    require("on:\n  workflow_dispatch:\n    inputs:\n      ops_sha:\n" in source,
+            "Pi preview must take only an exact source selection on manual dispatch")
+    require("\n  push:" not in source and "\n  pull_request:" not in source,
+            "Pi preview must not deploy on a push or PR")
+    for guard in ("github.repository == 'roccho-org/envs'", "github.ref == 'refs/heads/proposals'",
+                  "github.event_name == 'workflow_dispatch'", "github.actor == 'roccho-dev'",
+                  "github.actor_id == '40359643'", "github.triggering_actor == 'roccho-dev'",
+                  "github.run_attempt == 1"):
+        require(guard in source, f"Pi preview owner admission lost: {guard}")
+    require("permissions:\n  actions: read\n  contents: read\n" in source
+            and "    environment: dev-projection\n" in source,
+            "Pi preview must preserve read-only repository and the existing Environment")
+    require(set(INPUT_REFERENCE.findall(source)) == {
+                ("secrets", "CLOUDFLARE_API_TOKEN"), ("vars", "CLOUDFLARE_ACCOUNT_ID")},
+            "Pi preview may use only the existing Cloudflare pair")
+    require(source.count("secrets.CLOUDFLARE_API_TOKEN") == 1
+            and source.count("vars.CLOUDFLARE_ACCOUNT_ID") == 1,
+            "Pi preview must map credentials to one effect step only")
+    require(consumer_run(source, "deploy-pi-worker-preview.yml") == canonical_consumer,
+            "Pi preview must reuse the already-checked native toolchain")
+    require(source.index("--no-bundle --dry-run") < source.index("secrets.CLOUDFLARE_API_TOKEN"),
+            "Pi preview must verify and dry-run before provider credentials")
+    require("npm install" not in source and "pnpm install" not in source,
+            "Pi projection must consume the checked artifact rather than rebuild app source")
+    for marker in ("repos/roccho-org/ops/pulls/563", "flake-check", "jev-review-fresh-consumer",
+                   "roccho-pi-worker-preview", "PI_OAUTH_HOST_ID", "pi-worker-screen-$OPS_SHA",
+                   '".github/workflows/pi-worker-proof.yml"', '"SCREEN_ONLY_NO_TOKEN_EXCHANGE_OR_STORAGE"',
+                   '.preview_urls == false', 'has("durable_objects")', 'has("assets")',
+                   'has("services")', 'has("vars")', 'has("routes")',
+                   '--config "$PI_SCREEN_DIR/wrangler.json" --name roccho-pi-worker-preview'):
+        require(marker in source, f"Pi preview source/target boundary lost: {marker}")
+
+
 def check_calendar_pages_workflow(source: str, canonical_consumer: str) -> None:
     """Strictly admit only the one controller + issue scoped Pages effect."""
     require("on:\n  issue_comment:\n    types: [created]\n" in source,
@@ -1201,6 +1240,9 @@ def check_readme(root: Path, environments: dict[str, dict[str, Any]]) -> None:
         "applied only by `rent-root` under a separate effect grant",
         "dev-authoring/OCI_DEV_AGE_RECIPIENT",
         "dev-authoring/OPENCODE_API_KEY",
+        "dev-authoring/TYPELLM_API_KEY",
+        "ciphertexts/dev-typellm-api.oci-dev.sops.yaml",
+        "`author --target typellm-api.oci-dev`",
         "ciphertexts/dev-jev-api.oci-dev.sops.yaml",
         "ciphertexts/dev-opencode-go.oci-dev.sops.yaml",
         "`author --target opencode-go.oci-dev`",
