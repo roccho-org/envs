@@ -109,7 +109,19 @@ jobs:
           WRANGLER_SEND_METRICS: 'false'
         run: |
           set -euo pipefail
+          umask 077
           # One deterministic UUID for this exact account/Worker host, stable across deployments.
           host_id="$("$ENVS_EFFECT_BIN/python3" -I -c 'import os,uuid; print(uuid.uuid5(uuid.NAMESPACE_URL,"urn:cloudflare:workers:"+os.environ["CLOUDFLARE_ACCOUNT_ID"]+":pi"))')"
-          "$ENVS_EFFECT_BIN/wrangler" deploy --config "$PI_SCREEN_DIR/wrangler.json" --name pi --var "PI_OAUTH_HOST_ID:$host_id" --no-bundle
-          "$ENVS_EFFECT_BIN/wrangler" deployments status --name pi
+          "$ENVS_EFFECT_BIN/wrangler" deployments status --name pi --json > "$RUNNER_TEMP/pi-deployment-before.json"
+          jq -c '{id, versions: [.versions[] | {version_id, percentage}]}' "$RUNNER_TEMP/pi-deployment-before.json"
+          deploy_exit=0
+          "$ENVS_EFFECT_BIN/wrangler" deploy --config "$PI_SCREEN_DIR/wrangler.json" --name pi --var "PI_OAUTH_HOST_ID:$host_id" --no-bundle || deploy_exit=$?
+          readback_exit=0
+          "$ENVS_EFFECT_BIN/wrangler" deployments status --name pi --json > "$RUNNER_TEMP/pi-deployment-after.json" || readback_exit=$?
+          if [[ "$readback_exit" == 0 ]]; then
+            jq -c '{id, versions: [.versions[] | {version_id, percentage}]}' "$RUNNER_TEMP/pi-deployment-after.json" || readback_exit=$?
+          fi
+          if [[ "$deploy_exit" != 0 ]]; then
+            exit "$deploy_exit"
+          fi
+          exit "$readback_exit"

@@ -113,6 +113,15 @@ planned account-owned token is scoped to the existing `pi` Worker with
 GitHub Environment Secret require the owner's separate approval; this source
 preparation performs neither action. The owner must resolve that capability
 boundary before another provider effect.
+
+Before the first write, the final step requires native `wrangler deployments
+status --name pi --json` to succeed using the dedicated credential. A resource
+picker entry alone does not prove that the live Worker exists or is accessible.
+After the deploy command returns, it reads native status once even when deploy
+reports failure. A failed deploy keeps its nonzero exit; a failed readback also
+fails the step. There is no automatic retry. Raw status JSON stays in runner-temporary
+files with an owner-only creation mask; logs project only deployment ID and
+version ID/percentage, excluding personal metadata such as author email.
 The screen-only workflow continues to reject the complete DO runtime package.
 
 ## Durable tree

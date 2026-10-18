@@ -1053,9 +1053,21 @@ def check_pi_worker_preview(source: str, canonical_consumer: str) -> None:
         '--config "$PI_SCREEN_DIR/wrangler.json" --name pi --no-bundle --dry-run',
         '--config "$PI_SCREEN_DIR/wrangler.json" --name pi --var "PI_OAUTH_HOST_ID:$host_id" --no-bundle',
         'os.environ["CLOUDFLARE_ACCOUNT_ID"]+":pi"',
-        '"$ENVS_EFFECT_BIN/wrangler" deployments status --name pi',
     ):
         require(marker in source, f"Pi accepted-source/target admission lost: {marker}")
+    before = '"$ENVS_EFFECT_BIN/wrangler" deployments status --name pi --json > "$RUNNER_TEMP/pi-deployment-before.json"\n'
+    deploy = '"$ENVS_EFFECT_BIN/wrangler" deploy --config "$PI_SCREEN_DIR/wrangler.json" --name pi --var "PI_OAUTH_HOST_ID:$host_id" --no-bundle || deploy_exit=$?'
+    after = '"$ENVS_EFFECT_BIN/wrangler" deployments status --name pi --json > "$RUNNER_TEMP/pi-deployment-after.json" || readback_exit=$?'
+    for marker in (before, deploy, after, '        run: |\n          set -euo pipefail\n          umask 077\n',
+                   '          deploy_exit=0\n', '          readback_exit=0\n',
+                   '          if [[ "$readback_exit" == 0 ]]; then\n',
+                   '          if [[ "$deploy_exit" != 0 ]]; then\n            exit "$deploy_exit"\n          fi\n          exit "$readback_exit"\n',
+                   "jq -c '{id, versions: [.versions[] | {version_id, percentage}]}' \"$RUNNER_TEMP/pi-deployment-before.json\"",
+                   "jq -c '{id, versions: [.versions[] | {version_id, percentage}]}' \"$RUNNER_TEMP/pi-deployment-after.json\" || readback_exit=$?"):
+        require(marker in source, f"Pi native status/failure/privacy boundary lost: {marker}")
+    require(source.index(before) < source.index(deploy) < source.index(after)
+            and source.count('deployments status --name pi --json') == 2,
+            "Pi must read existing status before writing and once after every deploy attempt")
     for marker in ("repos/roccho-org/ops/pulls/563", "flake-check", "jev-review-fresh-consumer",
                    "PI_OAUTH_HOST_ID", "pi-worker-screen-$OPS_SHA",
                    '".github/workflows/pi-worker-proof.yml"', '"SCREEN_ONLY_NO_TOKEN_EXCHANGE_OR_STORAGE"',
