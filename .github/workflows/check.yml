@@ -868,16 +868,16 @@ jobs:
           tool="$RUNNER_TEMP/envs-effect/bin"
           "$tool/python3" -I checks/test_jev_api.py --sops "$tool/sops" --age-keygen "$RUNNER_TEMP/check-age/bin/age-keygen"
 
-      # agent-opencode-go-source-composition: the windows Pi resolver of the job-contract pin, built from that exact
-      # fetched tree, consumes this exact commit's contracts/bindings.jsonl in a throwaway local envs authority with a
-      # fixture identity and dummy key. No real ciphertext, credential, provider or OCI target is read; the fixture
-      # never enters the provided artifact and this checkout stays clean. Missing, stale, different and uncomposed
-      # inputs and a mismatched windows object identity must each be refused in this same run.
-      - name: Compose the pinned windows Pi resolver with this commit's Go binding
+      # agent-opencode-go-source-composition: the existing Pi resolver is now fetched from the fixed resources tree.
+      # The fixture's windows_* names and logical auth target stay unchanged; they are not the physical Git provider.
+      # It consumes this exact commit's contracts/bindings.jsonl with a throwaway local identity and dummy key.
+      # No real ciphertext, credential, provider or OCI target is read; the fixture never enters the provided artifact.
+      # Missing, stale, different, uncomposed and mismatched source object inputs must still be refused in this run.
+      - name: Compose the pinned resources Pi resolver with this commit's Go binding
         run: |
           set -euo pipefail
-          windows_commit=b63be11dc4dd75978ed703d40fea999690ea5a66
-          windows_tree=6f4488eddd16b09d0a2089b374a5cea6d67e860e
+          windows_commit=3f929b9d96ed276171d294db828b519cbf001917
+          windows_tree=7be043922656f25e37113b17eb3ddb31d9269906
           binding=opencode-go.oci-dev
           fx="$RUNNER_TEMP/agent-composition"
           win="$fx/windows-src"
@@ -885,9 +885,9 @@ jobs:
           mkdir "$fx" "$win" "$fx/out"
           g() { git -c user.name=composition -c user.email=composition@invalid -c gc.auto=0 -c maintenance.auto=false "$@"; }
 
-          # The windows input is the declared object, fetched by id: no floating branch, tag or local copy.
+          # The resources input is the declared object, fetched by id: no floating branch, tag or local copy.
           g init -q --bare --template= "$fx/windows.git"
-          g -C "$fx/windows.git" fetch -q --no-tags --depth=1 https://github.com/roccho-dev/windows "$windows_commit"
+          g -C "$fx/windows.git" fetch -q --no-tags --depth=1 https://github.com/roccho-dev/resources "$windows_commit"
           windows_identity() {
             test "$(g -C "$fx/windows.git" rev-parse --verify --quiet "$1^{commit}")" = "$windows_commit" &&
               test "$(g -C "$fx/windows.git" rev-parse --verify --quiet "$1^{tree}")" = "$2"
@@ -902,9 +902,9 @@ jobs:
             exit 1
           fi
           g -C "$fx/windows.git" archive "$windows_commit" | tar -x -C "$win"
-          echo "COMPOSITION_STAGE windows commit=$windows_commit tree=$windows_tree"
+          echo "COMPOSITION_STAGE resources commit=$windows_commit tree=$windows_tree"
 
-          # Same pi.nix, nixpkgs and resolver code as windows ships; only the remote, identity and agent dir differ.
+          # Same pi.nix and producer nixpkgs as before; only the physical source provider and fixed object changed.
           pkgs="import (builtins.getFlake \"path:$win\").inputs.nixpkgs { system = \"x86_64-linux\"; }"
           expr="import $win/oci/dev/pi.nix { pkgs = $pkgs; envsRemote = \"file://$envs\"; identity = \"$fx/age.key\"; agentDir = \"$fx/agent\"; }"
           resolver=$(nix build --impure --no-link --print-out-paths --expr "($expr).resolver")/bin/pi-opencode-go-key
@@ -997,7 +997,7 @@ jobs:
           bound "$restored"
           test "$("$resolver" --envs-sha "$restored")" = "$key"
           test -z "$(git status --porcelain)"
-          echo "PASS agent-opencode-go-source-composition: windows $windows_commit tree $windows_tree resolver x envs $(git rev-parse HEAD) contracts/bindings.jsonl $(git rev-parse HEAD:contracts/bindings.jsonl); missing/stale/stale-binding/different/uncomposed/OID refused; fixture only"
+          echo "PASS agent-opencode-go-source-composition: resources $windows_commit tree $windows_tree resolver x envs $(git rev-parse HEAD) contracts/bindings.jsonl $(git rev-parse HEAD:contracts/bindings.jsonl); missing/stale/stale-binding/different/uncomposed/OID refused; fixture only"
 
       # Throwaway identities for the placement gate only, made by the check-only age; the gate's envelopes are
       # encrypted to them. They never enter the effect toolchain or the placement distribution.
