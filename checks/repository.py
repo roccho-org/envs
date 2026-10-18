@@ -1031,14 +1031,15 @@ def check_pi_worker_preview(source: str, canonical_consumer: str) -> None:
             and "    environment: dev-projection\n" in source,
             "Pi preview must preserve read-only repository and the existing Environment")
     require(set(INPUT_REFERENCE.findall(source)) == {
-                ("secrets", "CLOUDFLARE_API_TOKEN"), ("vars", "CLOUDFLARE_ACCOUNT_ID")},
-            "Pi preview may use only the existing Cloudflare pair")
-    require(source.count("secrets.CLOUDFLARE_API_TOKEN") == 1
-            and source.count("vars.CLOUDFLARE_ACCOUNT_ID") == 1,
-            "Pi preview must map credentials to one effect step only")
+                ("secrets", "PI_CLOUDFLARE_API_TOKEN"), ("vars", "CLOUDFLARE_ACCOUNT_ID")},
+            "Pi preview may use only its dedicated token and existing account input")
+    require(source.count("secrets.PI_CLOUDFLARE_API_TOKEN") == 1
+            and source.count("vars.CLOUDFLARE_ACCOUNT_ID") == 1
+            and '          CLOUDFLARE_API_TOKEN: ${{ secrets.PI_CLOUDFLARE_API_TOKEN }}\n' in source,
+            "Pi preview must map its dedicated token to native auth in one effect step only")
     require(consumer_run(source, "deploy-pi-worker-preview.yml") == canonical_consumer,
             "Pi preview must reuse the already-checked native toolchain")
-    require(source.index("--no-bundle --dry-run") < source.index("secrets.CLOUDFLARE_API_TOKEN"),
+    require(source.index("--no-bundle --dry-run") < source.index("secrets.PI_CLOUDFLARE_API_TOKEN"),
             "Pi preview must verify and dry-run before provider credentials")
     require("npm install" not in source and "pnpm install" not in source,
             "Pi projection must consume the checked artifact rather than rebuild app source")
@@ -1052,9 +1053,21 @@ def check_pi_worker_preview(source: str, canonical_consumer: str) -> None:
         '--config "$PI_SCREEN_DIR/wrangler.json" --name pi --no-bundle --dry-run',
         '--config "$PI_SCREEN_DIR/wrangler.json" --name pi --var "PI_OAUTH_HOST_ID:$host_id" --no-bundle',
         'os.environ["CLOUDFLARE_ACCOUNT_ID"]+":pi"',
-        '"$ENVS_EFFECT_BIN/wrangler" deployments status --name pi',
     ):
         require(marker in source, f"Pi accepted-source/target admission lost: {marker}")
+    before = '"$ENVS_EFFECT_BIN/wrangler" deployments status --name pi --json > "$RUNNER_TEMP/pi-deployment-before.json"\n'
+    deploy = '"$ENVS_EFFECT_BIN/wrangler" deploy --config "$PI_SCREEN_DIR/wrangler.json" --name pi --var "PI_OAUTH_HOST_ID:$host_id" --no-bundle || deploy_exit=$?'
+    after = '"$ENVS_EFFECT_BIN/wrangler" deployments status --name pi --json > "$RUNNER_TEMP/pi-deployment-after.json" || readback_exit=$?'
+    for marker in (before, deploy, after, '        run: |\n          set -euo pipefail\n          umask 077\n',
+                   '          deploy_exit=0\n', '          readback_exit=0\n',
+                   '          if [[ "$readback_exit" == 0 ]]; then\n',
+                   '          if [[ "$deploy_exit" != 0 ]]; then\n            exit "$deploy_exit"\n          fi\n          exit "$readback_exit"\n',
+                   "jq -c '{id, versions: [.versions[] | {version_id, percentage}]}' \"$RUNNER_TEMP/pi-deployment-before.json\"",
+                   "jq -c '{id, versions: [.versions[] | {version_id, percentage}]}' \"$RUNNER_TEMP/pi-deployment-after.json\" || readback_exit=$?"):
+        require(marker in source, f"Pi native status/failure/privacy boundary lost: {marker}")
+    require(source.index(before) < source.index(deploy) < source.index(after)
+            and source.count('deployments status --name pi --json') == 2,
+            "Pi must read existing status before writing and once after every deploy attempt")
     for marker in ("repos/roccho-org/ops/pulls/563", "flake-check", "jev-review-fresh-consumer",
                    "PI_OAUTH_HOST_ID", "pi-worker-screen-$OPS_SHA",
                    '".github/workflows/pi-worker-proof.yml"', '"SCREEN_ONLY_NO_TOKEN_EXCHANGE_OR_STORAGE"',
