@@ -611,7 +611,7 @@ jobs:
   # with its checksum. Only this job may write; pull requests, main and manual dispatch never publish.
   placement-publish:
     needs: [repository, placement-artifact, placement-author, placement-windows, placement-rent, toolchain, effect-shape, clean-start]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/proposals' && github.repository == 'roccho-dev/envs'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/proposals' && github.repository == 'roccho-org/envs'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
