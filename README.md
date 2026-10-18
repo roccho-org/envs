@@ -69,7 +69,7 @@ commit from GitHub, requires that PR to be merged into the Ops repository's
 `proposals` branch and still reachable from canonical `proposals`, and accepts
 only its successful `proposals` push artifact. There is no copied SHA input.
 It uses the existing
-`dev-projection/CLOUDFLARE_API_TOKEN` and
+`dev-projection/PI_CLOUDFLARE_API_TOKEN` and
 `dev-projection/CLOUDFLARE_ACCOUNT_ID` in one final native Wrangler step;
 neither input is copied to Ops or application bindings. That merge must
 already have successful Pi proof, flake-check and review-consumer checks.
@@ -98,11 +98,21 @@ Before acceptance, the Environment's existing `proposals`-only branch policy
 keeps the effect unavailable from a candidate branch. A source PR or CI PASS
 does not establish an actual deployment or a functioning public URL.
 
+`PI_CLOUDFLARE_API_TOKEN` is a pending, Pi-only workflow dependency, admitted by
+the dedicated Pi oracle. The final step maps it to Wrangler's native
+`CLOUDFLARE_API_TOKEN` environment variable. It is distinct from the legacy
+`dev-projection/CLOUDFLARE_API_TOKEN` used by other consumers; this change does
+not copy that credential, change those consumers or extend their generic
+`required_secrets` declaration. A missing Pi input does not fall back to it.
+
 The earlier [deployment run](https://github.com/roccho-org/envs/actions/runs/39075561974)
 was refused at the Workers deployments API with `No access to the specified
-resource`. The existing CI credential has not proved Worker deployment/status
-access. This source change neither reads nor changes credentials or grants;
-the owner must resolve that capability boundary before another provider effect.
+resource`. The dedicated Pi credential has not been supplied or proved. The
+planned account-owned token is scoped to the existing `pi` Worker with
+`Individual Workers Editor` only. Creating that grant and registering its
+GitHub Environment Secret require the owner's separate approval; this source
+preparation performs neither action. The owner must resolve that capability
+boundary before another provider effect.
 The screen-only workflow continues to reject the complete DO runtime package.
 
 ## Durable tree

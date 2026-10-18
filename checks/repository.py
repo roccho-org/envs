@@ -1031,14 +1031,15 @@ def check_pi_worker_preview(source: str, canonical_consumer: str) -> None:
             and "    environment: dev-projection\n" in source,
             "Pi preview must preserve read-only repository and the existing Environment")
     require(set(INPUT_REFERENCE.findall(source)) == {
-                ("secrets", "CLOUDFLARE_API_TOKEN"), ("vars", "CLOUDFLARE_ACCOUNT_ID")},
-            "Pi preview may use only the existing Cloudflare pair")
-    require(source.count("secrets.CLOUDFLARE_API_TOKEN") == 1
-            and source.count("vars.CLOUDFLARE_ACCOUNT_ID") == 1,
-            "Pi preview must map credentials to one effect step only")
+                ("secrets", "PI_CLOUDFLARE_API_TOKEN"), ("vars", "CLOUDFLARE_ACCOUNT_ID")},
+            "Pi preview may use only its dedicated token and existing account input")
+    require(source.count("secrets.PI_CLOUDFLARE_API_TOKEN") == 1
+            and source.count("vars.CLOUDFLARE_ACCOUNT_ID") == 1
+            and '          CLOUDFLARE_API_TOKEN: ${{ secrets.PI_CLOUDFLARE_API_TOKEN }}\n' in source,
+            "Pi preview must map its dedicated token to native auth in one effect step only")
     require(consumer_run(source, "deploy-pi-worker-preview.yml") == canonical_consumer,
             "Pi preview must reuse the already-checked native toolchain")
-    require(source.index("--no-bundle --dry-run") < source.index("secrets.CLOUDFLARE_API_TOKEN"),
+    require(source.index("--no-bundle --dry-run") < source.index("secrets.PI_CLOUDFLARE_API_TOKEN"),
             "Pi preview must verify and dry-run before provider credentials")
     require("npm install" not in source and "pnpm install" not in source,
             "Pi projection must consume the checked artifact rather than rebuild app source")
