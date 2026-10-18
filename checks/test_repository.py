@@ -712,6 +712,22 @@ def main() -> None:
 
     expect_red(invalid_type_ciphertext)
 
+    # The own TypeLLM target keeps its own recipient and never falls back to dev.
+    expect_red(replace_text(author, "          - typellm-api.versapro-own-oci\n", ""))
+    expect_red(replace_text(author, "        if: inputs.target == 'typellm-api.versapro-own-oci'\n", ""))
+    expect_red(replace_text(author, "author --target typellm-api.versapro-own-oci'", "author --target typellm-api.oci-dev'"))
+    own_type_step = "      - name: Author TypeLLM VersaPro own OCI ciphertext\n        if: inputs.target == 'typellm-api.versapro-own-oci'\n        env:\n          TYPELLM_API_KEY: ${{ secrets.TYPELLM_API_KEY }}\n          VERSAPRO_OWN_OCI_AGE_RECIPIENT: ${{ vars.VERSAPRO_OWN_OCI_AGE_RECIPIENT }}\n        run: '\"$ENVS_EFFECT_BIN/envs-effect\" --root \"$GITHUB_WORKSPACE\" author --target typellm-api.versapro-own-oci'\n\n"
+    expect_red(replace_text(author, own_type_step, own_type_step.replace(
+        "VERSAPRO_OWN_OCI_AGE_RECIPIENT", "OCI_DEV_AGE_RECIPIENT")))
+    expect_red(replace_text(author, own_type_step, own_type_step.replace(type_mapping, go_mapping)))
+    expect_red(replace_text("README.md", "`author --target typellm-api.versapro-own-oci`",
+                            "`author --target undeclared-typellm`"))
+
+    def invalid_own_type_ciphertext(root: Path) -> None:
+        (root / "ciphertexts/dev-typellm-api.versapro-own-oci.sops.yaml").write_text("TYPELLM_API_KEY: plain\n")
+
+    expect_red(invalid_own_type_ciphertext)
+
     def invalid_go_ciphertext(root: Path) -> None:
         (root / "ciphertexts").mkdir(exist_ok=True)
         (root / "ciphertexts/dev-opencode-go.oci-dev.sops.yaml").write_text("OPENCODE_API_KEY: plain\n")

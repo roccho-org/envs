@@ -171,7 +171,12 @@ TYPELLM_PLANE = "dev.typellm-authoring"
 TYPELLM_BINDING = "typellm-api.oci-dev"
 TYPELLM_CIPHERTEXT = Path("ciphertexts/dev-typellm-api.oci-dev.sops.yaml")
 TYPELLM_KEY = "TYPELLM_API_KEY"
-OCI_CIPHERTEXTS = {OCI_BINDING: OCI_CIPHERTEXT, **GO_CIPHERTEXTS, TYPELLM_BINDING: TYPELLM_CIPHERTEXT}
+# The same TypeLLM source plane, but a distinct own target and one existing public recipient.
+OWN_TYPELLM_BINDING = "typellm-api.versapro-own-oci"
+OWN_TYPELLM_CIPHERTEXT = Path("ciphertexts/dev-typellm-api.versapro-own-oci.sops.yaml")
+OWN_TYPELLM_RECIPIENT = OWN_GO_RECIPIENT
+TYPELLM_CIPHERTEXTS = {TYPELLM_BINDING: TYPELLM_CIPHERTEXT, OWN_TYPELLM_BINDING: OWN_TYPELLM_CIPHERTEXT}
+OCI_CIPHERTEXTS = {OCI_BINDING: OCI_CIPHERTEXT, **GO_CIPHERTEXTS, **TYPELLM_CIPHERTEXTS}
 # Every binding `author --target` can select; a dispatch names exactly one of them.
 AUTHOR_TARGETS = ("jev-api", *OCI_CIPHERTEXTS)
 ORG_BINDING = "jev-api.github-actions"
@@ -351,6 +356,16 @@ def expected_bindings(jev_target: dict[str, Any] | None = None) -> dict[str, dic
             "required_variables": [{"name": OCI_RECIPIENT, "type": "age_recipient", "lifecycle": "persistent"}],
             "target": {"repository": "roccho-dev/windows", "host": "oci-dev", "kind": "process_env", "secret_name": TYPELLM_KEY},
         },
+        OWN_TYPELLM_BINDING: {
+            "id": OWN_TYPELLM_BINDING,
+            "kind": "envs.authCapability.v1",
+            "capability": "typellm-api",
+            "ciphertext": OWN_TYPELLM_CIPHERTEXT.as_posix(),
+            "source_key": TYPELLM_KEY,
+            "github_environment": "dev-authoring",
+            "required_variables": [{"name": OWN_TYPELLM_RECIPIENT, "type": "age_recipient", "lifecycle": "persistent"}],
+            "target": {"repository": "roccho-dev/resources", "host": "versapro-own-oci", "kind": "process_env", "secret_name": TYPELLM_KEY},
+        },
         ORG_BINDING: {
             "id": ORG_BINDING, "kind": "envs.authCapability.v1", "capability": "jev-api",
             "ciphertext": OCI_CIPHERTEXT.as_posix(), "source_key": "JEV_API_KEY",
@@ -496,6 +511,11 @@ def expected_typellm_boundary() -> dict[str, Any]:
             "capability": "typellm-api", "binding": TYPELLM_BINDING}
 
 
+def expected_own_typellm_boundary() -> dict[str, Any]:
+    return {**expected_typellm_boundary(), "id": "dev.typellm-api-versapro-own-oci.provider",
+            "binding": OWN_TYPELLM_BINDING}
+
+
 def expected_inputs() -> dict[str, dict[str, list[dict[str, str]]]]:
     def entries(*values: tuple[str, str, str]) -> list[dict[str, str]]:
         return [{"name": name, "type": kind, "lifecycle": lifecycle} for name, kind, lifecycle in values]
@@ -521,7 +541,8 @@ def expected_inputs() -> dict[str, dict[str, list[dict[str, str]]]]:
         },
         TYPELLM_PLANE: {
             "required_secrets": entries((TYPELLM_KEY, "opaque", "one_shot_ingress")),
-            "required_variables": entries((OCI_RECIPIENT, "age_recipient", "persistent")),
+            "required_variables": entries((OCI_RECIPIENT, "age_recipient", "persistent"),
+                                          (OWN_TYPELLM_RECIPIENT, "age_recipient", "persistent")),
         },
         "dev.projection": {
             "required_secrets": entries(
@@ -719,8 +740,9 @@ def validate_contracts(root: Path = ROOT) -> dict[str, dict[str, dict[str, Any]]
     for path in GO_CIPHERTEXTS.values():
         if (root / path).is_file():
             validate_oci_ciphertext((root / path).read_bytes(), None, None, key=GO_KEY)
-    if (root / TYPELLM_CIPHERTEXT).is_file():
-        validate_oci_ciphertext((root / TYPELLM_CIPHERTEXT).read_bytes(), None, None, key=TYPELLM_KEY)
+    for path in TYPELLM_CIPHERTEXTS.values():
+        if (root / path).is_file():
+            validate_oci_ciphertext((root / path).read_bytes(), None, None, key=TYPELLM_KEY)
 
     jev_target = validate_jev_target(bindings.get("jev-api", {}).get("target"))
     require(bindings == expected_bindings(jev_target), "binding set differs")
@@ -729,7 +751,7 @@ def validate_contracts(root: Path = ROOT) -> dict[str, dict[str, dict[str, Any]]
         "dev.jev-api-oci-dev.provider", "apps.voice-ui.consumer", "ops.voice-ui.consumer",
         "normal.consumer.path", "dev.rent-client.provider", "dev.rent-root.provider", WINDOWS_CONSUMER,
         "dev.opencode-go-oci-dev.provider", "dev.opencode-go-versapro-own-oci.provider",
-        "dev.typellm-api-oci-dev.provider",
+        "dev.typellm-api-oci-dev.provider", "dev.typellm-api-versapro-own-oci.provider",
     } | set(expected_org_boundaries()), "provider-consumer boundary set differs")
     for identity, expected in expected_org_boundaries().items():
         require(boundary[identity] == expected, "Org provider-consumer boundary differs")
@@ -746,6 +768,8 @@ def validate_contracts(root: Path = ROOT) -> dict[str, dict[str, dict[str, Any]]
             "OpenCode Go own OCI provider boundary differs")
     require(boundary["dev.typellm-api-oci-dev.provider"] == expected_typellm_boundary(),
             "TypeLLM OCI provider boundary differs")
+    require(boundary["dev.typellm-api-versapro-own-oci.provider"] == expected_own_typellm_boundary(),
+            "TypeLLM own OCI provider boundary differs")
     require(boundary["repository.branch-policy"] == {
         "id": "repository.branch-policy", "kind": "envs.branchPolicy.v1",
         "canonical_branch": "proposals", "default_branch": "proposals",
@@ -975,7 +999,7 @@ def authoring_inputs(contracts: dict[str, dict[str, dict[str, Any]]], target: st
     # A selected author target reads only its own source plane and recipient. The GitHub Environment
     # can be shared without leaking one source key into another target's process environment.
     require(target in AUTHOR_TARGETS, f"unknown author target: {target}")
-    plane_id = TYPELLM_PLANE if target == TYPELLM_BINDING else GO_PLANE if target in GO_CIPHERTEXTS else "dev.authoring"
+    plane_id = TYPELLM_PLANE if target in TYPELLM_CIPHERTEXTS else GO_PLANE if target in GO_CIPHERTEXTS else "dev.authoring"
     plane = contracts["environments"][plane_id]
     if target == "jev-api":
         return plane["required_secrets"] + plane["required_variables"]
