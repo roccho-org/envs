@@ -68,8 +68,8 @@ checks     = executable repository and adapter specifications
 commit from GitHub, requires that PR to be merged into the Ops repository's
 `proposals` branch and still reachable from canonical `proposals`, and accepts
 only its successful `proposals` push artifact. There is no copied SHA input.
-It uses the existing
-`dev-projection/PI_CLOUDFLARE_API_TOKEN` and
+It requires the pending Pi-only Secret
+`dev-projection/PI_CLOUDFLARE_API_TOKEN` and the existing
 `dev-projection/CLOUDFLARE_ACCOUNT_ID` in one final native Wrangler step;
 neither input is copied to Ops or application bindings. That merge must
 already have successful Pi proof, flake-check and review-consumer checks.
