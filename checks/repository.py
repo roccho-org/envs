@@ -1055,19 +1055,39 @@ def check_pi_worker_preview(source: str, canonical_consumer: str) -> None:
         'os.environ["CLOUDFLARE_ACCOUNT_ID"]+":pi"',
     ):
         require(marker in source, f"Pi accepted-source/target admission lost: {marker}")
-    before = '"$ENVS_EFFECT_BIN/wrangler" deployments status --name pi --json > "$RUNNER_TEMP/pi-deployment-before.json"\n'
-    deploy = '"$ENVS_EFFECT_BIN/wrangler" deploy --config "$PI_SCREEN_DIR/wrangler.json" --name pi --var "PI_OAUTH_HOST_ID:$host_id" --no-bundle || deploy_exit=$?'
-    after = '"$ENVS_EFFECT_BIN/wrangler" deployments status --name pi --json > "$RUNNER_TEMP/pi-deployment-after.json" || readback_exit=$?'
-    for marker in (before, deploy, after, '        run: |\n          set -euo pipefail\n          umask 077\n',
-                   '          deploy_exit=0\n', '          readback_exit=0\n',
+    before = '"$ENVS_EFFECT_BIN/wrangler" deployments status --name pi --json > "$RUNNER_TEMP/pi-deployment-before.json" 2> "$RUNNER_TEMP/pi-status-before.stderr" || operation_exit=$?'
+    upload = 'WRANGLER_OUTPUT_FILE_PATH="$upload_output" "$ENVS_EFFECT_BIN/wrangler" versions upload --config "$PI_SCREEN_DIR/wrangler.json" --name pi --var "PI_OAUTH_HOST_ID:$host_id" --no-bundle > "$RUNNER_TEMP/pi-upload.stdout" 2> "$RUNNER_TEMP/pi-upload.stderr" || operation_exit=$?'
+    deploy = '"$ENVS_EFFECT_BIN/wrangler" versions deploy "$version_id@100%" --yes --config "$PI_SCREEN_DIR/wrangler.json" --name pi > "$RUNNER_TEMP/pi-deploy.stdout" 2> "$RUNNER_TEMP/pi-deploy.stderr" || operation_exit=$?'
+    after = '"$ENVS_EFFECT_BIN/wrangler" deployments status --name pi --json > "$RUNNER_TEMP/pi-deployment-after.json" 2> "$RUNNER_TEMP/pi-status-after.stderr" || readback_exit=$?'
+    for marker in (before, upload, deploy, after, '        run: |\n          set -euo pipefail\n          umask 077\n',
+                   '          operation_exit=0\n', '          readback_exit=0\n',
                    '          if [[ "$readback_exit" == 0 ]]; then\n',
-                   '          if [[ "$deploy_exit" != 0 ]]; then\n            exit "$deploy_exit"\n          fi\n          exit "$readback_exit"\n',
-                   "jq -c '{id, versions: [.versions[] | {version_id, percentage}]}' \"$RUNNER_TEMP/pi-deployment-before.json\"",
-                   "jq -c '{id, versions: [.versions[] | {version_id, percentage}]}' \"$RUNNER_TEMP/pi-deployment-after.json\" || readback_exit=$?"):
+                   '          if [[ "$operation_exit" != 0 ]]; then\n            exit "$operation_exit"\n          fi\n          exit "$readback_exit"\n',
+                   'upload_output="$(mktemp "$RUNNER_TEMP/pi-version-upload.XXXXXX.jsonl")" || operation_exit=$?',
+                   'version_id="$(jq -ser ',
+                   '[.[] | select(.type == "version-upload")] | select(length == 1) | .[0] | select(.version == 1 and .worker_name == "pi" and .worker_name_overridden == false) | .version_id | select(type == "string" and test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"))',
+                   '"$upload_output" 2> "$RUNNER_TEMP/pi-upload-output.stderr")" || operation_exit=$?',
+                   '2> "$RUNNER_TEMP/pi-host-id.stderr")" || operation_exit=$?',
+                   "jq -ce '{id, versions: [.versions[] | {version_id, percentage}]}' \"$RUNNER_TEMP/pi-deployment-before.json\" 2> \"$RUNNER_TEMP/pi-status-before-jq.stderr\" || operation_exit=$?",
+                   "jq -ce '{id, versions: [.versions[] | {version_id, percentage}]}' \"$RUNNER_TEMP/pi-deployment-after.json\" 2> \"$RUNNER_TEMP/pi-status-after-jq.stderr\" || readback_exit=$?",
+                   'if [[ "$operation_exit" == 0 && "$readback_exit" == 0 ]]; then',
+                   "jq -e --arg version_id \"$version_id\" '(.versions | length) == 1 and .versions[0].version_id == $version_id and .versions[0].percentage == 100' \"$RUNNER_TEMP/pi-deployment-after.json\" > \"$RUNNER_TEMP/pi-status-after-match.stdout\" 2> \"$RUNNER_TEMP/pi-status-after-match.stderr\" || readback_exit=$?",
+                   'report_api_error() {',
+                   r'raw = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", raw)',
+                   r'paths = sorted(set(re.findall(r"A request to the Cloudflare API \((/accounts/[0-9a-f]{32}/workers/[A-Za-z0-9_/-]+|/memberships)\) failed\.", raw)))',
+                   r'codes = sorted(set(int(code) for code in re.findall(r"\[code: ([0-9]{1,10})\]", raw)))',
+                   'print(json.dumps({"phase": sys.argv[1], "api_paths": paths, "codes": codes}, separators=(",", ":")))',
+                   '\' "$@" 2> "$RUNNER_TEMP/pi-api-diagnostic.stderr" || echo "pi diagnostic exit=$?"',
+                   'report_api_error status-before "$RUNNER_TEMP/pi-deployment-before.json" "$RUNNER_TEMP/pi-status-before.stderr"',
+                   'report_api_error upload "$RUNNER_TEMP/pi-upload.stdout" "$RUNNER_TEMP/pi-upload.stderr"',
+                   'report_api_error deploy "$RUNNER_TEMP/pi-deploy.stdout" "$RUNNER_TEMP/pi-deploy.stderr"',
+                   'report_api_error status-after "$RUNNER_TEMP/pi-deployment-after.json" "$RUNNER_TEMP/pi-status-after.stderr"'):
         require(marker in source, f"Pi native status/failure/privacy boundary lost: {marker}")
-    require(source.index(before) < source.index(deploy) < source.index(after)
-            and source.count('deployments status --name pi --json') == 2,
-            "Pi must read existing status before writing and once after every deploy attempt")
+    require(source.index(before) < source.index(upload) < source.index(deploy) < source.index(after)
+            and source.count('deployments status --name pi --json') == 2
+            and source.count('if [[ "$operation_exit" == 0 ]]; then') == 6
+            and '"$ENVS_EFFECT_BIN/wrangler" deploy ' not in source,
+            "Pi must gate native version writes on successful prerequisites and always read status afterward")
     for marker in ("repos/roccho-org/ops/pulls/563", "flake-check", "jev-review-fresh-consumer",
                    "PI_OAUTH_HOST_ID", "pi-worker-screen-$OPS_SHA",
                    '".github/workflows/pi-worker-proof.yml"', '"SCREEN_ONLY_NO_TOKEN_EXCHANGE_OR_STORAGE"',

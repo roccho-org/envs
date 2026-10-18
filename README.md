@@ -68,7 +68,7 @@ checks     = executable repository and adapter specifications
 commit from GitHub, requires that PR to be merged into the Ops repository's
 `proposals` branch and still reachable from canonical `proposals`, and accepts
 only its successful `proposals` push artifact. There is no copied SHA input.
-It requires the pending Pi-only Secret
+It requires the dedicated Pi-only Secret
 `dev-projection/PI_CLOUDFLARE_API_TOKEN` and the existing
 `dev-projection/CLOUDFLARE_ACCOUNT_ID` in one final native Wrangler step;
 neither input is copied to Ops or application bindings. That merge must
@@ -98,30 +98,54 @@ Before acceptance, the Environment's existing `proposals`-only branch policy
 keeps the effect unavailable from a candidate branch. A source PR or CI PASS
 does not establish an actual deployment or a functioning public URL.
 
-`PI_CLOUDFLARE_API_TOKEN` is a pending, Pi-only workflow dependency, admitted by
+`PI_CLOUDFLARE_API_TOKEN` is a Pi-only workflow dependency, admitted by
 the dedicated Pi oracle. The final step maps it to Wrangler's native
 `CLOUDFLARE_API_TOKEN` environment variable. It is distinct from the legacy
 `dev-projection/CLOUDFLARE_API_TOKEN` used by other consumers; this change does
 not copy that credential, change those consumers or extend their generic
 `required_secrets` declaration. A missing Pi input does not fall back to it.
 
-The earlier [deployment run](https://github.com/roccho-org/envs/actions/runs/39075561974)
-was refused at the Workers deployments API with `No access to the specified
-resource`. The dedicated Pi credential has not been supplied or proved. The
-planned account-owned token is scoped to the existing `pi` Worker with
-`Individual Workers Editor` only. Creating that grant and registering its
-GitHub Environment Secret require the owner's separate approval; this source
-preparation performs neither action. The owner must resolve that capability
-boundary before another provider effect.
+The account-owned token is scoped to the existing `pi` Worker with `Individual
+Workers Editor` only and is registered separately by the owner. This workflow
+does not create tokens or expand their grants. Regular Wrangler 4.93 `deploy`
+can activate a version before its later account-subdomain lookup is refused;
+that nonzero exit does not establish an unchanged Worker and must not trigger
+an automatic retry.
 
 Before the first write, the final step requires native `wrangler deployments
-status --name pi --json` to succeed using the dedicated credential. A resource
-picker entry alone does not prove that the live Worker exists or is accessible.
-After the deploy command returns, it reads native status once even when deploy
-reports failure. A failed deploy keeps its nonzero exit; a failed readback also
-fails the step. There is no automatic retry. Raw status JSON stays in runner-temporary
-files with an owner-only creation mask; logs project only deployment ID and
-version ID/percentage, excluding personal metadata such as author email.
+status --name pi --json` and its safe projection to succeed. It then uses the
+provided Wrangler 4.93 `versions upload` command with the unchanged accepted
+configuration, `--name pi`, host variable and `--no-bundle`. A fresh native
+`WRANGLER_OUTPUT_FILE_PATH` JSONL supplies exactly one valid `version-upload`
+record for `pi`. Only that returned UUID is passed to `versions deploy
+<version_id>@100% --yes`, with the same configuration and Worker name. An upload
+failure or invalid output prevents deployment. This is the standard
+[separate upload/deploy workflow](https://developers.cloudflare.com/workers/versions-and-deployments/deployment-management/),
+using the native output schema rather than parsing human logs or choosing the
+latest version.
+
+The owner-confirmed provider prerequisite is production `workers.dev` ON and
+version-preview URLs OFF. Wrangler 4.93's versions path preserves those
+settings, routes, domains and Access. The artifact's `preview_urls=false` guard
+remains required, but this path does not apply that non-versioned toggle: the
+existing provider setting must already be OFF to avoid its optional account
+subdomain lookup. No additional API call or permission is added to enforce it.
+The defined `observability.enabled=false` setting is still synchronized by
+native `versions deploy`.
+
+Every returning attempt, including a prerequisite failure, reaches exactly one
+native post-status. The first operation failure is retained; failed post-status
+or JSON projection also fails the step. After an otherwise successful operation,
+the projected final status must contain only the uploaded dynamic version at
+100% traffic. Failed operations report the actual status without demanding a
+new version. There is no retry. All credential-bearing CLI stdout/stderr and
+native machine output stay in runner-temporary files created under `umask 077`;
+logs expose only projected deployment/version IDs, percentages and stage exit
+codes. On native failure, a strict diagnostic projection may also show only
+the known Cloudflare API path (`/accounts/<hex>/workers/...` or `/memberships`)
+and numeric error codes, after stripping terminal formatting. Unknown formats
+retain the phase and original exit code. Raw diagnostics, automatic account diagnostics and personal metadata
+such as author email are never published or uploaded as artifacts.
 The screen-only workflow continues to reject the complete DO runtime package.
 
 ## Durable tree

@@ -100,7 +100,7 @@ jobs:
           echo "Pi screen artifact: run=$run id=$id digest=$digest source=$OPS_SHA"
 
       - name: Native Wrangler dry-run before mapping Cloudflare credentials
-        run: '"$ENVS_EFFECT_BIN/wrangler" deploy --config "$PI_SCREEN_DIR/wrangler.json" --name pi --no-bundle --dry-run'
+        run: '"$ENVS_EFFECT_BIN/wrangler" versions upload --config "$PI_SCREEN_DIR/wrangler.json" --name pi --no-bundle --dry-run'
 
       - name: Deploy only the screen preview using existing native auth
         env:
@@ -110,18 +110,77 @@ jobs:
         run: |
           set -euo pipefail
           umask 077
-          # One deterministic UUID for this exact account/Worker host, stable across deployments.
-          host_id="$("$ENVS_EFFECT_BIN/python3" -I -c 'import os,uuid; print(uuid.uuid5(uuid.NAMESPACE_URL,"urn:cloudflare:workers:"+os.environ["CLOUDFLARE_ACCOUNT_ID"]+":pi"))')"
-          "$ENVS_EFFECT_BIN/wrangler" deployments status --name pi --json > "$RUNNER_TEMP/pi-deployment-before.json"
-          jq -c '{id, versions: [.versions[] | {version_id, percentage}]}' "$RUNNER_TEMP/pi-deployment-before.json"
-          deploy_exit=0
-          "$ENVS_EFFECT_BIN/wrangler" deploy --config "$PI_SCREEN_DIR/wrangler.json" --name pi --var "PI_OAUTH_HOST_ID:$host_id" --no-bundle || deploy_exit=$?
-          readback_exit=0
-          "$ENVS_EFFECT_BIN/wrangler" deployments status --name pi --json > "$RUNNER_TEMP/pi-deployment-after.json" || readback_exit=$?
-          if [[ "$readback_exit" == 0 ]]; then
-            jq -c '{id, versions: [.versions[] | {version_id, percentage}]}' "$RUNNER_TEMP/pi-deployment-after.json" || readback_exit=$?
+          report_api_error() {
+            "$ENVS_EFFECT_BIN/python3" -I -c '
+          import json, re, sys
+          from pathlib import Path
+          raw = ""
+          for filename in sys.argv[2:]:
+              try:
+                  raw += Path(filename).read_text(errors="replace") + "\n"
+              except OSError:
+                  pass
+          raw = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", raw)
+          paths = sorted(set(re.findall(r"A request to the Cloudflare API \((/accounts/[0-9a-f]{32}/workers/[A-Za-z0-9_/-]+|/memberships)\) failed\.", raw)))
+          codes = sorted(set(int(code) for code in re.findall(r"\[code: ([0-9]{1,10})\]", raw)))
+          if paths or codes:
+              print(json.dumps({"phase": sys.argv[1], "api_paths": paths, "codes": codes}, separators=(",", ":")))
+          ' "$@" 2> "$RUNNER_TEMP/pi-api-diagnostic.stderr" || echo "pi diagnostic exit=$?"
+          }
+          operation_exit=0
+          version_id=""
+          "$ENVS_EFFECT_BIN/wrangler" deployments status --name pi --json > "$RUNNER_TEMP/pi-deployment-before.json" 2> "$RUNNER_TEMP/pi-status-before.stderr" || operation_exit=$?
+          echo "pi status-before exit=$operation_exit"
+          if [[ "$operation_exit" != 0 ]]; then
+            report_api_error status-before "$RUNNER_TEMP/pi-deployment-before.json" "$RUNNER_TEMP/pi-status-before.stderr"
           fi
-          if [[ "$deploy_exit" != 0 ]]; then
-            exit "$deploy_exit"
+          if [[ "$operation_exit" == 0 ]]; then
+            jq -ce '{id, versions: [.versions[] | {version_id, percentage}]}' "$RUNNER_TEMP/pi-deployment-before.json" 2> "$RUNNER_TEMP/pi-status-before-jq.stderr" || operation_exit=$?
+            echo "pi status-before-projection exit=$operation_exit"
+          fi
+          if [[ "$operation_exit" == 0 ]]; then
+            # One deterministic UUID for this exact account/Worker host, stable across deployments.
+            host_id="$("$ENVS_EFFECT_BIN/python3" -I -c 'import os,uuid; print(uuid.uuid5(uuid.NAMESPACE_URL,"urn:cloudflare:workers:"+os.environ["CLOUDFLARE_ACCOUNT_ID"]+":pi"))' 2> "$RUNNER_TEMP/pi-host-id.stderr")" || operation_exit=$?
+            echo "pi host-id exit=$operation_exit"
+          fi
+          if [[ "$operation_exit" == 0 ]]; then
+            upload_output="$(mktemp "$RUNNER_TEMP/pi-version-upload.XXXXXX.jsonl")" || operation_exit=$?
+            echo "pi upload-output-file exit=$operation_exit"
+          fi
+          if [[ "$operation_exit" == 0 ]]; then
+            WRANGLER_OUTPUT_FILE_PATH="$upload_output" "$ENVS_EFFECT_BIN/wrangler" versions upload --config "$PI_SCREEN_DIR/wrangler.json" --name pi --var "PI_OAUTH_HOST_ID:$host_id" --no-bundle > "$RUNNER_TEMP/pi-upload.stdout" 2> "$RUNNER_TEMP/pi-upload.stderr" || operation_exit=$?
+            echo "pi upload exit=$operation_exit"
+            if [[ "$operation_exit" != 0 ]]; then
+              report_api_error upload "$RUNNER_TEMP/pi-upload.stdout" "$RUNNER_TEMP/pi-upload.stderr"
+            fi
+          fi
+          if [[ "$operation_exit" == 0 ]]; then
+            version_id="$(jq -ser '[.[] | select(.type == "version-upload")] | select(length == 1) | .[0] | select(.version == 1 and .worker_name == "pi" and .worker_name_overridden == false) | .version_id | select(type == "string" and test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"))' "$upload_output" 2> "$RUNNER_TEMP/pi-upload-output.stderr")" || operation_exit=$?
+            echo "pi upload-output exit=$operation_exit"
+          fi
+          if [[ "$operation_exit" == 0 ]]; then
+            printf '{"version_id":"%s"}\n' "$version_id"
+            "$ENVS_EFFECT_BIN/wrangler" versions deploy "$version_id@100%" --yes --config "$PI_SCREEN_DIR/wrangler.json" --name pi > "$RUNNER_TEMP/pi-deploy.stdout" 2> "$RUNNER_TEMP/pi-deploy.stderr" || operation_exit=$?
+            echo "pi deploy exit=$operation_exit"
+            if [[ "$operation_exit" != 0 ]]; then
+              report_api_error deploy "$RUNNER_TEMP/pi-deploy.stdout" "$RUNNER_TEMP/pi-deploy.stderr"
+            fi
+          fi
+          readback_exit=0
+          "$ENVS_EFFECT_BIN/wrangler" deployments status --name pi --json > "$RUNNER_TEMP/pi-deployment-after.json" 2> "$RUNNER_TEMP/pi-status-after.stderr" || readback_exit=$?
+          echo "pi status-after exit=$readback_exit"
+          if [[ "$readback_exit" != 0 ]]; then
+            report_api_error status-after "$RUNNER_TEMP/pi-deployment-after.json" "$RUNNER_TEMP/pi-status-after.stderr"
+          fi
+          if [[ "$readback_exit" == 0 ]]; then
+            jq -ce '{id, versions: [.versions[] | {version_id, percentage}]}' "$RUNNER_TEMP/pi-deployment-after.json" 2> "$RUNNER_TEMP/pi-status-after-jq.stderr" || readback_exit=$?
+            echo "pi status-after-projection exit=$readback_exit"
+          fi
+          if [[ "$operation_exit" == 0 && "$readback_exit" == 0 ]]; then
+            jq -e --arg version_id "$version_id" '(.versions | length) == 1 and .versions[0].version_id == $version_id and .versions[0].percentage == 100' "$RUNNER_TEMP/pi-deployment-after.json" > "$RUNNER_TEMP/pi-status-after-match.stdout" 2> "$RUNNER_TEMP/pi-status-after-match.stderr" || readback_exit=$?
+            echo "pi status-after-match exit=$readback_exit"
+          fi
+          if [[ "$operation_exit" != 0 ]]; then
+            exit "$operation_exit"
           fi
           exit "$readback_exit"
