@@ -297,7 +297,7 @@ with Go. Ciphertext availability is checked at an exact Git revision.
 
 The existing local pattern is documented in
 [windows #22](https://github.com/roccho-dev/windows/issues/22) and implemented by
-[oci/dev/nix.nix](https://github.com/roccho-dev/windows/blob/proposals/oci/dev/nix.nix):
+[oci/dev/nix.nix](https://github.com/roccho-dev/resources/blob/3f929b9d96ed276171d294db828b519cbf001917/oci/dev/nix.nix):
 resolve/build the exact app before decryption, use the target's own
 `/work/repos/.auth/roccho-dev/age/oci-dev.key`, decrypt in memory and pass the key
 only to the foreground application child. The private identity stays on the
