@@ -3,8 +3,12 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import shutil
+import subprocess
+import sys
 import tempfile
+import textwrap
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -73,11 +77,131 @@ def replace_text(relative: str, old: str, new: str):
     return mutate
 
 
+def pi_native_versions_fixtures() -> None:
+    """Exercise the actual effect shell with synthetic native CLI outcomes, never a provider."""
+    if os.name != "posix":
+        print("PI_NATIVE_VERSIONS_FIXTURES=SKIP: requires the normal Linux CI shell")
+        return
+    bash, jq = shutil.which("bash"), shutil.which("jq")
+    assert bash and jq, "the deployment runner's native bash and jq are required"
+    workflow = (ROOT / ".github/workflows/deploy-pi-worker-preview.yml").read_text()
+    step = workflow.split("      - name: Deploy only the screen preview using existing native auth\n", 1)[1]
+    script = textwrap.dedent(step.split("        run: |\n", 1)[1])
+    # Synthetic scratch is retained only for this ephemeral CI runner's lifetime.
+    scratch = Path(tempfile.mkdtemp(prefix="envs-pi-native-fixtures-"))
+    tools = scratch / "bin"
+    tools.mkdir()
+    screen = scratch / "screen"
+    screen.mkdir()
+    (screen / "wrangler.json").write_text('{"name":"pi-worker-oauth-screen"}\n')
+    python = tools / "python3"
+    python.write_text("#!" + sys.executable + "\n" + textwrap.dedent('''\
+        import os, sys
+        if os.environ["PI_FIXTURE_MODE"] == "host-fail" and "uuid.uuid5" in sys.argv[3]:
+            print("fixture-private@example.invalid", file=sys.stderr)
+            sys.exit(35)
+        os.execv(sys.executable, [sys.executable] + sys.argv[1:])
+        '''))
+    python.chmod(0o700)
+    fake = tools / "wrangler"
+    fake.write_text("#!" + sys.executable + "\n" + textwrap.dedent('''\
+        import json, os, sys
+        from pathlib import Path
+        mode = os.environ["PI_FIXTURE_MODE"]
+        trace = Path(os.environ["PI_FIXTURE_TRACE"])
+        prior = [json.loads(line) for line in trace.read_text().splitlines()] if trace.exists() else []
+        args = sys.argv[1:]
+        assert args[args.index("--name") + 1] == "pi"
+        if args[:2] == ["versions", "upload"] or args[:2] == ["versions", "deploy"]:
+            assert json.loads(Path(args[args.index("--config") + 1]).read_text())["name"] == "pi-worker-oauth-screen"
+        kind = ("post" if any(row["kind"] == "pre" for row in prior) else "pre") if args[:2] == ["deployments", "status"] else args[1]
+        with trace.open("a") as output:
+            output.write(json.dumps({"kind": kind, "args": args}) + "\\n")
+        private = "fixture-private@example.invalid"
+        print(private, file=sys.stderr)
+        if mode == "api-error" and kind == "deploy":
+            print("\\x1b[31mA request to the Cloudflare API (/accounts/" + "a" * 32 + "/workers/scripts/pi/deployments) failed.\\x1b[0m", file=sys.stderr)
+            print("Authentication error [code: 10000] Account name: " + private, file=sys.stderr)
+            print("A request to the Cloudflare API (/accounts/private-name/workers/scripts/" + private + ") failed.", file=sys.stderr)
+        if mode == "pre-fail" and kind == "pre":
+            print("A request to the Cloudflare API (/memberships) failed. [code: 10000] " + private, file=sys.stderr)
+        old = "00000000-0000-4000-8000-000000000001"
+        new = "00000000-0000-4000-8000-000000000002"
+        if kind in ("pre", "post"):
+            if mode == kind + "-empty":
+                pass
+            elif mode == kind + "-json":
+                print(private)
+            else:
+                deployed = any(row["kind"] == "deploy" for row in prior) and mode not in ("deploy-fail", "both-fail", "mismatch-id")
+                version = new if kind == "post" and deployed else old
+                percentage = 50 if mode == "mismatch-traffic" and kind == "post" else 100
+                print(json.dumps({"id": "deployment-fixture", "author_email": private, "versions": [{"version_id": version, "percentage": percentage}]}))
+            sys.exit(31 if mode == "pre-fail" and kind == "pre" else 34 if mode in ("post-fail", "both-fail") and kind == "post" else 0)
+        print(private)
+        if kind == "upload":
+            record = {"type": "version-upload", "version": 1, "worker_name": "pi", "worker_name_overridden": False, "version_id": new}
+            if mode == "invalid-id": record["version_id"] = private
+            if mode == "wrong-worker": record["worker_name"] = "other"
+            with Path(os.environ["WRANGLER_OUTPUT_FILE_PATH"]).open("a") as output:
+                for row in [{"type": "wrangler-session", "command_line_args": [private]}, record] + ([record] if mode == "duplicate-output" else []):
+                    output.write(json.dumps(row) + "\\n")
+            sys.exit(32 if mode == "upload-fail" else 0)
+        assert kind == "deploy" and args[2] == new + "@100%" and "--yes" in args
+        sys.exit(33 if mode in ("deploy-fail", "both-fail", "api-error") else 0)
+        '''))
+    fake.chmod(0o700)
+    for mode, expected, kinds in (
+        ("success", 0, ["pre", "upload", "deploy", "post"]),
+        ("pre-fail", 31, ["pre", "post"]),
+        ("pre-json", None, ["pre", "post"]),
+        ("pre-empty", None, ["pre", "post"]),
+        ("host-fail", 35, ["pre", "post"]),
+        ("upload-fail", 32, ["pre", "upload", "post"]),
+        ("invalid-id", None, ["pre", "upload", "post"]),
+        ("wrong-worker", None, ["pre", "upload", "post"]),
+        ("duplicate-output", None, ["pre", "upload", "post"]),
+        ("deploy-fail", 33, ["pre", "upload", "deploy", "post"]),
+        ("post-fail", 34, ["pre", "upload", "deploy", "post"]),
+        ("post-json", None, ["pre", "upload", "deploy", "post"]),
+        ("post-empty", None, ["pre", "upload", "deploy", "post"]),
+        ("both-fail", 33, ["pre", "upload", "deploy", "post"]),
+        ("api-error", 33, ["pre", "upload", "deploy", "post"]),
+        ("mismatch-id", None, ["pre", "upload", "deploy", "post"]),
+        ("mismatch-traffic", None, ["pre", "upload", "deploy", "post"]),
+    ):
+        current = scratch / mode
+        current.mkdir()
+        trace = current / "calls.jsonl"
+        result = subprocess.run([bash, "-c", script], capture_output=True, text=True, env={
+            "PATH": os.environ["PATH"], "ENVS_EFFECT_BIN": str(tools), "RUNNER_TEMP": str(current),
+            "PI_SCREEN_DIR": str(screen), "CLOUDFLARE_ACCOUNT_ID": "synthetic-account",
+            "CLOUDFLARE_API_TOKEN": "synthetic-fixture", "PI_FIXTURE_MODE": mode,
+            "PI_FIXTURE_TRACE": str(trace),
+        })
+        assert (result.returncode == expected if expected is not None else result.returncode != 0), mode
+        assert [json.loads(line)["kind"] for line in trace.read_text().splitlines()] == kinds, mode
+        assert "fixture-private" not in result.stdout + result.stderr, mode
+        assert not result.stderr, mode
+        diagnostics = [json.loads(line) for line in result.stdout.splitlines() if line.startswith('{"phase":')]
+        if mode in ("api-error", "pre-fail"):
+            assert diagnostics == [{"phase": "deploy" if mode == "api-error" else "status-before",
+                                    "api_paths": ["/accounts/" + "a" * 32 + "/workers/scripts/pi/deployments"] if mode == "api-error" else ["/memberships"],
+                                    "codes": [10000]}], mode
+            assert ("pi deploy exit=33" if mode == "api-error" else "pi status-before exit=31") in result.stdout
+        else:
+            assert not diagnostics, mode
+        for capture in current.iterdir():
+            assert capture.stat().st_mode & 0o077 == 0, (mode, capture.name)
+    print("PI_NATIVE_VERSIONS_FIXTURES=PASS: 17 success/failure/privacy/mismatch cases")
+
+
 def main() -> None:
     baseline = repository.inspect(ROOT)
     assert baseline["status"] == "PASS"
     assert baseline["canonical_branch"] == "proposals"
     assert baseline["retained_compatibility_branch"] == "main"
+    pi_native_versions_fixtures()
 
     # Structural Source checks reject plaintext/duplicate metadata before publication.
     fixture_spec = importlib.util.spec_from_file_location("mail_carrier_fixtures", ROOT / "checks/test_mail_routing_root.py")
@@ -231,13 +355,25 @@ def main() -> None:
          '          PI_CLOUDFLARE_API_TOKEN: ${{ secrets.PI_CLOUDFLARE_API_TOKEN }}'),
         ('deployments status --name pi --json > "$RUNNER_TEMP/pi-deployment-before.json"',
          'deployments status --name pi --json'),
-        ('pi-deployment-before.json"\n', 'pi-deployment-before.json" || true\n'),
         ('set -euo pipefail\n          umask 077', 'set -uo pipefail\n          umask 077'),
-        ('--no-bundle || deploy_exit=$?', '--no-bundle'),
-        ('pi-deployment-after.json" || readback_exit=$?', 'pi-deployment-after.json"'),
-        ('exit "$deploy_exit"', 'exit 0'),
+        ('2> "$RUNNER_TEMP/pi-status-before.stderr" || operation_exit=$?', ''),
+        ('2> "$RUNNER_TEMP/pi-upload.stderr" || operation_exit=$?', ''),
+        ('2> "$RUNNER_TEMP/pi-deploy.stderr" || operation_exit=$?', ''),
+        ('2> "$RUNNER_TEMP/pi-status-after.stderr" || readback_exit=$?', ''),
+        ('2> "$RUNNER_TEMP/pi-host-id.stderr")" || operation_exit=$?', ')"'),
+        ('[0-9a-f]{32}/workers/[A-Za-z0-9_/-]+', '.+'),
+        ('"api_paths": paths, "codes": codes', '"raw": raw'),
+        ('report_api_error deploy "$RUNNER_TEMP/pi-deploy.stdout" "$RUNNER_TEMP/pi-deploy.stderr"', 'cat "$RUNNER_TEMP/pi-deploy.stderr"'),
+        ('if [[ "$operation_exit" == 0 ]]; then', 'if true; then'),
+        ('select(length == 1)', 'select(length > 0)'),
+        ('.worker_name == "pi"', '.worker_name == "other"'),
+        ('"$version_id@100%" --yes', '"latest@100%" --yes'),
+        ('exit "$operation_exit"', 'exit 0'),
         ('exit "$readback_exit"', 'exit 0'),
+        ('.versions[0].version_id == $version_id', 'true'),
+        ('.versions[0].percentage == 100', '.versions[0].percentage == 50'),
         ('{id, versions: [.versions[] | {version_id, percentage}]}', '.'),
+        ("jq -ce '{id, versions:", "jq -c '{id, versions:"),
         ('--config "$PI_SCREEN_DIR/wrangler.json" --name pi', '--config unsafe.json'),
         ('.merged == true', '.merged == false'),
         ('.base.ref == "proposals"', '.base.ref == "main"'),
