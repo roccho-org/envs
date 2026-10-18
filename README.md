@@ -63,12 +63,15 @@ checks     = executable repository and adapter specifications
 
 ## Pi Worker OAuth preview
 
-`deploy-pi-worker-preview.yml` is a manual, owner-only projection of the exact
-current `roccho-org/ops#563` candidate to the single
-`roccho-pi-worker-preview` Worker. It uses the existing
+`deploy-pi-worker-preview.yml` is a manual, owner-only projection of the accepted
+`roccho-org/ops#563` merge to the single `pi` Worker. It resolves the actual merge
+commit from GitHub, requires that PR to be merged into the Ops repository's
+`proposals` branch and still reachable from canonical `proposals`, and accepts
+only its successful `proposals` push artifact. There is no copied SHA input.
+It uses the existing
 `dev-projection/CLOUDFLARE_API_TOKEN` and
 `dev-projection/CLOUDFLARE_ACCOUNT_ID` in one final native Wrangler step;
-neither input is copied to Ops or application bindings. The candidate must
+neither input is copied to Ops or application bindings. That merge must
 already have successful Pi proof, flake-check and review-consumer checks.
 The workflow consumes the CI-built screen-only artifact, verifies its native
 Actions identity/digest and source, and dry-runs it with the already-provided
@@ -84,16 +87,23 @@ The admitted package contains no chat, DO, asset, secret or service bindings.
 This workflow does not change GitHub
 Environment branch policies, Cloudflare Access, DNS or other Workers.
 
-After this workflow is accepted on `proposals`, select the reviewed candidate:
+After this workflow is accepted on `proposals` and the Ops merge has successful
+canonical checks and its screen artifact, dispatch without source parameters:
 
 ```sh
-gh workflow run deploy-pi-worker-preview.yml --repo roccho-org/envs --ref proposals \
-  -f ops_sha=<exact-current-reviewed-ops-563-head>
+gh workflow run deploy-pi-worker-preview.yml --repo roccho-org/envs --ref proposals
 ```
 
 Before acceptance, the Environment's existing `proposals`-only branch policy
 keeps the effect unavailable from a candidate branch. A source PR or CI PASS
 does not establish an actual deployment or a functioning public URL.
+
+The earlier [deployment run](https://github.com/roccho-org/envs/actions/runs/39075561974)
+was refused at the Workers deployments API with `No access to the specified
+resource`. The existing CI credential has not proved Worker deployment/status
+access. This source change neither reads nor changes credentials or grants;
+the owner must resolve that capability boundary before another provider effect.
+The screen-only workflow continues to reject the complete DO runtime package.
 
 ## Durable tree
 

@@ -1,12 +1,7 @@
-name: Pi Worker OAuth preview deploy
+name: Pi Worker accepted OAuth screen deploy
 
 on:
   workflow_dispatch:
-    inputs:
-      ops_sha:
-        description: Exact independently reviewed ops PR 563 head
-        type: string
-        required: true
 
 permissions:
   actions: read
@@ -64,21 +59,23 @@ jobs:
           echo "ENVS_EFFECT_DIGEST=$digest" >>"$GITHUB_ENV"
           echo "ENVS_EFFECT_ZIP=$art/envs-effect.zip" >>"$GITHUB_ENV"
 
-      - name: Require the current reviewed Pi candidate and successful checks
+      - name: Resolve the accepted Pi merge and require successful checks
         env:
-          OPS_SHA: ${{ inputs.ops_sha }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          [[ "$OPS_SHA" =~ ^[0-9a-f]{40}$ ]]
           gh api repos/roccho-org/ops/pulls/563 > "$RUNNER_TEMP/pi-pr.json"
-          jq -e --arg sha "$OPS_SHA" '.head.sha == $sha and .head.repo.full_name == "roccho-org/ops" and .head.ref == "poc/pi-worker-oauth-20261017"' "$RUNNER_TEMP/pi-pr.json" >/dev/null
+          jq -e '.merged == true and .state == "closed" and .base.repo.full_name == "roccho-org/ops" and .base.ref == "proposals" and .head.repo.full_name == "roccho-org/ops" and .head.ref == "poc/pi-worker-oauth-20261017" and (.merge_commit_sha | test("^[0-9a-f]{40}$"))' "$RUNNER_TEMP/pi-pr.json" >/dev/null
+          OPS_SHA="$(jq -r .merge_commit_sha "$RUNNER_TEMP/pi-pr.json")"
+          gh api "repos/roccho-org/ops/compare/$OPS_SHA...proposals" > "$RUNNER_TEMP/pi-canonical.json"
+          jq -e --arg sha "$OPS_SHA" '.base_commit.sha == $sha and (.status == "identical" or .status == "ahead")' "$RUNNER_TEMP/pi-canonical.json" >/dev/null
           gh api "repos/roccho-org/ops/commits/$OPS_SHA/check-runs?per_page=100" > "$RUNNER_TEMP/pi-checks.json"
           jq -e '[.check_runs[] | select(.name == "proof" or .name == "flake-check" or .name == "jev-review-fresh-consumer")] | (map(.name) | unique | sort) == ["flake-check", "jev-review-fresh-consumer", "proof"] and all(.status == "completed" and .conclusion == "success")' "$RUNNER_TEMP/pi-checks.json" >/dev/null
+          echo "OPS_SHA=$OPS_SHA" >> "$GITHUB_ENV"
+          echo "Pi source: merged roccho-org/ops#563 source=$OPS_SHA on proposals"
 
       - name: Obtain the exact CI-built screen-only Worker
         env:
-          OPS_SHA: ${{ inputs.ops_sha }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
@@ -93,7 +90,7 @@ jobs:
           run="$(jq -r .workflow_run.id "$art/artifact.json")"
           [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
           curl -fsSL -H "$auth" "$api/runs/$run" > "$art/run.json"
-          jq -e --arg sha "$OPS_SHA" '.head_sha == $sha and .path == ".github/workflows/pi-worker-proof.yml" and .head_branch == "poc/pi-worker-oauth-20261017" and .event == "push" and .conclusion == "success" and .repository.full_name == "roccho-org/ops" and .head_repository.full_name == "roccho-org/ops"' "$art/run.json" >/dev/null
+          jq -e --arg sha "$OPS_SHA" '.head_sha == $sha and .path == ".github/workflows/pi-worker-proof.yml" and .head_branch == "proposals" and .event == "push" and .conclusion == "success" and .repository.full_name == "roccho-org/ops" and .head_repository.full_name == "roccho-org/ops"' "$art/run.json" >/dev/null
           curl -fsSL -H "$auth" -o "$art/screen.zip" "$api/artifacts/$id/zip"
           echo "${digest#sha256:}  $art/screen.zip" | sha256sum -c -
           unzip -q "$art/screen.zip" -d "$art/screen"
@@ -103,7 +100,7 @@ jobs:
           echo "Pi screen artifact: run=$run id=$id digest=$digest source=$OPS_SHA"
 
       - name: Native Wrangler dry-run before mapping Cloudflare credentials
-        run: '"$ENVS_EFFECT_BIN/wrangler" deploy --config "$PI_SCREEN_DIR/wrangler.json" --name roccho-pi-worker-preview --no-bundle --dry-run'
+        run: '"$ENVS_EFFECT_BIN/wrangler" deploy --config "$PI_SCREEN_DIR/wrangler.json" --name pi --no-bundle --dry-run'
 
       - name: Deploy only the screen preview using existing native auth
         env:
@@ -113,6 +110,6 @@ jobs:
         run: |
           set -euo pipefail
           # One deterministic UUID for this exact account/Worker host, stable across deployments.
-          host_id="$("$ENVS_EFFECT_BIN/python3" -I -c 'import os,uuid; print(uuid.uuid5(uuid.NAMESPACE_URL,"urn:cloudflare:workers:"+os.environ["CLOUDFLARE_ACCOUNT_ID"]+":roccho-pi-worker-preview"))')"
-          "$ENVS_EFFECT_BIN/wrangler" deploy --config "$PI_SCREEN_DIR/wrangler.json" --name roccho-pi-worker-preview --var "PI_OAUTH_HOST_ID:$host_id" --no-bundle
-          "$ENVS_EFFECT_BIN/wrangler" deployments status --name roccho-pi-worker-preview
+          host_id="$("$ENVS_EFFECT_BIN/python3" -I -c 'import os,uuid; print(uuid.uuid5(uuid.NAMESPACE_URL,"urn:cloudflare:workers:"+os.environ["CLOUDFLARE_ACCOUNT_ID"]+":pi"))')"
+          "$ENVS_EFFECT_BIN/wrangler" deploy --config "$PI_SCREEN_DIR/wrangler.json" --name pi --var "PI_OAUTH_HOST_ID:$host_id" --no-bundle
+          "$ENVS_EFFECT_BIN/wrangler" deployments status --name pi

@@ -1016,9 +1016,10 @@ def check_relocation(root: Path, source: str, check: str) -> None:
 
 
 def check_pi_worker_preview(source: str, canonical_consumer: str) -> None:
-    """One manual, owner-controlled preview; existing secret stays in envs."""
-    require("on:\n  workflow_dispatch:\n    inputs:\n      ops_sha:\n" in source,
-            "Pi preview must take only an exact source selection on manual dispatch")
+    """One manual projection of the accepted merge; existing secret stays in envs."""
+    require("on:\n  workflow_dispatch:\n\npermissions:\n" in source
+            and "inputs.ops_sha" not in source,
+            "Pi preview must resolve the accepted source without a copied SHA input")
     require("\n  push:" not in source and "\n  pull_request:" not in source,
             "Pi preview must not deploy on a push or PR")
     for guard in ("github.repository == 'roccho-org/envs'", "github.ref == 'refs/heads/proposals'",
@@ -1041,12 +1042,24 @@ def check_pi_worker_preview(source: str, canonical_consumer: str) -> None:
             "Pi preview must verify and dry-run before provider credentials")
     require("npm install" not in source and "pnpm install" not in source,
             "Pi projection must consume the checked artifact rather than rebuild app source")
+    for marker in (
+        '.merged == true and .state == "closed" and .base.repo.full_name == "roccho-org/ops" and .base.ref == "proposals" and .head.repo.full_name == "roccho-org/ops" and .head.ref == "poc/pi-worker-oauth-20261017" and (.merge_commit_sha | test("^[0-9a-f]{40}$"))',
+        'OPS_SHA="$(jq -r .merge_commit_sha "$RUNNER_TEMP/pi-pr.json")"',
+        'repos/roccho-org/ops/compare/$OPS_SHA...proposals',
+        '.base_commit.sha == $sha and (.status == "identical" or .status == "ahead")',
+        'echo "OPS_SHA=$OPS_SHA" >> "$GITHUB_ENV"',
+        '.head_sha == $sha and .path == ".github/workflows/pi-worker-proof.yml" and .head_branch == "proposals" and .event == "push" and .conclusion == "success" and .repository.full_name == "roccho-org/ops" and .head_repository.full_name == "roccho-org/ops"',
+        '--config "$PI_SCREEN_DIR/wrangler.json" --name pi --no-bundle --dry-run',
+        '--config "$PI_SCREEN_DIR/wrangler.json" --name pi --var "PI_OAUTH_HOST_ID:$host_id" --no-bundle',
+        'os.environ["CLOUDFLARE_ACCOUNT_ID"]+":pi"',
+        '"$ENVS_EFFECT_BIN/wrangler" deployments status --name pi',
+    ):
+        require(marker in source, f"Pi accepted-source/target admission lost: {marker}")
     for marker in ("repos/roccho-org/ops/pulls/563", "flake-check", "jev-review-fresh-consumer",
-                   "roccho-pi-worker-preview", "PI_OAUTH_HOST_ID", "pi-worker-screen-$OPS_SHA",
+                   "PI_OAUTH_HOST_ID", "pi-worker-screen-$OPS_SHA",
                    '".github/workflows/pi-worker-proof.yml"', '"SCREEN_ONLY_NO_TOKEN_EXCHANGE_OR_STORAGE"',
                    '.preview_urls == false', 'has("durable_objects")', 'has("assets")',
-                   'has("services")', 'has("vars")', 'has("routes")',
-                   '--config "$PI_SCREEN_DIR/wrangler.json" --name roccho-pi-worker-preview'):
+                   'has("services")', 'has("vars")', 'has("routes")'):
         require(marker in source, f"Pi preview source/target boundary lost: {marker}")
 
 
