@@ -222,10 +222,19 @@ def main() -> None:
         ("github.actor_id == '40359643'", "github.actor_id == '1'"),
         ("github.run_attempt == 1", "github.run_attempt >= 1"),
         ("  contents: read", "  contents: write"),
-        ("roccho-pi-worker-preview", "unrelated-worker"),
+        ("--name pi", "--name unrelated-worker"),
         ("PI_OAUTH_HOST_ID", "PI_CHATGPT_BOOTSTRAP"),
         ("secrets.CLOUDFLARE_API_TOKEN", "secrets.RENT_CLOUDFLARE_API_TOKEN"),
-        ('--config "$PI_SCREEN_DIR/wrangler.json" --name roccho-pi-worker-preview', '--config unsafe.json'),
+        ('--config "$PI_SCREEN_DIR/wrangler.json" --name pi', '--config unsafe.json'),
+        ('.merged == true', '.merged == false'),
+        ('.base.ref == "proposals"', '.base.ref == "main"'),
+        ('OPS_SHA="$(jq -r .merge_commit_sha "$RUNNER_TEMP/pi-pr.json")"',
+         'OPS_SHA="${{ inputs.ops_sha }}"'),
+        ('.base_commit.sha == $sha and (.status == "identical" or .status == "ahead")', 'true'),
+        ('.head_branch == "proposals"', '.head_branch == "poc/pi-worker-oauth-20261017"'),
+        ('os.environ["CLOUDFLARE_ACCOUNT_ID"]+":pi"', 'os.environ["CLOUDFLARE_ACCOUNT_ID"]+":other"'),
+        ('"SCREEN_ONLY_NO_TOKEN_EXCHANGE_OR_STORAGE"', '"FULL_RUNTIME"'),
+        ('has("durable_objects")', 'has("unused_binding")'),
     ):
         expect_red(replace_text(pi_preview, old, new))
 
