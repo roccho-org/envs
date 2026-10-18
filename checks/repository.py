@@ -231,6 +231,7 @@ CIPHERTEXTS = {
     "ciphertexts/dev-rent-client.sops.yaml", "ciphertexts/dev-opencode-go.oci-dev.sops.yaml",
     "ciphertexts/dev-opencode-go.versapro-own-oci.sops.yaml",
     "ciphertexts/dev-typellm-api.oci-dev.sops.yaml",
+    "ciphertexts/dev-typellm-api.versapro-own-oci.sops.yaml",
 }
 # The real SOPS roundtrip runs the locked sops with a check-only age that never enters the effect toolchain; the
 # closure tofu joins it so a real root output reaches the production sealing path.
@@ -440,7 +441,7 @@ def author_target_inputs(adapter, contracts: dict[str, dict[str, dict[str, Any]]
     # Each author target's Environment inputs as the adapter reads them, in (namespace, name) form.
     result = {}
     for target in adapter.AUTHOR_TARGETS:
-        plane_id = (adapter.TYPELLM_PLANE if target == adapter.TYPELLM_BINDING
+        plane_id = (adapter.TYPELLM_PLANE if target in adapter.TYPELLM_CIPHERTEXTS
                     else adapter.GO_PLANE if target in adapter.GO_CIPHERTEXTS else "dev.authoring")
         secrets = {item["name"] for item in contracts["environments"][plane_id]["required_secrets"]}
         result[target] = {("secrets" if item["name"] in secrets else "vars", item["name"])
@@ -1289,6 +1290,9 @@ def check_readme(root: Path, environments: dict[str, dict[str, Any]]) -> None:
         "dev-authoring/TYPELLM_API_KEY",
         "ciphertexts/dev-typellm-api.oci-dev.sops.yaml",
         "`author --target typellm-api.oci-dev`",
+        "ciphertexts/dev-typellm-api.versapro-own-oci.sops.yaml",
+        "`author --target typellm-api.versapro-own-oci`",
+        "dev-authoring/VERSAPRO_OWN_OCI_AGE_RECIPIENT",
         "ciphertexts/dev-jev-api.oci-dev.sops.yaml",
         "ciphertexts/dev-opencode-go.oci-dev.sops.yaml",
         "`author --target opencode-go.oci-dev`",

@@ -144,7 +144,8 @@ def copy_root() -> Path:
     (target / jev.OCI_CIPHERTEXT).unlink(missing_ok=True)
     for path in jev.GO_CIPHERTEXTS.values():
         (target / path).unlink(missing_ok=True)
-    (target / jev.TYPELLM_CIPHERTEXT).unlink(missing_ok=True)
+    for path in jev.TYPELLM_CIPHERTEXTS.values():
+        (target / path).unlink(missing_ok=True)
     return target
 
 
@@ -170,7 +171,7 @@ def go_fixture_clear(root: Path) -> None:
     baseline = [p for p in ROOT.rglob("*") if included(p.relative_to(ROOT))]
     known_files = {p.relative_to(ROOT) for p in baseline if p.is_file()}
     known_dirs = {p.relative_to(ROOT) for p in baseline if p.is_dir()}
-    for path in (*jev.GO_CIPHERTEXTS.values(), jev.TYPELLM_CIPHERTEXT):
+    for path in (*jev.GO_CIPHERTEXTS.values(), *jev.TYPELLM_CIPHERTEXTS.values()):
         known_files.add(path)
         known_dirs.add(path.parent)
     observed = list(root.rglob("*"))
@@ -343,6 +344,7 @@ def test_targets_are_separate() -> None:
         jev.GO_BINDING: [jev.GO_KEY, jev.OCI_RECIPIENT],
         jev.OWN_GO_BINDING: [jev.GO_KEY, jev.OWN_GO_RECIPIENT],
         jev.TYPELLM_BINDING: [jev.TYPELLM_KEY, jev.OCI_RECIPIENT],
+        jev.OWN_TYPELLM_BINDING: [jev.TYPELLM_KEY, jev.OWN_TYPELLM_RECIPIENT],
     }
     try:
         jev.authoring_inputs(contracts, "rent-tunnel")
@@ -431,21 +433,25 @@ def test_author_go() -> None:
         go_fixture_clear(root)
 
 
-def test_author_typellm() -> None:
-    values = {jev.TYPELLM_KEY: TYPELLM_KEY, jev.OCI_RECIPIENT: OCI_RECIPIENT,
+def check_author_typellm_target(target: str, ciphertext_path: Path, recipient_name: str, recipient: str) -> None:
+    values = {jev.TYPELLM_KEY: TYPELLM_KEY, recipient_name: recipient,
               "ENVS_EFFECT_TOOLCHAIN": MANIFEST, "JEV_API_KEY": "unselected-jev",
               jev.GO_KEY: "unselected-go", "SOPS_AGE_RECIPIENTS": "unselected-list"}
-    good = oci_ciphertext(key=jev.TYPELLM_KEY)
+    # Both public recipient variables may exist; only the selected binding may be read.
+    unselected = jev.OCI_RECIPIENT if recipient_name != jev.OCI_RECIPIENT else jev.OWN_TYPELLM_RECIPIENT
+    values[unselected] = OCI_RECIPIENT if unselected == jev.OCI_RECIPIENT else OWN_RECIPIENT
+    good = oci_ciphertext(key=jev.TYPELLM_KEY, recipients=(recipient,))
     cases = [(values, good, 0, None, True)]
-    for name in (jev.TYPELLM_KEY, jev.OCI_RECIPIENT):
+    for name in (jev.TYPELLM_KEY, recipient_name):
         cases.append(({**values, name: ""}, good, 0, None, False))
-    for recipient in (f"{OCI_RECIPIENT},{OCI_OTHER}", "not-a-recipient"):
-        cases.append(({**values, jev.OCI_RECIPIENT: recipient}, good, 0, None, False))
-    for name in (TYPELLM_KEY, OCI_RECIPIENT):
+    for bad_recipient in (f"{recipient},{OCI_OTHER}", "not-a-recipient"):
+        cases.append(({**values, recipient_name: bad_recipient}, good, 0, None, False))
+    for name in (TYPELLM_KEY, recipient):
         cases.append((values, good, 0, name, False))
     for data in (oci_ciphertext(), oci_ciphertext(key=jev.GO_KEY),
+                 oci_ciphertext(key=jev.TYPELLM_KEY, recipients=(values[unselected],)),
                  oci_ciphertext(key=jev.TYPELLM_KEY, recipients=(OCI_OTHER,)),
-                 oci_ciphertext(key=jev.TYPELLM_KEY, recipients=(OCI_RECIPIENT, OCI_OTHER)),
+                 oci_ciphertext(key=jev.TYPELLM_KEY, recipients=(recipient, OCI_OTHER)),
                  oci_ciphertext(key=jev.TYPELLM_KEY, extra="note: plain\n"),
                  oci_ciphertext(key=jev.TYPELLM_KEY, extra=f"note: {TYPELLM_KEY}\n")):
         cases.append((values, data, 0, None, False))
@@ -464,24 +470,24 @@ def test_author_typellm() -> None:
 
             with environment(selected):
                 try:
-                    result = jev.author_oci(root, runner, target=jev.TYPELLM_BINDING)
+                    result = jev.author_oci(root, runner, target=target)
                 except jev.EnvsError as error:
                     assert not success and TYPELLM_KEY not in str(error)
                     assert snapshot(root) == before, "refused TypeLLM authoring changed source"
-                    if leaked is not None or selected[jev.TYPELLM_KEY] == "" or selected[jev.OCI_RECIPIENT] != OCI_RECIPIENT:
+                    if leaked is not None or selected[jev.TYPELLM_KEY] == "" or selected[recipient_name] != recipient:
                         assert not calls, "SOPS ran before the TypeLLM input gate"
                     continue
             assert success and len(calls) == 1
             argv, stdin, env = calls[0]
             assert json.loads(stdin) == {jev.TYPELLM_KEY: TYPELLM_KEY}
-            assert env["SOPS_AGE_RECIPIENTS"] == OCI_RECIPIENT
-            assert not {jev.TYPELLM_KEY, "JEV_API_KEY", jev.GO_KEY, jev.OCI_RECIPIENT} & env.keys()
+            assert env["SOPS_AGE_RECIPIENTS"] == recipient
+            assert not {jev.TYPELLM_KEY, "JEV_API_KEY", jev.GO_KEY, recipient_name, unselected} & env.keys()
             assert all(TYPELLM_KEY not in item for item in [*argv, *env.values()])
-            assert result["binding"] == jev.TYPELLM_BINDING and result["status"] == "PASS"
+            assert result["binding"] == target and result["status"] == "PASS"
             assert result["target_apply"] == result["application_runtime"] == "NOT_RUN"
             assert TYPELLM_KEY not in json.dumps(result)
             after = snapshot(root)
-            assert set(after) - set(before) == {jev.TYPELLM_CIPHERTEXT.as_posix()}
+            assert set(after) - set(before) == {ciphertext_path.as_posix()}
             assert all(after[name] == data for name, data in before.items())
             assert jev.validate_contracts(root)["environments"][jev.TYPELLM_PLANE]["migration_state"] == "NOT_CONFIGURED"
         finally:
@@ -491,13 +497,53 @@ def test_author_typellm() -> None:
                     oci_ciphertext(key=jev.TYPELLM_KEY, extra="note: plain\n")):
         root = copy_root()
         try:
-            (root / jev.TYPELLM_CIPHERTEXT).write_bytes(invalid)
+            (root / ciphertext_path).write_bytes(invalid)
             try:
                 jev.validate_contracts(root)
             except jev.EnvsError:
                 pass
             else:
                 raise AssertionError("invalid committed TypeLLM envelope was accepted")
+        finally:
+            go_fixture_clear(root)
+
+
+def test_author_typellm() -> None:
+    check_author_typellm_target(jev.TYPELLM_BINDING, jev.TYPELLM_CIPHERTEXT, jev.OCI_RECIPIENT, OCI_RECIPIENT)
+
+
+def test_author_own_typellm() -> None:
+    check_author_typellm_target(jev.OWN_TYPELLM_BINDING, jev.OWN_TYPELLM_CIPHERTEXT,
+                               jev.OWN_TYPELLM_RECIPIENT, OWN_RECIPIENT)
+
+
+def test_own_typellm_binding_red() -> None:
+    # The TypeLLM capability is closed to its own process-env receiver and recipient.
+    mutations = [
+        lambda row: row["target"].update({"host": "oci-dev"}),
+        lambda row: row["target"].update({"host": "versapro"}),
+        lambda row: row["target"].update({"repository": "roccho-dev/windows"}),
+        lambda row: row["target"].update({"kind": "pi_auth_command"}),
+        lambda row: row["target"].update({"secret_name": "JEV_API_KEY"}),
+        lambda row: row.update({"source_key": "JEV_API_KEY"}),
+        lambda row: row.update({"ciphertext": jev.TYPELLM_CIPHERTEXT.as_posix()}),
+        lambda row: row["required_variables"][0].update({"name": jev.OCI_RECIPIENT}),
+    ]
+    for change in mutations:
+        root = copy_root()
+        try:
+            path = root / jev.BINDINGS
+            rows = [json.loads(line) for line in path.read_text().splitlines() if line]
+            selected = [row for row in rows if row["id"] == jev.OWN_TYPELLM_BINDING]
+            assert len(selected) == 1
+            change(selected[0])
+            path.write_text("".join(json.dumps(row, separators=(",", ":")) + "\n" for row in rows))
+            try:
+                jev.validate_contracts(root)
+            except jev.EnvsError:
+                pass
+            else:
+                raise AssertionError("retargeted own TypeLLM binding accepted")
         finally:
             go_fixture_clear(root)
 
@@ -641,9 +687,9 @@ def test_author_own_go_red() -> None:
         try:
             path = root / jev.BINDINGS
             text = path.read_text()
-            own = '"repository":"roccho-dev/resources","host":"versapro-own-oci"'
+            own = '"repository":"roccho-dev/resources","host":"versapro-own-oci","kind":"pi_auth_command"'
             assert text.count(own) == 1
-            path.write_text(text.replace(own, f'"repository":"roccho-dev/resources","host":"{host}"'))
+            path.write_text(text.replace(own, f'"repository":"roccho-dev/resources","host":"{host}","kind":"pi_auth_command"'))
             try:
                 jev.validate_contracts(root)
             except jev.EnvsError:
@@ -1637,6 +1683,8 @@ def main() -> None:
         test_author_oci()
         test_author_go()
         test_author_typellm()
+        test_author_own_typellm()
+        test_own_typellm_binding_red()
         test_go_fixture_cleanup_refuses_foreign()
         test_targets_are_separate()
         test_author_oci_red()

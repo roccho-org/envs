@@ -13,6 +13,7 @@ on:
           - opencode-go.oci-dev
           - opencode-go.versapro-own-oci
           - typellm-api.oci-dev
+          - typellm-api.versapro-own-oci
 
 permissions:
   actions: read
@@ -110,6 +111,13 @@ jobs:
           TYPELLM_API_KEY: ${{ secrets.TYPELLM_API_KEY }}
           OCI_DEV_AGE_RECIPIENT: ${{ vars.OCI_DEV_AGE_RECIPIENT }}
         run: '"$ENVS_EFFECT_BIN/envs-effect" --root "$GITHUB_WORKSPACE" author --target typellm-api.oci-dev'
+
+      - name: Author TypeLLM VersaPro own OCI ciphertext
+        if: inputs.target == 'typellm-api.versapro-own-oci'
+        env:
+          TYPELLM_API_KEY: ${{ secrets.TYPELLM_API_KEY }}
+          VERSAPRO_OWN_OCI_AGE_RECIPIENT: ${{ vars.VERSAPRO_OWN_OCI_AGE_RECIPIENT }}
+        run: '"$ENVS_EFFECT_BIN/envs-effect" --root "$GITHUB_WORKSPACE" author --target typellm-api.versapro-own-oci'
 
       - name: Verify candidate tree
         run: '"$ENVS_EFFECT_BIN/python3" -I checks/repository.py'
