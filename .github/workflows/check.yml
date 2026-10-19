@@ -36,6 +36,9 @@ jobs:
       - name: Test repository oracle
         run: python3 checks/test_repository.py
 
+      - name: Test host binding shape and Tool acceptance
+        run: python3 checks/test_host_bindings.py
+
       - name: Test Jev adapter
         run: python3 checks/test_jev_api.py
 

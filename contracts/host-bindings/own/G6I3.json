@@ -15,5 +15,7 @@
   "knownHostsFile": "%USERPROFILE%\\.ssh\\known_hosts_windows_own",
   "windowsIdentityFile": "%USERPROFILE%\\.ssh\\id_ed25519_windows_own",
   "image": "ghcr.io/roccho-dev/windows-own@sha256:2442bc1b0d14e0cd82736cfd320b068d880ee01feb3588d2bda81faff9f00e86",
-  "imageFrom": "roccho-dev/resources Release windows-f859cc4b0a510d78e465fcf4c57be373678dad35; asset=own-image.json; source=f859cc4b0a510d78e465fcf4c57be373678dad35; workflow=ci; run=39032284166"
+  "imageFrom": "roccho-dev/resources Release windows-f859cc4b0a510d78e465fcf4c57be373678dad35; asset=own-image.json; source=f859cc4b0a510d78e465fcf4c57be373678dad35; workflow=ci; run=39032284166",
+  "tool": "/nix/store/lmsnmsn2yx0i3bkvqgc4wfj4jiisdx6r-own-tool-profile",
+  "toolFrom": "roccho-dev/resources Release windows-905330666ec33cd0c25ac1698ef35ec9b99af17a; asset=own-tool.json; url=https://github.com/roccho-dev/resources/releases/download/windows-905330666ec33cd0c25ac1698ef35ec9b99af17a/own-tool.json; assetDigest=sha256:8506d0b3b405ff00813bc5dc0a9e5bac9fac76fbc36c6bf1847c87081c1caae5; source=905330666ec33cd0c25ac1698ef35ec9b99af17a; workflow=ci; run=39195370763"
 }
