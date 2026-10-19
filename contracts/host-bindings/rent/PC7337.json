@@ -1,0 +1,9 @@
+{
+  "role": "rent",
+  "site": "PC7337",
+  "reposVolume": "repos",
+  "stateVolume": "windows-rent-state",
+  "nixVolume": "windows-rent-nix",
+  "image": "ghcr.io/roccho-dev/windows-rent@sha256:980b41f073c0b924f4d1cbecf73decbfc4c72222f5ca453a101c80fddcce3ecb",
+  "imageFrom": "roccho-dev/resources Release windows-f859cc4b0a510d78e465fcf4c57be373678dad35; asset=rent-image.json; url=https://github.com/roccho-dev/resources/releases/download/windows-f859cc4b0a510d78e465fcf4c57be373678dad35/rent-image.json; assetDigest=sha256:77ea5d0654df52b2221248ef07c90d9f01dbb14d200a2314d2fa648f3c27aef4; source=f859cc4b0a510d78e465fcf4c57be373678dad35; workflow=ci; run=39032284166"
+}
