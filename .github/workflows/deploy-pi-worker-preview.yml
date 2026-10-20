@@ -5,9 +5,9 @@ on:
     inputs:
       scope:
         type: choice
-        options: [screen, runtime]
+        options: [screen, runtime, runtime-diagnostic]
         default: screen
-        description: "Screen only, or separately reviewed finite owner runtime"
+        description: "Screen, finite owner runtime, or read-only runtime diagnostics"
 
 permissions:
   actions: read
@@ -66,6 +66,7 @@ jobs:
           echo "ENVS_EFFECT_ZIP=$art/envs-effect.zip" >>"$GITHUB_ENV"
 
       - name: Resolve the accepted Pi merge and require successful checks
+        if: inputs.scope != 'runtime-diagnostic'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -92,7 +93,7 @@ jobs:
           echo "Pi source: merged roccho-org/ops#563 source=$OPS_SHA on proposals"
 
       - name: Obtain the exact CI-built screen-only Worker
-        if: inputs.scope != 'runtime'
+        if: inputs.scope == 'screen'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -143,11 +144,11 @@ jobs:
           "$ENVS_EFFECT_BIN/wrangler" deploy --config "$art/runtime/wrangler.json" --name pi --no-bundle --dry-run
 
       - name: Native Wrangler dry-run before mapping Cloudflare credentials
-        if: inputs.scope != 'runtime'
+        if: inputs.scope == 'screen'
         run: '"$ENVS_EFFECT_BIN/wrangler" versions upload --config "$PI_SCREEN_DIR/wrangler.json" --name pi --no-bundle --dry-run'
 
       - name: Deploy only the screen preview using existing native auth
-        if: inputs.scope != 'runtime'
+        if: inputs.scope == 'screen'
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.PI_CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
@@ -229,6 +230,51 @@ jobs:
             exit "$operation_exit"
           fi
           exit "$readback_exit"
+      - name: Read-only runtime API capability diagnostics
+        if: inputs.scope == 'runtime-diagnostic'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.PI_CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          umask 077
+          test -n "$CLOUDFLARE_API_TOKEN" && test -n "$CLOUDFLARE_ACCOUNT_ID"
+          api="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers"
+          diagnostic_exit=0
+          for endpoint in services/pi scripts; do
+            body="$(mktemp "$RUNNER_TEMP/pi-capability.XXXXXX.json")"
+            if ! http="$(curl --silent --show-error --max-time 20 --request GET --output "$body" --write-out '%{http_code}' -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$api/$endpoint" 2> "$body.stderr")"; then
+              http=000
+            fi
+            if ! "$ENVS_EFFECT_BIN/python3" -I - "$endpoint" "$http" "$body" <<'PY'
+          import json, re, sys
+          from pathlib import Path
+          endpoint, http, filename = sys.argv[1:]
+          try:
+              value = json.loads(Path(filename).read_text())
+          except (ValueError, OSError):
+              value = None
+          valid = isinstance(value, dict) and isinstance(value.get("success"), bool)
+          if valid and value["success"]:
+              result = value.get("result")
+              valid = isinstance(result, dict) if endpoint == "services/pi" else (isinstance(result, list) and all(isinstance(item, dict) and isinstance(item.get("id"), str) for item in result))
+          success = value.get("success") if valid else None
+          codes = sorted({error["code"] for error in value.get("errors", [])
+                          if isinstance(error, dict) and type(error.get("code")) is int}) if valid and isinstance(value.get("errors", []), list) else []
+          present = None
+          if valid and success and endpoint == "scripts" and isinstance(value.get("result"), list):
+              present = any(isinstance(item, dict) and item.get("id") == "pi" for item in value["result"])
+          print(json.dumps({"scope":"READ_ONLY_OBSERVATION_NOT_DEPLOYMENT",
+                            "endpoint":endpoint, "http":http if re.fullmatch(r"[0-9]{3}", http) else "UNKNOWN",
+                            "success":success, "codes":codes, "target_pi_present":present}, separators=(",", ":")))
+          sys.exit(0 if success is True and http == "200" else 1)
+          PY
+            then
+              diagnostic_exit=1
+            fi
+          done
+          exit "$diagnostic_exit"
+
       - name: Apply finite owner runtime migration and existing Jev binding
         if: inputs.scope == 'runtime'
         env:
@@ -262,9 +308,26 @@ jobs:
           }
           path.write_text(json.dumps(config, indent=2) + "\n")
           PY
+          report_api_error() {
+            "$ENVS_EFFECT_BIN/python3" -I -c '
+          import json, re, sys
+          from pathlib import Path
+          raw = ""
+          for filename in sys.argv[2:]:
+              try:
+                  raw += Path(filename).read_text(errors="replace") + "\n"
+              except OSError:
+                  pass
+          raw = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", raw)
+          paths = sorted(set(re.findall(r"A request to the Cloudflare API \((/accounts/[0-9a-f]{32}/workers/[A-Za-z0-9_/-]+|/memberships)\) failed\.", raw)))
+          codes = sorted(set(int(code) for code in re.findall(r"\[code: ([0-9]{1,10})\]", raw)))
+          if paths or codes:
+              print(json.dumps({"phase": sys.argv[1], "api_paths": paths, "codes": codes}, separators=(",", ":")))
+          ' "$@" 2> "$RUNNER_TEMP/pi-api-diagnostic.stderr" || echo "pi diagnostic exit=$?"
+          }
           failed_write_readback() {
             local pi_phase="$1"
-            grep -hoE '\[code: [0-9]+\]' "$RUNNER_TEMP/pi-runtime-$pi_phase.stderr" || true
+            report_api_error "$pi_phase" "$RUNNER_TEMP/pi-runtime-$pi_phase.stdout" "$RUNNER_TEMP/pi-runtime-$pi_phase.stderr"
             if "$ENVS_EFFECT_BIN/wrangler" deployments status --name pi --json > "$RUNNER_TEMP/pi-runtime-failed-status.json" 2> "$RUNNER_TEMP/pi-runtime-failed-status.stderr"; then
               jq -ce '{scope:"FAILED_WRITE_CURRENT_STATE_ONLY",versions:[.versions[]|{version_id,percentage}]}' "$RUNNER_TEMP/pi-runtime-failed-status.json" || true
             fi

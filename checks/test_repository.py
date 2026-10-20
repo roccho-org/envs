@@ -295,11 +295,69 @@ print(json.dumps({"success":True,"result":result}))
     print("PI_RUNTIME_FIXTURES=PASS: 10 migration/ordering/provenance/owner/privacy cases")
 
 
+def pi_diagnostic_fixtures() -> None:
+    """Execute actual two-GET diagnostics; denial is an observation, never a write retry."""
+    bash = shutil.which("bash")
+    assert bash
+    source = (ROOT / ".github/workflows/deploy-pi-worker-preview.yml").read_text()
+    script = textwrap.dedent(source.split(
+        "      - name: Read-only runtime API capability diagnostics\n", 1)[1].split(
+        "      - name: Apply finite owner runtime migration and existing Jev binding\n", 1)[0].split("        run: |\n", 1)[1])
+    with tempfile.TemporaryDirectory(prefix="envs-pi-diagnostic-") as scratch:
+        tools = Path(scratch) / "bin"
+        tools.mkdir()
+        (tools / "python3").symlink_to(sys.executable)
+        curl = tools / "curl"
+        curl.write_text("""#!PYTHON
+import json, os, sys
+from pathlib import Path
+args = sys.argv[1:]
+assert args[args.index("--request")+1] == "GET"
+assert "--location" not in args and "--retry" not in args
+endpoint = args[-1].split("/workers/",1)[1]
+assert endpoint in ("services/pi", "scripts")
+trace = Path(os.environ["PI_DIAGNOSTIC_TRACE"])
+with trace.open("a") as stream: stream.write(endpoint+"\\n")
+mode = os.environ["PI_DIAGNOSTIC_CASE"]
+if mode == "network" and endpoint == "services/pi": sys.exit(7)
+denied = (mode == "service-denied" and endpoint == "services/pi") or (mode == "scripts-denied" and endpoint == "scripts")
+value = {"success":not denied,"errors":[{"code":10000,"message":"fixture-private-body"}] if denied else [],
+         "result":[{"id":"pi"},{"id":"private-other-worker"}] if endpoint=="scripts" else {"id":"pi","email":"private@example.invalid"}}
+body = Path(args[args.index("--output")+1])
+if mode == "wrongshape": value["result"] = "fixture-private-body"
+body.write_text("fixture-private-body" if mode=="malformed" else json.dumps(value))
+print("403" if denied else "200", end="")
+""".replace("#!PYTHON", "#!"+sys.executable))
+        curl.chmod(0o700)
+        for mode in ("success","service-denied","scripts-denied","malformed","wrongshape","network"):
+            current = Path(scratch) / mode
+            current.mkdir()
+            trace = current / "calls"
+            result = subprocess.run([bash,"-c",script], capture_output=True,text=True,env={
+                **os.environ,"PATH":str(tools)+os.pathsep+os.environ["PATH"],
+                "ENVS_EFFECT_BIN":str(tools),"RUNNER_TEMP":str(current),
+                "CLOUDFLARE_API_TOKEN":"fixture-private-token","CLOUDFLARE_ACCOUNT_ID":"fixture-account",
+                "PI_DIAGNOSTIC_CASE":mode,"PI_DIAGNOSTIC_TRACE":str(trace)})
+            assert (result.returncode==0) == (mode=="success"), (mode,result.stdout,result.stderr)
+            assert trace.read_text().splitlines() == ["services/pi","scripts"]
+            assert not any(secret in result.stdout+result.stderr for secret in
+                           ("fixture-private","private-other-worker","private@example.invalid")), mode
+            rows = [json.loads(line) for line in result.stdout.splitlines()]
+            assert len(rows)==2 and all(row["scope"]=="READ_ONLY_OBSERVATION_NOT_DEPLOYMENT" for row in rows)
+            if mode=="success": assert rows[1]["target_pi_present"] is True
+            if mode=="service-denied": assert rows[0]["codes"]==[10000] and rows[1]["success"] is True
+            if mode=="scripts-denied": assert rows[1]["codes"]==[10000] and rows[0]["success"] is True
+            if mode in ("malformed","wrongshape"): assert all(row["success"] is None for row in rows)
+            if mode=="network": assert rows[0]["http"]=="000" and rows[1]["success"] is True
+    print("PI_READ_ONLY_DIAGNOSTIC_FIXTURES=PASS: 6 capability/denial/schema/network/privacy cases")
+
+
 def main() -> None:
     baseline = repository.inspect(ROOT)
     assert baseline["status"] == "PASS"
     assert baseline["canonical_branch"] == "proposals"
     assert baseline["retained_compatibility_branch"] == "main"
+    pi_diagnostic_fixtures()
     pi_runtime_fixtures()
     pi_native_versions_fixtures()
 

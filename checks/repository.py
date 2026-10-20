@@ -1022,9 +1022,9 @@ def pi_screen_projection(source: str) -> str:
     inputs:
       scope:
         type: choice
-        options: [screen, runtime]
+        options: [screen, runtime, runtime-diagnostic]
         default: screen
-        description: "Screen only, or separately reviewed finite owner runtime"
+        description: "Screen, finite owner runtime, or read-only runtime diagnostics"
 """
     require(dispatch in source and "inputs.ops_sha" not in source,
             "Pi scope is explicit; screen remains default; source is never caller supplied")
@@ -1052,13 +1052,30 @@ def pi_screen_projection(source: str) -> str:
             "No persistent ChatGPT credential admission")
     require(source.count('.base_commit.sha == $sha and (.status == "identical" or .status == "ahead")') == 2,
             "Both runtime and screen require canonical ancestry")
+    diagnostic = source.split("      - name: Read-only runtime API capability diagnostics\n", 1)[1].split("      - name: Apply finite owner runtime migration and existing Jev binding\n", 1)[0]
+    require("if: inputs.scope == 'runtime-diagnostic'" in diagnostic
+            and "for endpoint in services/pi scripts; do" in diagnostic
+            and "--request GET" in diagnostic and "--max-time 20" in diagnostic
+            and "READ_ONLY_OBSERVATION_NOT_DEPLOYMENT" in diagnostic,
+            "Runtime diagnostics require explicit bounded two-GET observations")
+    require(set(INPUT_REFERENCE.findall(diagnostic)) == {
+        ("secrets", "PI_CLOUDFLARE_API_TOKEN"), ("vars", "CLOUDFLARE_ACCOUNT_ID")},
+        "Diagnostic admits only existing limited token/account, never Jev")
+    for forbidden in ("--request POST", "--request PUT", "--request DELETE", "--location",
+                      "--retry", "wrangler", "JEV", "error.get(\"message\")"):
+        require(forbidden not in diagnostic, f"Diagnostic is read-only/private: {forbidden}")
+    require(source.count("if: inputs.scope == 'screen'") == 3
+            and "if: inputs.scope != 'runtime'" not in source
+            and "if: inputs.scope != 'runtime-diagnostic'" in source,
+            "Diagnostic must not enter screen/runtime source or effect branches")
+    source = source.replace("        if: inputs.scope != 'runtime-diagnostic'\n", "")
     source = source.replace(dispatch, "  workflow_dispatch:\n")
     before, rest = source.split('          if [[ "${{ inputs.scope }}" == runtime ]]; then\n', 1)
     source = before + rest.split("          fi\n", 1)[1]
     before, rest = source.split("      - name: Obtain separately admitted owner runtime from successful canonical CI\n", 1)
     source = before + "      - name: Native Wrangler dry-run before mapping Cloudflare credentials\n" + rest.split("      - name: Native Wrangler dry-run before mapping Cloudflare credentials\n", 1)[1]
-    source = source.split("\n      - name: Apply finite owner runtime migration and existing Jev binding\n", 1)[0] + "\n"
-    return source.replace("        if: inputs.scope != 'runtime'\n", "")
+    source = source.split("\n      - name: Read-only runtime API capability diagnostics\n", 1)[0] + "\n"
+    return source.replace("        if: inputs.scope == 'screen'\n", "")
 
 
 def check_pi_worker_preview(source: str, canonical_consumer: str) -> None:
