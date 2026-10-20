@@ -265,6 +265,15 @@ elif url.endswith("/subdomain"):
     Path(args[args.index("--output")+1]).write_text(json.dumps({"success":not denied,"result":result}))
     print("403" if denied else "200",end="")
     sys.exit(0)
+elif url.endswith("/script-settings"):
+    kind="script-settings"
+    result={"observability":{"enabled":False,"destinations":["fixture-private-destination"]}}
+    if mode=="obs-absent": result={}
+    if mode=="obs-null": result["observability"]=None
+    if mode=="obs-wrong": result["observability"]={"enabled":"false"}
+    if mode=="obs-true": result["observability"]["enabled"]=True
+    if mode=="obs-denied":
+        calls.append(kind); trace.write_text(json.dumps(calls)); sys.exit(22)
 elif url.endswith("/settings"):
     kind = "settings"
     config = Path(os.environ["PI_RUNTIME_DIR"],"wrangler.json")
@@ -276,7 +285,8 @@ elif url.endswith("/settings"):
     if mode=="namespace-duplicate": sessions*=2
     bindings=[{"type":"plain_text","name":k,"text":v} for k,v in vars.items()]+sessions
     if "secret" in calls: bindings += [{"type":"secret_text","name":"PI_JEV_PROOF_API_KEY"}]
-    result={"bindings":bindings,"observability":{"enabled":False},"author_email":"fixture-private@example.invalid"}
+    result={"bindings":bindings,"author_email":"fixture-private@example.invalid"}
+    if mode.startswith("obs-"): result["observability"]={"enabled":False}
 else:
     assert "/scripts/pi/versions/" in url,url
     kind="version"
@@ -305,7 +315,8 @@ print(json.dumps({"success":True,"result":result}))
            "latest-missing","latest-duplicate","latest-malformed","readback-unavailable",
            "subdomain-disabled","subdomain-preview","subdomain-denied","post-subdomain-preview",
            "post-subdomain-disabled","post-subdomain-denied","namespace-missing","namespace-duplicate",
-           "namespace-empty","namespace-changed","post-latest-unknown","upload-receipt")
+           "namespace-empty","namespace-changed","post-latest-unknown","upload-receipt",\
+           "obs-absent","obs-null","obs-wrong","obs-true","obs-denied")
     for mode in cases:
         current=scratch/mode
         current.mkdir()
@@ -335,7 +346,8 @@ print(json.dumps({"success":True,"result":result}))
         if mode=="deployed-mismatch": assert "upload" in calls and "version-deploy" not in calls and "secret" not in calls,calls
         if mode=="changed-current": assert "secret" in calls and calls.count("status")>=3,calls
         if mode.startswith("post-subdomain-"): assert "secret" in calls and calls.count("subdomain")==2,calls
-        if mode=="namespace-changed": assert "secret" in calls and calls[-1]=="settings",calls
+        if mode=="namespace-changed": assert "secret" in calls and calls[-1]=="script-settings",calls
+        if mode.startswith("obs-"): assert "secret" in calls and calls[-1]=="script-settings",calls
         if mode=="post-latest-unknown": assert "secret" in calls and calls.count("latest")==2,calls
         if mode=="upload-receipt": assert calls[-1]=="upload" and "version-deploy" not in calls,calls
         phases=[line.split("=",1)[1] for line in result.stderr.splitlines() if line.startswith("PI_RUNTIME_PHASE=")]
@@ -349,11 +361,13 @@ print(json.dumps({"success":True,"result":result}))
         if mode.startswith("subdomain-"): expected_phase="subdomain-before"
         if mode.startswith("post-subdomain-"): expected_phase="subdomain-after"
         if mode in ("history","current-absent","current-empty","malformed"): expected_phase="current-tag"
+        if mode.startswith("obs-"): expected_phase="final-observability"
         assert phases[-1]==expected_phase,(mode,phases)
         if mode=="success":
-            assert calls==["settings","status","version","latest","subdomain","upload","version","version-deploy","secret","status","settings","version","subdomain","latest","status"],calls
+            assert calls==["settings","status","version","latest","subdomain","upload","version","version-deploy","secret","status","settings","script-settings","version","subdomain","latest","status"],calls
             receipt=json.loads(result.stdout)
             assert receipt["version"].endswith("000000000003") and receipt["route"]=="KNOWN_MIGRATION_VERSIONS_RECOVERY"
+            assert receipt["observability"]=={"enabled":False} and "destinations" not in result.stdout
         if mode in ("upload-fail","version-deploy-fail","secret-fail","readback-unavailable"):
             rows=[json.loads(line) for line in result.stdout.splitlines() if line.startswith("{")]
             observed=next(row for row in rows if row.get("scope")=="FAILED_WRITE_CURRENT_AND_LATEST_OBSERVATIONS_ONLY")
@@ -386,18 +400,24 @@ assert args[args.index("--request")+1]=="GET"
 assert "--location" not in args and "--retry" not in args
 endpoint=args[-1].split("/workers/",1)[1]
 current="00000000-0000-4000-8000-000000000001"
-assert endpoint in ("scripts/pi/settings","scripts/pi/deployments","scripts","scripts/pi/subdomain","scripts/pi/versions/"+current)
+assert endpoint in ("scripts/pi/settings","scripts/pi/script-settings","scripts/pi/deployments","scripts","scripts/pi/subdomain","scripts/pi/versions/"+current)
 trace=Path(os.environ["PI_DIAGNOSTIC_TRACE"])
 with trace.open("a") as stream: stream.write(endpoint+"\\n")
 mode=os.environ["PI_DIAGNOSTIC_CASE"]
 if mode=="network" and endpoint=="scripts/pi/settings": sys.exit(7)
-denied=(mode=="settings-denied" and endpoint=="scripts/pi/settings") or (mode=="current-denied" and endpoint=="scripts/pi/deployments") or (mode=="latest-denied" and endpoint=="scripts") or (mode=="subdomain-denied" and endpoint=="scripts/pi/subdomain") or (mode=="version-denied" and endpoint.startswith("scripts/pi/versions/"))
+denied=(mode=="settings-denied" and endpoint=="scripts/pi/settings") or (mode=="current-denied" and endpoint=="scripts/pi/deployments") or (mode=="latest-denied" and endpoint=="scripts") or (mode=="subdomain-denied" and endpoint=="scripts/pi/subdomain") or (mode=="version-denied" and endpoint.startswith("scripts/pi/versions/")) or (mode=="obs-denied" and endpoint=="scripts/pi/script-settings")
 if endpoint=="scripts/pi/settings":
     bindings=[{"name":"SESSIONS","type":"durable_object_namespace","class_name":"Session","namespace_id":"fixture-private-namespace"},
               {"name":"PI_JEV_PROOF_API_KEY","type":"secret_text"}]
     if mode=="namespace-missing": bindings=[]
     if mode=="settings-shape": bindings="fixture-private-body"
-    result={"bindings":bindings,"observability":{"enabled":False},"email":"fixture-private@example.invalid"}
+    result={"bindings":bindings,"email":"fixture-private@example.invalid"}
+    if mode.startswith("obs-"): result["observability"]={"enabled":False}
+elif endpoint=="scripts/pi/script-settings":
+    result={"observability":{"enabled":mode=="obs-true","destinations":["fixture-private-destination"]}}
+    if mode=="obs-absent": result={}
+    if mode=="obs-null": result["observability"]=None
+    if mode=="obs-wrong": result["observability"]={"enabled":"false"}
 elif endpoint=="scripts/pi/deployments":
     result={"deployments":[{"versions":[{"version_id":"fixture-private-invalid" if mode=="current-shape" else current,"percentage":100}]}]}
 elif endpoint=="scripts":
@@ -414,7 +434,7 @@ print("403" if denied else "200",end="")
         curl.chmod(0o700)
         cases=("success","settings-denied","current-denied","latest-denied","subdomain-denied","version-denied",
                "malformed-json","settings-shape","current-shape","latest-duplicate","unknown-tag","network",
-               "subdomain-unmet","namespace-missing","version-shape")
+               "subdomain-unmet","namespace-missing","version-shape","obs-absent","obs-null","obs-wrong","obs-true","obs-denied")
         for mode in cases:
             current=Path(scratch)/mode
             current.mkdir()
@@ -424,23 +444,27 @@ print("403" if denied else "200",end="")
                 "ENVS_EFFECT_BIN":str(tools),"RUNNER_TEMP":str(current),
                 "CLOUDFLARE_API_TOKEN":"fixture-private-token","CLOUDFLARE_ACCOUNT_ID":"fixture-account",
                 "PI_DIAGNOSTIC_CASE":mode,"PI_DIAGNOSTIC_TRACE":str(trace)})
-            assert (result.returncode==0)==(mode in ("success","unknown-tag","subdomain-unmet","namespace-missing")),(mode,result.stdout,result.stderr)
+            assert (result.returncode==0)==(mode in ("success","unknown-tag","subdomain-unmet","namespace-missing","obs-true")),(mode,result.stdout,result.stderr)
             calls=trace.read_text().splitlines()
-            assert calls[:4]==["scripts/pi/settings","scripts/pi/deployments","scripts","scripts/pi/subdomain"],calls
-            assert len(calls)==(4 if mode in ("current-denied","current-shape") else 5),calls
+            assert calls[:5]==["scripts/pi/settings","scripts/pi/script-settings","scripts/pi/deployments","scripts","scripts/pi/subdomain"],calls
+            assert len(calls)==(5 if mode in ("current-denied","current-shape") else 6),calls
             assert "fixture-private" not in result.stdout+result.stderr,mode
             rows=[json.loads(line) for line in result.stdout.splitlines()]
-            assert len(rows)==5 and all(row["scope"]=="READ_ONLY_OBSERVATION_NOT_DEPLOYMENT" for row in rows),rows
+            assert len(rows)==6 and all(row["scope"]=="READ_ONLY_OBSERVATION_NOT_DEPLOYMENT" for row in rows),rows
             if mode=="success":
                 assert rows[0]["session_binding_count"]==1 and rows[0]["session_type_ok"] and rows[0]["session_class_ok"]
                 assert len(rows[0]["namespace_id_sha256"])==64 and rows[0]["jev_binding_present"] is True
-                assert rows[0]["owner_vars_match"] is False and rows[0]["observability_disabled"] is True
-                assert rows[2]["latest_pi_migration_tag"]=="pi-jev-proof-v1" and len(rows[4]["code_etag_sha256"])==64
-            if mode in ("current-denied","current-shape"): assert rows[4]["http"]=="NOT_REQUESTED" and rows[4]["current_migration_tag"]=="UNKNOWN"
-            if mode=="unknown-tag": assert rows[2]["latest_pi_migration_tag"]=="UNKNOWN"
-            if mode=="subdomain-unmet": assert rows[3]["enabled"] is False and rows[3]["previews_enabled"] is True
+                assert rows[0]["owner_vars_match"] is False and rows[1]["observability_disabled"] is True
+                assert rows[3]["latest_pi_migration_tag"]=="pi-jev-proof-v1" and len(rows[5]["code_etag_sha256"])==64
+            if mode in ("current-denied","current-shape"): assert rows[5]["http"]=="NOT_REQUESTED" and rows[5]["current_migration_tag"]=="UNKNOWN"
+            if mode=="unknown-tag": assert rows[3]["latest_pi_migration_tag"]=="UNKNOWN"
+            if mode=="subdomain-unmet": assert rows[4]["enabled"] is False and rows[4]["previews_enabled"] is True
             if mode=="namespace-missing": assert rows[0]["session_binding_count"]==0 and rows[0]["namespace_id_sha256"]=="UNKNOWN"
-            if mode=="version-shape": assert rows[4]["current_migration_tag"]=="UNKNOWN" and rows[4]["code_etag_sha256"]=="UNKNOWN"
+            if mode=="version-shape": assert rows[5]["current_migration_tag"]=="UNKNOWN" and rows[5]["code_etag_sha256"]=="UNKNOWN"
+            if mode.startswith("obs-"):
+                assert rows[1]["observability_disabled"] is (False if mode=="obs-true" else None),rows[1]
+                if mode in ("obs-absent","obs-null","obs-wrong"):
+                    assert rows[1]["observability_shape"]=={"obs-absent":"ABSENT","obs-null":"NULL","obs-wrong":"MALFORMED"}[mode]
             for capture in current.glob("pi-observe-*"):
                 assert capture.stat().st_mode & 0o077==0,capture
     print(f"PI_READ_ONLY_DIAGNOSTIC_FIXTURES=PASS: {len(cases)} bounded-state/denial/schema/namespace/privacy cases")

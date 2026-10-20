@@ -286,7 +286,6 @@ jobs:
                        "PI_ACCESS_ISSUER":"https://roccho.cloudflareaccess.com",
                        "PI_ACCESS_AUDIENCE":"3a4db113aeffcad6dcfc27afc21abc1a1c30a4cf1ea2584e4cda7b4edd8319bf",
                        "PI_ACCESS_OWNER_HASH":"7c51a47a695796b59dd322db878b455cdc725790797a2c388a348a78bd5527b2"}
-              obs = result.get("observability") if isinstance(result, dict) else None
               state = {"session_binding_count":len(sessions) if valid else None,
                        "session_type_ok":session.get("type") == "durable_object_namespace" if len(sessions) == 1 else None,
                        "session_class_ok":session.get("class_name") == "Session" if len(sessions) == 1 else None,
@@ -294,8 +293,15 @@ jobs:
                        "jev_binding_present":any(row.get("name") == "PI_JEV_PROOF_API_KEY" and row.get("type") == "secret_text" for row in bindings) if valid else None,
                        "bootstrap_present":any(row.get("name") == "PI_CHATGPT_BOOTSTRAP" for row in bindings) if valid else None,
                        "unexpected_secret_count":sum(row.get("type") == "secret_text" and row.get("name") != "PI_JEV_PROOF_API_KEY" for row in bindings) if valid else None,
-                       "owner_vars_match":all(variables.get(key) == expected for key, expected in owner.items()) if valid else None,
-                       "observability_disabled":obs["enabled"] is False if isinstance(obs, dict) and type(obs.get("enabled")) is bool else None}
+                       "owner_vars_match":all(variables.get(key) == expected for key, expected in owner.items()) if valid else None}
+          elif endpoint == "scripts/pi/script-settings":
+              obs = result.get("observability") if isinstance(result, dict) else None
+              shape = ("UNKNOWN" if not isinstance(result, dict) else "ABSENT" if "observability" not in result else
+                       "NULL" if obs is None else
+                       "BOOLEAN" if isinstance(obs, dict) and type(obs.get("enabled")) is bool else "MALFORMED")
+              valid = isinstance(result, dict) and isinstance(obs, dict) and type(obs.get("enabled")) is bool
+              state = {"observability_shape":shape,"observability_enabled":obs["enabled"] if valid else None,
+                       "observability_disabled":obs["enabled"] is False if valid else None}
           elif endpoint == "scripts/pi/deployments":
               deployments = result.get("deployments") if isinstance(result, dict) else None
               versions = deployments[0].get("versions") if isinstance(deployments, list) and deployments and isinstance(deployments[0], dict) else None
@@ -325,8 +331,8 @@ jobs:
               diagnostic_exit=1
             fi
           }
-          # Four fixed reads plus at most one version read derived from a validated current UUID.
-          for endpoint in scripts/pi/settings scripts/pi/deployments scripts scripts/pi/subdomain; do
+          # Five fixed reads plus at most one version read derived from a validated current UUID.
+          for endpoint in scripts/pi/settings scripts/pi/script-settings scripts/pi/deployments scripts scripts/pi/subdomain; do
             observe_get "$endpoint"
           done
           current_file="$RUNNER_TEMP/pi-observe-scripts-pi-deployments"
@@ -473,7 +479,10 @@ jobs:
           version="$(jq -r .versions[0].version_id "$RUNNER_TEMP/pi-runtime-deployment.json")"
           echo PI_RUNTIME_PHASE=final-settings >&2
           curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$api/scripts/pi/settings" > "$RUNNER_TEMP/pi-runtime-settings.json"
-          jq -e '.success == true and any(.result.bindings[]; .name == "SESSIONS" and .type == "durable_object_namespace" and .class_name == "Session") and any(.result.bindings[]; .name == "PI_JEV_PROOF_API_KEY" and .type == "secret_text") and all(.result.bindings[]; .name != "PI_CHATGPT_BOOTSTRAP") and .result.observability.enabled == false' "$RUNNER_TEMP/pi-runtime-settings.json" >/dev/null
+          jq -e '.success == true and any(.result.bindings[]; .name == "SESSIONS" and .type == "durable_object_namespace" and .class_name == "Session") and any(.result.bindings[]; .name == "PI_JEV_PROOF_API_KEY" and .type == "secret_text") and all(.result.bindings[]; .name != "PI_CHATGPT_BOOTSTRAP")' "$RUNNER_TEMP/pi-runtime-settings.json" >/dev/null
+          echo PI_RUNTIME_PHASE=final-observability >&2
+          curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$api/scripts/pi/script-settings" > "$RUNNER_TEMP/pi-runtime-script-settings.json"
+          jq -e '.success == true and (.result.observability.enabled | type == "boolean") and .result.observability.enabled == false' "$RUNNER_TEMP/pi-runtime-script-settings.json" >/dev/null
           echo PI_RUNTIME_PHASE=final-namespace >&2
           jq -e --arg namespace "$namespace" '(.result.bindings | map(select(.name == "SESSIONS"))) as $sessions | ($sessions | length == 1) and $sessions[0].namespace_id == $namespace' "$RUNNER_TEMP/pi-runtime-settings.json" >/dev/null
           echo PI_RUNTIME_PHASE=final-code >&2
@@ -491,4 +500,4 @@ jobs:
           jq -e --arg version "$version" '(.versions | length) == 1 and .versions[0].percentage == 100 and .versions[0].version_id == $version' "$RUNNER_TEMP/pi-runtime-confirmation.json" >/dev/null
           # A bounded consistent snapshot, not a guarantee against every future writer.
           echo PI_RUNTIME_PHASE=receipt >&2
-          jq -c --arg version "$version" --arg deployed "$deployed" --arg etag "$etag" --arg source "$OPS_SHA" '{scope:"DEPLOYMENT_ONLY_NOT_INFERENCE",route:"KNOWN_MIGRATION_VERSIONS_RECOVERY",ops_sha:$source,version:$version,deployed_version:$deployed,code_etag:$etag,migration_tag:"pi-jev-proof-v1",bindings:[.result.bindings[] | {name,type,class_name,namespace_id}],observability:.result.observability}' "$RUNNER_TEMP/pi-runtime-settings.json"
+          jq -c --slurpfile script_settings "$RUNNER_TEMP/pi-runtime-script-settings.json" --arg version "$version" --arg deployed "$deployed" --arg etag "$etag" --arg source "$OPS_SHA" '{scope:"DEPLOYMENT_ONLY_NOT_INFERENCE",route:"KNOWN_MIGRATION_VERSIONS_RECOVERY",ops_sha:$source,version:$version,deployed_version:$deployed,code_etag:$etag,migration_tag:"pi-jev-proof-v1",bindings:[.result.bindings[] | {name,type,class_name,namespace_id}],observability:{enabled:$script_settings[0].result.observability.enabled}}' "$RUNNER_TEMP/pi-runtime-settings.json"

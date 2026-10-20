@@ -1042,7 +1042,9 @@ def pi_screen_projection(source: str) -> str:
         '[.result[] | select(.id == "pi")] | length == 1',
         'FAILED_WRITE_CURRENT_AND_LATEST_OBSERVATIONS_ONLY',
         'latest_pi_migration_tag', 'current_migration_tag',
-        'KNOWN_MIGRATION_VERSIONS_RECOVERY', 'require_existing_subdomain before',
+        'KNOWN_MIGRATION_VERSIONS_RECOVERY', '"$api/scripts/pi/script-settings"',
+        '--slurpfile script_settings "$RUNNER_TEMP/pi-runtime-script-settings.json"',
+        'observability:{enabled:$script_settings[0].result.observability.enabled}', 'require_existing_subdomain before',
         'require_existing_subdomain after', '--arg namespace "$namespace"',
         'failed_write_readback upload', 'failed_write_readback version-deploy',
     ):
@@ -1064,10 +1066,10 @@ def pi_screen_projection(source: str) -> str:
             "Both runtime and screen require canonical ancestry")
     diagnostic = source.split("      - name: Read-only runtime API capability diagnostics\n", 1)[1].split("      - name: Recover finite owner runtime with its existing migration and Jev binding\n", 1)[0]
     require("if: inputs.scope == 'runtime-diagnostic'" in diagnostic
-            and "for endpoint in scripts/pi/settings scripts/pi/deployments scripts scripts/pi/subdomain; do" in diagnostic
+            and "for endpoint in scripts/pi/settings scripts/pi/script-settings scripts/pi/deployments scripts scripts/pi/subdomain; do" in diagnostic
             and "--request GET" in diagnostic and "--max-time 20" in diagnostic
             and "READ_ONLY_OBSERVATION_NOT_DEPLOYMENT" in diagnostic,
-            "Runtime diagnostics require explicit bounded two-GET observations")
+            "Runtime diagnostics require explicit bounded state observations")
     require(set(INPUT_REFERENCE.findall(diagnostic)) == {
         ("secrets", "PI_CLOUDFLARE_API_TOKEN"), ("vars", "CLOUDFLARE_ACCOUNT_ID")},
         "Diagnostic admits only existing limited token/account, never Jev")
