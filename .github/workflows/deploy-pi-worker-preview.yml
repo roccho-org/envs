@@ -294,6 +294,9 @@ jobs:
           curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$api/scripts/pi/versions/$prior" > "$RUNNER_TEMP/pi-runtime-history.json"
           # Wrangler4.93 treats omitted optional tag as initial migration; no claim of complete history absence.
           jq -e --arg prior "$prior" '.success == true and .result.id == $prior and (.result.resources.script_runtime | type == "object") and (.result.resources.script_runtime | (has("migration_tag") | not) or (.migration_tag | type == "string" and (. == "" or . == "pi-jev-proof-v1")))' "$RUNNER_TEMP/pi-runtime-history.json" >/dev/null
+          # Wrangler reads this latest script tag; it is distinct from the current deployed version above.
+          curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$api/scripts" > "$RUNNER_TEMP/pi-runtime-latest.json"
+          jq -e '.success == true and (.result | type == "array") and ([.result[] | select(.id == "pi")] | length == 1) and ([.result[] | select(.id == "pi")][0] | (has("migration_tag") | not) or (.migration_tag | type == "string" and (. == "" or . == "pi-jev-proof-v1")))' "$RUNNER_TEMP/pi-runtime-latest.json" >/dev/null
           # Unknown prior migration history stops before writes; never delete data or widen credentials.
           "$ENVS_EFFECT_BIN/python3" -I - "$PI_RUNTIME_DIR/wrangler.json" <<'PY'
           import json, pathlib, sys
@@ -328,9 +331,40 @@ jobs:
           failed_write_readback() {
             local pi_phase="$1"
             report_api_error "$pi_phase" "$RUNNER_TEMP/pi-runtime-$pi_phase.stdout" "$RUNNER_TEMP/pi-runtime-$pi_phase.stderr"
-            if "$ENVS_EFFECT_BIN/wrangler" deployments status --name pi --json > "$RUNNER_TEMP/pi-runtime-failed-status.json" 2> "$RUNNER_TEMP/pi-runtime-failed-status.stderr"; then
-              jq -ce '{scope:"FAILED_WRITE_CURRENT_STATE_ONLY",versions:[.versions[]|{version_id,percentage}]}' "$RUNNER_TEMP/pi-runtime-failed-status.json" || true
+            "$ENVS_EFFECT_BIN/wrangler" deployments status --name pi --json > "$RUNNER_TEMP/pi-runtime-failed-status.json" 2> "$RUNNER_TEMP/pi-runtime-failed-status.stderr" || true
+            if observed="$(jq -er '.versions | select(length == 1 and .[0].percentage == 100) | .[0].version_id | select(test("^[0-9a-f-]{36}$"))' "$RUNNER_TEMP/pi-runtime-failed-status.json" 2>/dev/null)"; then
+              curl -sS --max-time 20 -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$api/scripts/pi/versions/$observed" > "$RUNNER_TEMP/pi-runtime-failed-version.json" 2> "$RUNNER_TEMP/pi-runtime-failed-version.stderr" || true
             fi
+            curl -sS --max-time 20 -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$api/scripts" > "$RUNNER_TEMP/pi-runtime-failed-latest.json" 2> "$RUNNER_TEMP/pi-runtime-failed-latest.stderr" || true
+            "$ENVS_EFFECT_BIN/python3" -I - "$RUNNER_TEMP" <<'PY'
+          import json, re, sys
+          from pathlib import Path
+          root = Path(sys.argv[1])
+          def read(name):
+              try:
+                  return json.loads((root / name).read_text())
+              except (ValueError, OSError):
+                  return {}
+          def tag(value):
+              if not isinstance(value, dict):
+                  return "UNKNOWN"
+              if "migration_tag" not in value:
+                  return "ABSENT"
+              return {"":"EMPTY", "pi-jev-proof-v1":"pi-jev-proof-v1"}.get(value["migration_tag"], "UNKNOWN") if isinstance(value["migration_tag"], str) else "UNKNOWN"
+          status = read("pi-runtime-failed-status.json")
+          versions = status.get("versions") if isinstance(status, dict) else None
+          current = versions[0].get("version_id") if isinstance(versions, list) and len(versions) == 1 and isinstance(versions[0], dict) and versions[0].get("percentage") == 100 else None
+          current = current if isinstance(current, str) and re.fullmatch(r"[0-9a-f-]{36}", current) else "UNKNOWN"
+          value = read("pi-runtime-failed-version.json")
+          result = value.get("result") if isinstance(value, dict) and value.get("success") is True else None
+          runtime = result.get("resources", {}).get("script_runtime") if isinstance(result, dict) and result.get("id") == current and isinstance(result.get("resources"), dict) else None
+          value = read("pi-runtime-failed-latest.json")
+          rows = value.get("result") if isinstance(value, dict) and value.get("success") is True else None
+          rows = [row for row in rows if isinstance(row, dict) and row.get("id") == "pi"] if isinstance(rows, list) else []
+          print(json.dumps({"scope":"FAILED_WRITE_CURRENT_AND_LATEST_OBSERVATIONS_ONLY",
+                            "current_version":current, "current_migration_tag":tag(runtime),
+                            "latest_pi_migration_tag":tag(rows[0]) if len(rows) == 1 else "UNKNOWN"}, separators=(",", ":")))
+          PY
           }
           # deploy applies the admitted SQLite migration; versions upload is insufficient here.
           deploy_output="$(mktemp "$RUNNER_TEMP/pi-runtime-deploy.XXXXXX.jsonl")"

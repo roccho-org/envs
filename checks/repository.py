@@ -1039,8 +1039,14 @@ def pi_screen_projection(source: str) -> str:
         '"PI_ACCESS_OWNER_HASH": "7c51a47a695796b59dd322db878b455cdc725790797a2c388a348a78bd5527b2"',
         '.migration_tag == "pi-jev-proof-v1"', '.name != "PI_CHATGPT_BOOTSTRAP"',
         'scope:"DEPLOYMENT_ONLY_NOT_INFERENCE"',
+        '[.result[] | select(.id == "pi")] | length == 1',
+        'FAILED_WRITE_CURRENT_AND_LATEST_OBSERVATIONS_ONLY',
+        'latest_pi_migration_tag', 'current_migration_tag',
     ):
         require(marker in source, f"Pi runtime admission lost: {marker}")
+    require(source.index('"$RUNNER_TEMP/pi-runtime-latest.json" >/dev/null') <\
+            source.index('WRANGLER_OUTPUT_FILE_PATH="$deploy_output"'),\
+            "Latest script tag is checked separately before writing")
     require(source.index('secret put PI_JEV_PROOF_API_KEY') <
             source.index('deployments status --name pi --json > "$RUNNER_TEMP/pi-runtime-deployment.json"'),
             "Current version must be read after secret put")
