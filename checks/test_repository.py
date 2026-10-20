@@ -466,6 +466,7 @@ elif endpoint=="scripts/pi/versions?deployable=true":
     if mode=="list-duplicate": rows[0]["id"]=candidate
     if mode=="list-offset": rows[0]["metadata"]["created_on"]="2026-01-01T01:00:00+01:00"
     if mode=="list-offset-tie": rows[0]["metadata"]["created_on"]="2026-01-01T01:00:01+01:00"
+    if mode=="list-offset-invalid": rows[0]["metadata"]["created_on"]="2026-01-01T01:00:00+00:60"
     if mode=="list-shape": rows={}
     result={"items":rows}
 elif endpoint=="scripts/pi/subdomain":
@@ -481,7 +482,7 @@ print("403" if denied else ("404" if mode=="candidate404" and endpoint.endswith(
                "malformed-json","settings-shape","current-shape","latest-duplicate","unknown-tag","network",
                "subdomain-unmet","namespace-missing","version-shape","obs-absent","obs-null","obs-wrong","obs-true","obs-denied",
                "list-empty","list-many","list-row","list-uuid","list-date","list-private-date","list-tie","list-duplicate",
-               "list-offset","list-offset-tie","list-shape","list-denied","candidate-denied","candidate404","candidate-shape")
+               "list-offset","list-offset-tie","list-offset-invalid","list-shape","list-denied","candidate-denied","candidate404","candidate-shape")
         for mode in cases:
             current=Path(scratch)/mode
             current.mkdir()
