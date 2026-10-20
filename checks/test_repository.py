@@ -196,11 +196,107 @@ def pi_native_versions_fixtures() -> None:
     print("PI_NATIVE_VERSIONS_FIXTURES=PASS: 17 success/failure/privacy/mismatch cases")
 
 
+def pi_runtime_fixtures() -> None:
+    """Execute the actual bounded runtime shell with synthetic CLI/API responses."""
+    bash, jq = shutil.which("bash"), shutil.which("jq")
+    assert bash and jq
+    source = (ROOT / ".github/workflows/deploy-pi-worker-preview.yml").read_text()
+    script = textwrap.dedent(source.split(
+        "      - name: Apply finite owner runtime migration and existing Jev binding\n", 1)[1].split("        run: |\n", 1)[1])
+    scratch = Path(tempfile.mkdtemp(prefix="envs-pi-runtime-fixtures-"))
+    tools = scratch / "bin"
+    tools.mkdir()
+    (tools / "python3").symlink_to(sys.executable)
+    program = """#!PYTHON
+import json, os, sys
+from pathlib import Path
+mode = os.environ["PI_RUNTIME_CASE"]
+trace = Path(os.environ["PI_RUNTIME_TRACE"])
+calls = json.loads(trace.read_text()) if trace.exists() else []
+args = sys.argv[1:]
+kind = Path(sys.argv[0]).name
+old, deployed, final = [f"00000000-0000-4000-8000-{i:012d}" for i in (1,2,3)]
+if kind == "wrangler":
+    if args[:2] == ["deployments", "status"]: kind = "status"
+    elif args[:2] == ["secret", "put"]:
+        kind = "secret"
+        assert sys.stdin.read() == "fixture-jev-only"
+    else:
+        assert args[0] == "deploy"
+        kind = "deploy"
+    calls.append(kind); trace.write_text(json.dumps(calls))
+    print("fixture-private@example.invalid", file=sys.stderr)
+    if mode == kind + "-fail": sys.exit(31)
+    if kind == "deploy":
+        config = json.loads(Path(args[args.index("--config")+1]).read_text())
+        assert config["vars"]["PI_PROOF_TRANSIENT"] == "true"
+        Path(os.environ["WRANGLER_OUTPUT_FILE_PATH"]).write_text(json.dumps({
+            "type":"deploy","version":1,"worker_name":"pi","worker_name_overridden":False,"version_id":deployed})+"\\n")
+    elif kind == "status":
+        version = final if "secret" in calls else old
+        print(json.dumps({"author_email":"fixture-private@example.invalid","versions":[
+            {"version_id":version,"percentage":50 if mode=="traffic" else 100}]}))
+    sys.exit(0)
+url = args[-1]
+if url.endswith("/settings"):
+    kind = "settings"
+    config = Path(os.environ["PI_RUNTIME_DIR"],"wrangler.json")
+    vars = json.loads(config.read_text()).get("vars",{})
+    if mode == "owner" and "secret" in calls: vars["PI_ACCESS_OWNER_HASH"] = "wrong"
+    bindings = [{"type":"plain_text","name":k,"text":v} for k,v in vars.items()]
+    if "secret" in calls: bindings += [
+        {"type":"secret_text","name":"PI_JEV_PROOF_API_KEY"},
+        {"type":"durable_object_namespace","name":"SESSIONS","class_name":"Session","namespace_id":"fixture-namespace"}]
+    result = {"bindings":bindings,"observability":{"enabled":False},"author_email":"fixture-private@example.invalid"}
+else:
+    assert "/scripts/pi/versions/" in url, url
+    version = url.rsplit("/",1)[1]
+    kind = "version"
+    runtime = {}
+    if version != old: runtime["migration_tag"] = "pi-jev-proof-v1"
+    if mode == "history" and version == old: runtime["migration_tag"] = "unknown"
+    result = {"id":version,"resources":{"script_runtime":runtime,"script":{
+        "etag":"wrong" if mode=="code" and version==final else ("old" if version==old else "accepted-code")}}}
+    if mode == "malformed" and version == old: result = {}
+calls.append(kind); trace.write_text(json.dumps(calls))
+print(json.dumps({"success":True,"result":result}))
+""".replace("#!PYTHON", "#!" + sys.executable)
+    for name in ("wrangler", "curl"):
+        path = tools / name
+        path.write_text(program)
+        path.chmod(0o700)
+    for mode in ("success", "history", "malformed", "deploy-fail", "secret-fail", "owner", "code", "traffic"):
+        current = scratch / mode
+        current.mkdir()
+        runtime = current / "runtime"
+        runtime.mkdir()
+        (runtime / "wrangler.json").write_text("{}")
+        trace = current / "calls.json"
+        result = subprocess.run([bash, "-c", script], capture_output=True, text=True, env={
+            **os.environ, "PATH":str(tools)+os.pathsep+os.environ["PATH"],
+            "ENVS_EFFECT_BIN":str(tools), "RUNNER_TEMP":str(current), "PI_RUNTIME_DIR":str(runtime),
+            "CLOUDFLARE_API_TOKEN":"fixture-limited", "CLOUDFLARE_ACCOUNT_ID":"fixture-account",
+            "JEV_API_KEY":"fixture-jev-only", "OPS_SHA":"a"*40,
+            "PI_RUNTIME_CASE":mode, "PI_RUNTIME_TRACE":str(trace),
+        })
+        assert (result.returncode == 0) == (mode == "success"), (mode,result.stdout,result.stderr)
+        assert "fixture-private" not in result.stdout + result.stderr, mode
+        calls = json.loads(trace.read_text())
+        if mode in ("history", "malformed", "traffic"): assert "deploy" not in calls, mode
+        if "secret" in calls: assert calls.index("deploy") < calls.index("secret"), mode
+        if mode == "success":
+            assert calls == ["settings","status","version","deploy","version","secret","status","settings","version"], calls
+            receipt = json.loads(result.stdout)
+            assert receipt["version"].endswith("000000000003")
+    print("PI_RUNTIME_FIXTURES=PASS: 8 migration/ordering/provenance/owner/privacy cases")
+
+
 def main() -> None:
     baseline = repository.inspect(ROOT)
     assert baseline["status"] == "PASS"
     assert baseline["canonical_branch"] == "proposals"
     assert baseline["retained_compatibility_branch"] == "main"
+    pi_runtime_fixtures()
     pi_native_versions_fixtures()
 
     # Structural Source checks reject plaintext/duplicate metadata before publication.

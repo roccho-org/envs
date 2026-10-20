@@ -243,8 +243,11 @@ jobs:
           api="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers"
           curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$api/scripts/pi/settings" > "$RUNNER_TEMP/pi-runtime-before.json"
           jq -e '.success == true and all(.result.bindings[]; .name != "PI_CHATGPT_BOOTSTRAP" and (.type != "secret_text" or .name == "PI_JEV_PROOF_API_KEY"))' "$RUNNER_TEMP/pi-runtime-before.json" >/dev/null
-          curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$api/scripts" > "$RUNNER_TEMP/pi-runtime-history.json"
-          jq -e '.success == true and any(.result[]; .id == "pi" and (.migration_tag == null or .migration_tag == "pi-jev-proof-v1"))' "$RUNNER_TEMP/pi-runtime-history.json" >/dev/null
+          "$ENVS_EFFECT_BIN/wrangler" deployments status --name pi --json > "$RUNNER_TEMP/pi-runtime-prior-deployment.json" 2> "$RUNNER_TEMP/pi-runtime-prior-status.stderr"
+          prior="$(jq -er '.versions | select(length == 1 and .[0].percentage == 100) | .[0].version_id' "$RUNNER_TEMP/pi-runtime-prior-deployment.json")"
+          curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$api/scripts/pi/versions/$prior" > "$RUNNER_TEMP/pi-runtime-history.json"
+          # Wrangler4.93 treats omitted optional tag as initial migration; no claim of complete history absence.
+          jq -e --arg prior "$prior" '.success == true and .result.id == $prior and (.result.resources.script_runtime | type == "object") and (.result.resources.script_runtime | (has("migration_tag") | not) or (.migration_tag | type == "string" and (. == "" or . == "pi-jev-proof-v1")))' "$RUNNER_TEMP/pi-runtime-history.json" >/dev/null
           # Unknown prior migration history stops before writes; never delete data or widen credentials.
           "$ENVS_EFFECT_BIN/python3" -I - "$PI_RUNTIME_DIR/wrangler.json" <<'PY'
           import json, pathlib, sys
@@ -259,12 +262,25 @@ jobs:
           }
           path.write_text(json.dumps(config, indent=2) + "\n")
           PY
+          failed_write_readback() {
+            local pi_phase="$1"
+            grep -hoE '\[code: [0-9]+\]' "$RUNNER_TEMP/pi-runtime-$pi_phase.stderr" || true
+            if "$ENVS_EFFECT_BIN/wrangler" deployments status --name pi --json > "$RUNNER_TEMP/pi-runtime-failed-status.json" 2> "$RUNNER_TEMP/pi-runtime-failed-status.stderr"; then
+              jq -ce '{scope:"FAILED_WRITE_CURRENT_STATE_ONLY",versions:[.versions[]|{version_id,percentage}]}' "$RUNNER_TEMP/pi-runtime-failed-status.json" || true
+            fi
+          }
           # deploy applies the admitted SQLite migration; versions upload is insufficient here.
-          if ! "$ENVS_EFFECT_BIN/wrangler" deploy --config "$PI_RUNTIME_DIR/wrangler.json" --name pi --no-bundle > "$RUNNER_TEMP/pi-runtime-deploy.stdout" 2> "$RUNNER_TEMP/pi-runtime-deploy.stderr"; then
+          deploy_output="$(mktemp "$RUNNER_TEMP/pi-runtime-deploy.XXXXXX.jsonl")"
+          if ! WRANGLER_OUTPUT_FILE_PATH="$deploy_output" "$ENVS_EFFECT_BIN/wrangler" deploy --config "$PI_RUNTIME_DIR/wrangler.json" --name pi --no-bundle > "$RUNNER_TEMP/pi-runtime-deploy.stdout" 2> "$RUNNER_TEMP/pi-runtime-deploy.stderr"; then
+            failed_write_readback deploy
             echo "Runtime deploy failed; no credential fallback or automatic retry"; exit 1
           fi
+          deployed="$(jq -ser '[.[] | select(.type == "deploy" and .version == 1 and .worker_name == "pi" and .worker_name_overridden == false)] | select(length == 1) | .[0].version_id | select(test("^[0-9a-f-]{36}$"))' "$deploy_output")"
+          curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$api/scripts/pi/versions/$deployed" > "$RUNNER_TEMP/pi-runtime-code.json"
+          etag="$(jq -er '.result.resources.script.etag | select(type == "string" and length > 0)' "$RUNNER_TEMP/pi-runtime-code.json")"
           # Only the existing Jev key is persistent. Never bind ChatGPT credentials.
           if ! printf %s "$JEV_API_KEY" | "$ENVS_EFFECT_BIN/wrangler" secret put PI_JEV_PROOF_API_KEY --config "$PI_RUNTIME_DIR/wrangler.json" --name pi > "$RUNNER_TEMP/pi-runtime-key.stdout" 2> "$RUNNER_TEMP/pi-runtime-key.stderr"; then
+            failed_write_readback key
             echo "Jev binding failed; runtime remains unproved; no automatic retry"; exit 1
           fi
           # secret put can create another version: read the CURRENT deployment only after it.
@@ -273,6 +289,7 @@ jobs:
           version="$(jq -r .versions[0].version_id "$RUNNER_TEMP/pi-runtime-deployment.json")"
           curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$api/scripts/pi/settings" > "$RUNNER_TEMP/pi-runtime-settings.json"
           jq -e '.success == true and any(.result.bindings[]; .name == "SESSIONS" and .type == "durable_object_namespace" and .class_name == "Session") and any(.result.bindings[]; .name == "PI_JEV_PROOF_API_KEY" and .type == "secret_text") and all(.result.bindings[]; .name != "PI_CHATGPT_BOOTSTRAP") and .result.observability.enabled == false' "$RUNNER_TEMP/pi-runtime-settings.json" >/dev/null
-          curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$api/scripts" > "$RUNNER_TEMP/pi-runtime-scripts.json"
-          jq -e '.success == true and any(.result[]; .id == "pi" and .migration_tag == "pi-jev-proof-v1")' "$RUNNER_TEMP/pi-runtime-scripts.json" >/dev/null
+          curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$api/scripts/pi/versions/$version" > "$RUNNER_TEMP/pi-runtime-version.json"
+          jq -e --arg etag "$etag" --arg version "$version" '.success == true and .result.id == $version and .result.resources.script.etag == $etag and .result.resources.script_runtime.migration_tag == "pi-jev-proof-v1"' "$RUNNER_TEMP/pi-runtime-version.json" >/dev/null
+          jq -e '(.result.bindings | map(select(.type == "plain_text")) | map({key:.name,value:.text}) | from_entries) as $vars | $vars.PI_PROOF_TRANSIENT == "true" and $vars.PI_JEV_PROOF_SESSION == "owner-jev-proof-20261020" and $vars.PI_ACCESS_ISSUER == "https://roccho.cloudflareaccess.com" and $vars.PI_ACCESS_AUDIENCE == "3a4db113aeffcad6dcfc27afc21abc1a1c30a4cf1ea2584e4cda7b4edd8319bf" and $vars.PI_ACCESS_OWNER_HASH == "7c51a47a695796b59dd322db878b455cdc725790797a2c388a348a78bd5527b2"' "$RUNNER_TEMP/pi-runtime-settings.json" >/dev/null
           jq -c --arg version "$version" --arg source "$OPS_SHA" '{scope:"DEPLOYMENT_ONLY_NOT_INFERENCE",ops_sha:$source,version:$version,bindings:[.result.bindings[] | {name,type,class_name,namespace_id}],observability:.result.observability}' "$RUNNER_TEMP/pi-runtime-settings.json"
