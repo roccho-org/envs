@@ -277,7 +277,7 @@ jobs:
           fi
           deployed="$(jq -ser '[.[] | select(.type == "deploy" and .version == 1 and .worker_name == "pi" and .worker_name_overridden == false)] | select(length == 1) | .[0].version_id | select(test("^[0-9a-f-]{36}$"))' "$deploy_output")"
           curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$api/scripts/pi/versions/$deployed" > "$RUNNER_TEMP/pi-runtime-code.json"
-          etag="$(jq -er '.result.resources.script.etag | select(type == "string" and length > 0)' "$RUNNER_TEMP/pi-runtime-code.json")"
+          etag="$(jq -er --arg deployed "$deployed" 'select(.success == true and .result.id == $deployed) | .result.resources.script.etag | select(type == "string" and length > 0)' "$RUNNER_TEMP/pi-runtime-code.json")"
           # Only the existing Jev key is persistent. Never bind ChatGPT credentials.
           if ! printf %s "$JEV_API_KEY" | "$ENVS_EFFECT_BIN/wrangler" secret put PI_JEV_PROOF_API_KEY --config "$PI_RUNTIME_DIR/wrangler.json" --name pi > "$RUNNER_TEMP/pi-runtime-key.stdout" 2> "$RUNNER_TEMP/pi-runtime-key.stderr"; then
             failed_write_readback key
@@ -292,4 +292,7 @@ jobs:
           curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$api/scripts/pi/versions/$version" > "$RUNNER_TEMP/pi-runtime-version.json"
           jq -e --arg etag "$etag" --arg version "$version" '.success == true and .result.id == $version and .result.resources.script.etag == $etag and .result.resources.script_runtime.migration_tag == "pi-jev-proof-v1"' "$RUNNER_TEMP/pi-runtime-version.json" >/dev/null
           jq -e '(.result.bindings | map(select(.type == "plain_text")) | map({key:.name,value:.text}) | from_entries) as $vars | $vars.PI_PROOF_TRANSIENT == "true" and $vars.PI_JEV_PROOF_SESSION == "owner-jev-proof-20261020" and $vars.PI_ACCESS_ISSUER == "https://roccho.cloudflareaccess.com" and $vars.PI_ACCESS_AUDIENCE == "3a4db113aeffcad6dcfc27afc21abc1a1c30a4cf1ea2584e4cda7b4edd8319bf" and $vars.PI_ACCESS_OWNER_HASH == "7c51a47a695796b59dd322db878b455cdc725790797a2c388a348a78bd5527b2"' "$RUNNER_TEMP/pi-runtime-settings.json" >/dev/null
-          jq -c --arg version "$version" --arg source "$OPS_SHA" '{scope:"DEPLOYMENT_ONLY_NOT_INFERENCE",ops_sha:$source,version:$version,bindings:[.result.bindings[] | {name,type,class_name,namespace_id}],observability:.result.observability}' "$RUNNER_TEMP/pi-runtime-settings.json"
+          "$ENVS_EFFECT_BIN/wrangler" deployments status --name pi --json > "$RUNNER_TEMP/pi-runtime-confirmation.json" 2> "$RUNNER_TEMP/pi-runtime-confirmation.stderr"
+          jq -e --arg version "$version" '(.versions | length) == 1 and .versions[0].percentage == 100 and .versions[0].version_id == $version' "$RUNNER_TEMP/pi-runtime-confirmation.json" >/dev/null
+          # A bounded consistent snapshot, not a guarantee against every future writer.
+          jq -c --arg version "$version" --arg deployed "$deployed" --arg etag "$etag" --arg source "$OPS_SHA" '{scope:"DEPLOYMENT_ONLY_NOT_INFERENCE",ops_sha:$source,version:$version,deployed_version:$deployed,code_etag:$etag,migration_tag:"pi-jev-proof-v1",bindings:[.result.bindings[] | {name,type,class_name,namespace_id}],observability:.result.observability}' "$RUNNER_TEMP/pi-runtime-settings.json"

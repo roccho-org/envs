@@ -234,6 +234,7 @@ if kind == "wrangler":
             "type":"deploy","version":1,"worker_name":"pi","worker_name_overridden":False,"version_id":deployed})+"\\n")
     elif kind == "status":
         version = final if "secret" in calls else old
+        if mode == "changed-current" and calls.count("status") >= 3: version = old
         print(json.dumps({"author_email":"fixture-private@example.invalid","versions":[
             {"version_id":version,"percentage":50 if mode=="traffic" else 100}]}))
     sys.exit(0)
@@ -257,6 +258,7 @@ else:
     if mode == "history" and version == old: runtime["migration_tag"] = "unknown"
     result = {"id":version,"resources":{"script_runtime":runtime,"script":{
         "etag":"wrong" if mode=="code" and version==final else ("old" if version==old else "accepted-code")}}}
+    if mode == "deployed-mismatch" and version == deployed: result["id"] = old
     if mode == "malformed" and version == old: result = {}
 calls.append(kind); trace.write_text(json.dumps(calls))
 print(json.dumps({"success":True,"result":result}))
@@ -265,7 +267,7 @@ print(json.dumps({"success":True,"result":result}))
         path = tools / name
         path.write_text(program)
         path.chmod(0o700)
-    for mode in ("success", "history", "malformed", "deploy-fail", "secret-fail", "owner", "code", "traffic"):
+    for mode in ("success", "history", "malformed", "deploy-fail", "secret-fail", "owner", "code", "traffic", "deployed-mismatch", "changed-current"):
         current = scratch / mode
         current.mkdir()
         runtime = current / "runtime"
@@ -285,10 +287,10 @@ print(json.dumps({"success":True,"result":result}))
         if mode in ("history", "malformed", "traffic"): assert "deploy" not in calls, mode
         if "secret" in calls: assert calls.index("deploy") < calls.index("secret"), mode
         if mode == "success":
-            assert calls == ["settings","status","version","deploy","version","secret","status","settings","version"], calls
+            assert calls == ["settings","status","version","deploy","version","secret","status","settings","version","status"], calls
             receipt = json.loads(result.stdout)
             assert receipt["version"].endswith("000000000003")
-    print("PI_RUNTIME_FIXTURES=PASS: 8 migration/ordering/provenance/owner/privacy cases")
+    print("PI_RUNTIME_FIXTURES=PASS: 10 migration/ordering/provenance/owner/privacy cases")
 
 
 def main() -> None:
