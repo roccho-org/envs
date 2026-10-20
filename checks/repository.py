@@ -1089,7 +1089,8 @@ def pi_screen_projection(source: str) -> str:
             "Bounded latest-returned candidate is distinct from current/upload identity/provenance")
     require(runtime_source.index('UPLOADED_IDENTITY_NOT_DEPLOYMENT') < runtime_source.index('echo PI_RUNTIME_PHASE=uploaded-code')
             and runtime_source.count('--retry 3 --retry-all-errors --retry-delay 1 --max-time 20 --retry-max-time 15') == 1
-            and '--request GET --retry 3' in runtime_source,
+            and '--request GET --retry 3' in runtime_source
+            and '--output "$RUNNER_TEMP/pi-runtime-code.json" "$api/scripts/pi/versions/$deployed"' in runtime_source,
             "Validated upload identity precedes bounded same-UUID read-only visibility probes")
     require("PI_RUNTIME_PHASE=uploaded-receipt" in source and "PI_RUNTIME_PHASE=receipt" in source\
             and "BASH_COMMAND" not in source and "trap " not in source,\

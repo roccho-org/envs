@@ -495,7 +495,7 @@ jobs:
           printf '{"scope":"UPLOADED_IDENTITY_NOT_DEPLOYMENT","version":"%s"}\n' "$deployed"
           echo PI_RUNTIME_PHASE=uploaded-code >&2
           # Visibility probes only: at most four same-UUID GETs; retry-max-time is not a total deadline.
-          curl -fsS --request GET --retry 3 --retry-all-errors --retry-delay 1 --max-time 20 --retry-max-time 15 -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$api/scripts/pi/versions/$deployed" > "$RUNNER_TEMP/pi-runtime-code.json"
+          curl -fsS --request GET --retry 3 --retry-all-errors --retry-delay 1 --max-time 20 --retry-max-time 15 -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" --output "$RUNNER_TEMP/pi-runtime-code.json" "$api/scripts/pi/versions/$deployed"
           etag="$(jq -er --arg deployed "$deployed" 'select(.success == true and .result.id == $deployed) | .result.resources.script.etag | select(type == "string" and length > 0)' "$RUNNER_TEMP/pi-runtime-code.json")"
           echo PI_RUNTIME_PHASE=version-deploy >&2
           if ! "$ENVS_EFFECT_BIN/wrangler" versions deploy "$deployed@100%" --yes --config "$PI_RUNTIME_DIR/wrangler.json" --name pi > "$RUNNER_TEMP/pi-runtime-version-deploy.stdout" 2> "$RUNNER_TEMP/pi-runtime-version-deploy.stderr"; then

@@ -314,11 +314,13 @@ else:
         for flag, expected in (("--retry","3"),("--retry-delay","1"),("--max-time","20"),("--retry-max-time","15")):
             assert args[args.index(flag)+1]==expected
         assert "--retry-all-errors" in args and "--location" not in args
+        assert args[args.index("--output")+1]==str(Path(os.environ["RUNNER_TEMP"])/"pi-runtime-code.json")
     else: assert "--retry" not in args
     if mode=="malformed" and version==old: result={}
 calls.append(kind); trace.write_text(json.dumps(calls))
 if mode=="uploaded404" and kind=="version" and version==deployed: sys.exit(22)
-print(json.dumps({"success":True,"result":result}))
+if "--output" in args: Path(args[args.index("--output")+1]).write_text(json.dumps({"success":True,"result":result}))
+else: print(json.dumps({"success":True,"result":result}))
 """.replace("#!PYTHON","#!"+sys.executable)
     for name in ("wrangler","curl"):
         path=tools/name
