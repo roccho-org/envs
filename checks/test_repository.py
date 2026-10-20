@@ -286,6 +286,8 @@ print(json.dumps({"success":True,"result":result}))
         calls = json.loads(trace.read_text())
         if mode in ("history", "malformed", "traffic"): assert "deploy" not in calls, mode
         if "secret" in calls: assert calls.index("deploy") < calls.index("secret"), mode
+        if mode == "deployed-mismatch": assert "deploy" in calls and "secret" not in calls, calls
+        if mode == "changed-current": assert "secret" in calls and calls.count("status") >= 3, calls
         if mode == "success":
             assert calls == ["settings","status","version","deploy","version","secret","status","settings","version","status"], calls
             receipt = json.loads(result.stdout)
