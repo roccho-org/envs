@@ -226,7 +226,7 @@ if kind == "wrangler":
         kind = "deploy"
     calls.append(kind); trace.write_text(json.dumps(calls))
     print("fixture-private@example.invalid", file=sys.stderr)
-    if mode == kind + "-fail": sys.exit(31)
+    if mode == kind + "-fail" or (mode == "readback-unavailable" and kind == "deploy"): sys.exit(31)
     if kind == "deploy":
         config = json.loads(Path(args[args.index("--config")+1]).read_text())
         assert config["vars"]["PI_PROOF_TRANSIENT"] == "true"
@@ -239,7 +239,19 @@ if kind == "wrangler":
             {"version_id":version,"percentage":50 if mode=="traffic" else 100}]}))
     sys.exit(0)
 url = args[-1]
-if url.endswith("/settings"):
+if url.endswith("/scripts"):
+    kind = "latest"
+    row = {"id":"pi"}
+    if mode in ("latest-known", "latest-current-mismatch"): row["migration_tag"] = "pi-jev-proof-v1"
+    if mode == "latest-unknown": row["migration_tag"] = "fixture-private-latest"
+    if mode == "latest-type": row["migration_tag"] = None
+    result = [] if mode == "latest-missing" else [row]
+    if mode == "latest-duplicate": result.append(row)
+    if mode == "latest-malformed": result = {}
+    if mode == "readback-unavailable" and "deploy" in calls:
+        calls.append(kind); trace.write_text(json.dumps(calls))
+        print("fixture-private-error",file=sys.stderr); sys.exit(22)
+elif url.endswith("/settings"):
     kind = "settings"
     config = Path(os.environ["PI_RUNTIME_DIR"],"wrangler.json")
     vars = json.loads(config.read_text()).get("vars",{})
@@ -254,6 +266,7 @@ else:
     version = url.rsplit("/",1)[1]
     kind = "version"
     runtime = {}
+    if mode == "latest-known" and version == old: runtime["migration_tag"] = "pi-jev-proof-v1"
     if version != old: runtime["migration_tag"] = "pi-jev-proof-v1"
     if mode == "history" and version == old: runtime["migration_tag"] = "unknown"
     result = {"id":version,"resources":{"script_runtime":runtime,"script":{
@@ -267,7 +280,7 @@ print(json.dumps({"success":True,"result":result}))
         path = tools / name
         path.write_text(program)
         path.chmod(0o700)
-    for mode in ("success", "history", "malformed", "deploy-fail", "secret-fail", "owner", "code", "traffic", "deployed-mismatch", "changed-current"):
+    for mode in ("success", "history", "malformed", "deploy-fail", "secret-fail", "owner", "code", "traffic", "deployed-mismatch", "changed-current", "latest-known", "latest-current-mismatch", "latest-unknown", "latest-type", "latest-missing", "latest-duplicate", "latest-malformed", "readback-unavailable"):
         current = scratch / mode
         current.mkdir()
         runtime = current / "runtime"
@@ -281,18 +294,28 @@ print(json.dumps({"success":True,"result":result}))
             "JEV_API_KEY":"fixture-jev-only", "OPS_SHA":"a"*40,
             "PI_RUNTIME_CASE":mode, "PI_RUNTIME_TRACE":str(trace),
         })
-        assert (result.returncode == 0) == (mode == "success"), (mode,result.stdout,result.stderr)
+        assert (result.returncode == 0) == (mode in ("success","latest-known","latest-current-mismatch")), (mode,result.stdout,result.stderr)
         assert "fixture-private" not in result.stdout + result.stderr, mode
         calls = json.loads(trace.read_text())
-        if mode in ("history", "malformed", "traffic"): assert "deploy" not in calls, mode
+        if mode in ("history", "malformed", "traffic", "latest-unknown", "latest-type", "latest-missing", "latest-duplicate", "latest-malformed"): assert "deploy" not in calls, mode
+        if mode in ("latest-unknown","latest-type","latest-missing","latest-duplicate","latest-malformed"):
+            assert calls == ["settings","status","version","latest"], calls
         if "secret" in calls: assert calls.index("deploy") < calls.index("secret"), mode
         if mode == "deployed-mismatch": assert "deploy" in calls and "secret" not in calls, calls
         if mode == "changed-current": assert "secret" in calls and calls.count("status") >= 3, calls
+        if mode in ("latest-known","latest-current-mismatch"):
+            assert "deploy" in calls and "secret" in calls and calls.index("latest") < calls.index("deploy"), calls
         if mode == "success":
-            assert calls == ["settings","status","version","deploy","version","secret","status","settings","version","status"], calls
+            assert calls == ["settings","status","version","latest","deploy","version","secret","status","settings","version","status"], calls
             receipt = json.loads(result.stdout)
             assert receipt["version"].endswith("000000000003")
-    print("PI_RUNTIME_FIXTURES=PASS: 10 migration/ordering/provenance/owner/privacy cases")
+        if mode in ("deploy-fail","secret-fail","readback-unavailable"):
+            rows = [json.loads(line) for line in result.stdout.splitlines() if line.startswith("{")]
+            observed = next(row for row in rows if row.get("scope") == "FAILED_WRITE_CURRENT_AND_LATEST_OBSERVATIONS_ONLY")
+            assert observed["current_migration_tag"] in ("ABSENT","pi-jev-proof-v1"), observed
+            assert observed["latest_pi_migration_tag"] == ("UNKNOWN" if mode=="readback-unavailable" else "ABSENT"), observed
+            assert calls[-1] == "latest" and calls.count("latest") == 2, calls
+    print("PI_RUNTIME_FIXTURES=PASS: 18 migration/ordering/provenance/owner/privacy cases")
 
 
 def pi_diagnostic_fixtures() -> None:
