@@ -275,7 +275,7 @@ jobs:
           done
           exit "$diagnostic_exit"
 
-      - name: Apply finite owner runtime migration and existing Jev binding
+      - name: Recover finite owner runtime with its existing migration and Jev binding
         if: inputs.scope == 'runtime'
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.PI_CLOUDFLARE_API_TOKEN }}
@@ -289,15 +289,22 @@ jobs:
           api="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers"
           curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$api/scripts/pi/settings" > "$RUNNER_TEMP/pi-runtime-before.json"
           jq -e '.success == true and all(.result.bindings[]; .name != "PI_CHATGPT_BOOTSTRAP" and (.type != "secret_text" or .name == "PI_JEV_PROOF_API_KEY"))' "$RUNNER_TEMP/pi-runtime-before.json" >/dev/null
+          namespace="$(jq -er '.result.bindings | map(select(.name == "SESSIONS")) | select(length == 1) | .[0] | select(.type == "durable_object_namespace" and .class_name == "Session") | .namespace_id | select(type == "string" and length > 0)' "$RUNNER_TEMP/pi-runtime-before.json")"
           "$ENVS_EFFECT_BIN/wrangler" deployments status --name pi --json > "$RUNNER_TEMP/pi-runtime-prior-deployment.json" 2> "$RUNNER_TEMP/pi-runtime-prior-status.stderr"
           prior="$(jq -er '.versions | select(length == 1 and .[0].percentage == 100) | .[0].version_id' "$RUNNER_TEMP/pi-runtime-prior-deployment.json")"
           curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$api/scripts/pi/versions/$prior" > "$RUNNER_TEMP/pi-runtime-history.json"
-          # Wrangler4.93 treats omitted optional tag as initial migration; no claim of complete history absence.
-          jq -e --arg prior "$prior" '.success == true and .result.id == $prior and (.result.resources.script_runtime | type == "object") and (.result.resources.script_runtime | (has("migration_tag") | not) or (.migration_tag | type == "string" and (. == "" or . == "pi-jev-proof-v1")))' "$RUNNER_TEMP/pi-runtime-history.json" >/dev/null
+          # Recovery/update only: the migration must already be applied in BOTH distinct views.
+          jq -e --arg prior "$prior" '.success == true and .result.id == $prior and (.result.resources.script_runtime | type == "object") and (.result.resources.script_runtime.migration_tag == "pi-jev-proof-v1")' "$RUNNER_TEMP/pi-runtime-history.json" >/dev/null
           # Wrangler reads this latest script tag; it is distinct from the current deployed version above.
           curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$api/scripts" > "$RUNNER_TEMP/pi-runtime-latest.json"
-          jq -e '.success == true and (.result | type == "array") and ([.result[] | select(.id == "pi")] | length == 1) and ([.result[] | select(.id == "pi")][0] | (has("migration_tag") | not) or (.migration_tag | type == "string" and (. == "" or . == "pi-jev-proof-v1")))' "$RUNNER_TEMP/pi-runtime-latest.json" >/dev/null
-          # Unknown prior migration history stops before writes; never delete data or widen credentials.
+          jq -e '.success == true and (.result | type == "array") and ([.result[] | select(.id == "pi")] | length == 1) and ([.result[] | select(.id == "pi")][0].migration_tag == "pi-jev-proof-v1")' "$RUNNER_TEMP/pi-runtime-latest.json" >/dev/null
+          require_existing_subdomain() {
+            local pi_snapshot="$1"
+            test "$(curl -sS --max-time 20 -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" --output "$RUNNER_TEMP/pi-runtime-$pi_snapshot-subdomain.json" --write-out '%{http_code}' "$api/scripts/pi/subdomain" 2> "$RUNNER_TEMP/pi-runtime-$pi_snapshot-subdomain.stderr")" = 200
+            jq -e '.success == true and .result.enabled == true and .result.previews_enabled == false' "$RUNNER_TEMP/pi-runtime-$pi_snapshot-subdomain.json" >/dev/null
+          }
+          require_existing_subdomain before
+          # No migration/hostname changes or broader credentials are admitted by this recovery path.
           "$ENVS_EFFECT_BIN/python3" -I - "$PI_RUNTIME_DIR/wrangler.json" <<'PY'
           import json, pathlib, sys
           path = pathlib.Path(sys.argv[1])
@@ -366,15 +373,19 @@ jobs:
                             "latest_pi_migration_tag":tag(rows[0]) if len(rows) == 1 else "UNKNOWN"}, separators=(",", ":")))
           PY
           }
-          # deploy applies the admitted SQLite migration; versions upload is insufficient here.
-          deploy_output="$(mktemp "$RUNNER_TEMP/pi-runtime-deploy.XXXXXX.jsonl")"
-          if ! WRANGLER_OUTPUT_FILE_PATH="$deploy_output" "$ENVS_EFFECT_BIN/wrangler" deploy --config "$PI_RUNTIME_DIR/wrangler.json" --name pi --no-bundle > "$RUNNER_TEMP/pi-runtime-deploy.stdout" 2> "$RUNNER_TEMP/pi-runtime-deploy.stderr"; then
-            failed_write_readback deploy
-            echo "Runtime deploy failed; no credential fallback or automatic retry"; exit 1
+          # Same known final migration tag yields no pending steps in standard Wrangler4.93.
+          upload_output="$(mktemp "$RUNNER_TEMP/pi-runtime-upload.XXXXXX.jsonl")"
+          if ! WRANGLER_OUTPUT_FILE_PATH="$upload_output" "$ENVS_EFFECT_BIN/wrangler" versions upload --config "$PI_RUNTIME_DIR/wrangler.json" --name pi --no-bundle > "$RUNNER_TEMP/pi-runtime-upload.stdout" 2> "$RUNNER_TEMP/pi-runtime-upload.stderr"; then
+            failed_write_readback upload
+            echo "Runtime upload failed; no operator resend or credential fallback"; exit 1
           fi
-          deployed="$(jq -ser '[.[] | select(.type == "deploy" and .version == 1 and .worker_name == "pi" and .worker_name_overridden == false)] | select(length == 1) | .[0].version_id | select(test("^[0-9a-f-]{36}$"))' "$deploy_output")"
+          deployed="$(jq -ser '[.[] | select(.type == "version-upload" and .version == 1 and .worker_name == "pi" and .worker_name_overridden == false)] | select(length == 1) | .[0].version_id | select(test("^[0-9a-f-]{36}$"))' "$upload_output")"
           curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$api/scripts/pi/versions/$deployed" > "$RUNNER_TEMP/pi-runtime-code.json"
           etag="$(jq -er --arg deployed "$deployed" 'select(.success == true and .result.id == $deployed) | .result.resources.script.etag | select(type == "string" and length > 0)' "$RUNNER_TEMP/pi-runtime-code.json")"
+          if ! "$ENVS_EFFECT_BIN/wrangler" versions deploy "$deployed@100%" --yes --config "$PI_RUNTIME_DIR/wrangler.json" --name pi > "$RUNNER_TEMP/pi-runtime-version-deploy.stdout" 2> "$RUNNER_TEMP/pi-runtime-version-deploy.stderr"; then
+            failed_write_readback version-deploy
+            echo "Runtime version deployment failed; no operator resend or credential fallback"; exit 1
+          fi
           # Only the existing Jev key is persistent. Never bind ChatGPT credentials.
           if ! printf %s "$JEV_API_KEY" | "$ENVS_EFFECT_BIN/wrangler" secret put PI_JEV_PROOF_API_KEY --config "$PI_RUNTIME_DIR/wrangler.json" --name pi > "$RUNNER_TEMP/pi-runtime-key.stdout" 2> "$RUNNER_TEMP/pi-runtime-key.stderr"; then
             failed_write_readback key
@@ -386,10 +397,14 @@ jobs:
           version="$(jq -r .versions[0].version_id "$RUNNER_TEMP/pi-runtime-deployment.json")"
           curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$api/scripts/pi/settings" > "$RUNNER_TEMP/pi-runtime-settings.json"
           jq -e '.success == true and any(.result.bindings[]; .name == "SESSIONS" and .type == "durable_object_namespace" and .class_name == "Session") and any(.result.bindings[]; .name == "PI_JEV_PROOF_API_KEY" and .type == "secret_text") and all(.result.bindings[]; .name != "PI_CHATGPT_BOOTSTRAP") and .result.observability.enabled == false' "$RUNNER_TEMP/pi-runtime-settings.json" >/dev/null
+          jq -e --arg namespace "$namespace" '(.result.bindings | map(select(.name == "SESSIONS"))) as $sessions | ($sessions | length == 1) and $sessions[0].namespace_id == $namespace' "$RUNNER_TEMP/pi-runtime-settings.json" >/dev/null
           curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$api/scripts/pi/versions/$version" > "$RUNNER_TEMP/pi-runtime-version.json"
           jq -e --arg etag "$etag" --arg version "$version" '.success == true and .result.id == $version and .result.resources.script.etag == $etag and .result.resources.script_runtime.migration_tag == "pi-jev-proof-v1"' "$RUNNER_TEMP/pi-runtime-version.json" >/dev/null
           jq -e '(.result.bindings | map(select(.type == "plain_text")) | map({key:.name,value:.text}) | from_entries) as $vars | $vars.PI_PROOF_TRANSIENT == "true" and $vars.PI_JEV_PROOF_SESSION == "owner-jev-proof-20261020" and $vars.PI_ACCESS_ISSUER == "https://roccho.cloudflareaccess.com" and $vars.PI_ACCESS_AUDIENCE == "3a4db113aeffcad6dcfc27afc21abc1a1c30a4cf1ea2584e4cda7b4edd8319bf" and $vars.PI_ACCESS_OWNER_HASH == "7c51a47a695796b59dd322db878b455cdc725790797a2c388a348a78bd5527b2"' "$RUNNER_TEMP/pi-runtime-settings.json" >/dev/null
+          require_existing_subdomain after
+          curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$api/scripts" > "$RUNNER_TEMP/pi-runtime-final-latest.json"
+          jq -e '.success == true and (.result | type == "array") and ([.result[] | select(.id == "pi")] | length == 1) and ([.result[] | select(.id == "pi")][0].migration_tag == "pi-jev-proof-v1")' "$RUNNER_TEMP/pi-runtime-final-latest.json" >/dev/null
           "$ENVS_EFFECT_BIN/wrangler" deployments status --name pi --json > "$RUNNER_TEMP/pi-runtime-confirmation.json" 2> "$RUNNER_TEMP/pi-runtime-confirmation.stderr"
           jq -e --arg version "$version" '(.versions | length) == 1 and .versions[0].percentage == 100 and .versions[0].version_id == $version' "$RUNNER_TEMP/pi-runtime-confirmation.json" >/dev/null
           # A bounded consistent snapshot, not a guarantee against every future writer.
-          jq -c --arg version "$version" --arg deployed "$deployed" --arg etag "$etag" --arg source "$OPS_SHA" '{scope:"DEPLOYMENT_ONLY_NOT_INFERENCE",ops_sha:$source,version:$version,deployed_version:$deployed,code_etag:$etag,migration_tag:"pi-jev-proof-v1",bindings:[.result.bindings[] | {name,type,class_name,namespace_id}],observability:.result.observability}' "$RUNNER_TEMP/pi-runtime-settings.json"
+          jq -c --arg version "$version" --arg deployed "$deployed" --arg etag "$etag" --arg source "$OPS_SHA" '{scope:"DEPLOYMENT_ONLY_NOT_INFERENCE",route:"KNOWN_MIGRATION_VERSIONS_RECOVERY",ops_sha:$source,version:$version,deployed_version:$deployed,code_etag:$etag,migration_tag:"pi-jev-proof-v1",bindings:[.result.bindings[] | {name,type,class_name,namespace_id}],observability:.result.observability}' "$RUNNER_TEMP/pi-runtime-settings.json"

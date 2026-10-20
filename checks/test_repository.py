@@ -197,12 +197,12 @@ def pi_native_versions_fixtures() -> None:
 
 
 def pi_runtime_fixtures() -> None:
-    """Execute the actual bounded runtime shell with synthetic CLI/API responses."""
+    """Execute the actual known-migration recovery shell with synthetic CLI/API responses."""
     bash, jq = shutil.which("bash"), shutil.which("jq")
     assert bash and jq
     source = (ROOT / ".github/workflows/deploy-pi-worker-preview.yml").read_text()
     script = textwrap.dedent(source.split(
-        "      - name: Apply finite owner runtime migration and existing Jev binding\n", 1)[1].split("        run: |\n", 1)[1])
+        "      - name: Recover finite owner runtime with its existing migration and Jev binding\n", 1)[1].split("        run: |\n", 1)[1])
     scratch = Path(tempfile.mkdtemp(prefix="envs-pi-runtime-fixtures-"))
     tools = scratch / "bin"
     tools.mkdir()
@@ -217,105 +217,139 @@ args = sys.argv[1:]
 kind = Path(sys.argv[0]).name
 old, deployed, final = [f"00000000-0000-4000-8000-{i:012d}" for i in (1,2,3)]
 if kind == "wrangler":
-    if args[:2] == ["deployments", "status"]: kind = "status"
-    elif args[:2] == ["secret", "put"]:
+    if args[:2] == ["deployments","status"]: kind = "status"
+    elif args[:2] == ["versions","upload"]: kind = "upload"
+    elif args[:2] == ["versions","deploy"]:
+        kind = "version-deploy"
+        assert args[2] == deployed+"@100%" and "--yes" in args
+    else:
+        assert args[:2] == ["secret","put"]
         kind = "secret"
         assert sys.stdin.read() == "fixture-jev-only"
-    else:
-        assert args[0] == "deploy"
-        kind = "deploy"
     calls.append(kind); trace.write_text(json.dumps(calls))
-    print("fixture-private@example.invalid", file=sys.stderr)
-    if mode == kind + "-fail" or (mode == "readback-unavailable" and kind == "deploy"): sys.exit(31)
-    if kind == "deploy":
+    print("fixture-private@example.invalid",file=sys.stderr)
+    if mode == kind+"-fail" or (mode=="readback-unavailable" and kind=="upload"): sys.exit(31)
+    if kind == "upload":
         config = json.loads(Path(args[args.index("--config")+1]).read_text())
         assert config["vars"]["PI_PROOF_TRANSIENT"] == "true"
+        assert config["migrations"] == [{"tag":"pi-jev-proof-v1","new_sqlite_classes":["Session"]}]
         Path(os.environ["WRANGLER_OUTPUT_FILE_PATH"]).write_text(json.dumps({
-            "type":"deploy","version":1,"worker_name":"pi","worker_name_overridden":False,"version_id":deployed})+"\\n")
+            "type":"version-upload","version":1,"worker_name":"pi","worker_name_overridden":False,"version_id":deployed})+"\\n")
     elif kind == "status":
-        version = final if "secret" in calls else old
-        if mode == "changed-current" and calls.count("status") >= 3: version = old
+        version = final if "secret" in calls else (deployed if "version-deploy" in calls else old)
+        if mode=="changed-current" and calls.count("status")>=3: version=old
         print(json.dumps({"author_email":"fixture-private@example.invalid","versions":[
             {"version_id":version,"percentage":50 if mode=="traffic" else 100}]}))
     sys.exit(0)
 url = args[-1]
 if url.endswith("/scripts"):
     kind = "latest"
-    row = {"id":"pi"}
-    if mode in ("latest-known", "latest-current-mismatch"): row["migration_tag"] = "pi-jev-proof-v1"
-    if mode == "latest-unknown": row["migration_tag"] = "fixture-private-latest"
-    if mode == "latest-type": row["migration_tag"] = None
-    result = [] if mode == "latest-missing" else [row]
-    if mode == "latest-duplicate": result.append(row)
-    if mode == "latest-malformed": result = {}
-    if mode == "readback-unavailable" and "deploy" in calls:
-        calls.append(kind); trace.write_text(json.dumps(calls))
-        print("fixture-private-error",file=sys.stderr); sys.exit(22)
+    row = {"id":"pi","migration_tag":"pi-jev-proof-v1"}
+    if mode=="latest-absent": row.pop("migration_tag")
+    if mode=="latest-empty": row["migration_tag"]=""
+    if mode=="latest-unknown" or (mode=="post-latest-unknown" and "secret" in calls): row["migration_tag"]="fixture-private-latest"
+    if mode=="latest-type": row["migration_tag"]=None
+    result=[] if mode=="latest-missing" else [row]
+    if mode=="latest-duplicate": result.append(row)
+    if mode=="latest-malformed": result={}
+    if mode=="readback-unavailable" and "upload" in calls:
+        calls.append(kind); trace.write_text(json.dumps(calls)); sys.exit(22)
+elif url.endswith("/subdomain"):
+    kind = "subdomain"
+    post = "secret" in calls
+    denied = mode=="subdomain-denied" or (mode=="post-subdomain-denied" and post)
+    result={"enabled":not (mode=="subdomain-disabled" or (mode=="post-subdomain-disabled" and post)),
+            "previews_enabled":mode=="subdomain-preview" or (mode=="post-subdomain-preview" and post),
+            "email":"fixture-private@example.invalid"}
+    calls.append(kind); trace.write_text(json.dumps(calls))
+    Path(args[args.index("--output")+1]).write_text(json.dumps({"success":not denied,"result":result}))
+    print("403" if denied else "200",end="")
+    sys.exit(0)
 elif url.endswith("/settings"):
     kind = "settings"
     config = Path(os.environ["PI_RUNTIME_DIR"],"wrangler.json")
     vars = json.loads(config.read_text()).get("vars",{})
-    if mode == "owner" and "secret" in calls: vars["PI_ACCESS_OWNER_HASH"] = "wrong"
-    bindings = [{"type":"plain_text","name":k,"text":v} for k,v in vars.items()]
-    if "secret" in calls: bindings += [
-        {"type":"secret_text","name":"PI_JEV_PROOF_API_KEY"},
-        {"type":"durable_object_namespace","name":"SESSIONS","class_name":"Session","namespace_id":"fixture-namespace"}]
-    result = {"bindings":bindings,"observability":{"enabled":False},"author_email":"fixture-private@example.invalid"}
+    if mode=="owner" and "secret" in calls: vars["PI_ACCESS_OWNER_HASH"]="wrong"
+    namespace = "changed" if mode=="namespace-changed" and "secret" in calls else ("" if mode=="namespace-empty" else "fixture-namespace")
+    sessions=[{"type":"durable_object_namespace","name":"SESSIONS","class_name":"Session","namespace_id":namespace}]
+    if mode=="namespace-missing": sessions=[]
+    if mode=="namespace-duplicate": sessions*=2
+    bindings=[{"type":"plain_text","name":k,"text":v} for k,v in vars.items()]+sessions
+    if "secret" in calls: bindings += [{"type":"secret_text","name":"PI_JEV_PROOF_API_KEY"}]
+    result={"bindings":bindings,"observability":{"enabled":False},"author_email":"fixture-private@example.invalid"}
 else:
-    assert "/scripts/pi/versions/" in url, url
-    version = url.rsplit("/",1)[1]
-    kind = "version"
-    runtime = {}
-    if mode == "latest-known" and version == old: runtime["migration_tag"] = "pi-jev-proof-v1"
-    if version != old: runtime["migration_tag"] = "pi-jev-proof-v1"
-    if mode == "history" and version == old: runtime["migration_tag"] = "unknown"
-    result = {"id":version,"resources":{"script_runtime":runtime,"script":{
+    assert "/scripts/pi/versions/" in url,url
+    kind="version"
+    version=url.rsplit("/",1)[1]
+    if mode=="readback-unavailable" and "upload" in calls:
+        calls.append(kind); trace.write_text(json.dumps(calls)); sys.exit(22)
+    runtime={"migration_tag":"pi-jev-proof-v1"}
+    if version==old:
+        if mode=="current-absent": runtime={}
+        if mode=="current-empty": runtime["migration_tag"]=""
+        if mode=="history": runtime["migration_tag"]="fixture-private-unknown"
+    result={"id":version,"resources":{"script_runtime":runtime,"script":{
         "etag":"wrong" if mode=="code" and version==final else ("old" if version==old else "accepted-code")}}}
-    if mode == "deployed-mismatch" and version == deployed: result["id"] = old
-    if mode == "malformed" and version == old: result = {}
+    if mode=="deployed-mismatch" and version==deployed: result["id"]=old
+    if mode=="malformed" and version==old: result={}
 calls.append(kind); trace.write_text(json.dumps(calls))
 print(json.dumps({"success":True,"result":result}))
-""".replace("#!PYTHON", "#!" + sys.executable)
-    for name in ("wrangler", "curl"):
-        path = tools / name
+""".replace("#!PYTHON","#!"+sys.executable)
+    for name in ("wrangler","curl"):
+        path=tools/name
         path.write_text(program)
         path.chmod(0o700)
-    for mode in ("success", "history", "malformed", "deploy-fail", "secret-fail", "owner", "code", "traffic", "deployed-mismatch", "changed-current", "latest-known", "latest-current-mismatch", "latest-unknown", "latest-type", "latest-missing", "latest-duplicate", "latest-malformed", "readback-unavailable"):
-        current = scratch / mode
+    cases=("success","history","current-absent","current-empty","malformed","upload-fail",
+           "version-deploy-fail","secret-fail","owner","code","traffic","deployed-mismatch",
+           "changed-current","latest-absent","latest-empty","latest-unknown","latest-type",
+           "latest-missing","latest-duplicate","latest-malformed","readback-unavailable",
+           "subdomain-disabled","subdomain-preview","subdomain-denied","post-subdomain-preview",
+           "post-subdomain-disabled","post-subdomain-denied","namespace-missing","namespace-duplicate",
+           "namespace-empty","namespace-changed","post-latest-unknown")
+    for mode in cases:
+        current=scratch/mode
         current.mkdir()
-        runtime = current / "runtime"
+        runtime=current/"runtime"
         runtime.mkdir()
-        (runtime / "wrangler.json").write_text("{}")
-        trace = current / "calls.json"
-        result = subprocess.run([bash, "-c", script], capture_output=True, text=True, env={
-            **os.environ, "PATH":str(tools)+os.pathsep+os.environ["PATH"],
-            "ENVS_EFFECT_BIN":str(tools), "RUNNER_TEMP":str(current), "PI_RUNTIME_DIR":str(runtime),
-            "CLOUDFLARE_API_TOKEN":"fixture-limited", "CLOUDFLARE_ACCOUNT_ID":"fixture-account",
-            "JEV_API_KEY":"fixture-jev-only", "OPS_SHA":"a"*40,
-            "PI_RUNTIME_CASE":mode, "PI_RUNTIME_TRACE":str(trace),
-        })
-        assert (result.returncode == 0) == (mode in ("success","latest-known","latest-current-mismatch")), (mode,result.stdout,result.stderr)
-        assert "fixture-private" not in result.stdout + result.stderr, mode
-        calls = json.loads(trace.read_text())
-        if mode in ("history", "malformed", "traffic", "latest-unknown", "latest-type", "latest-missing", "latest-duplicate", "latest-malformed"): assert "deploy" not in calls, mode
-        if mode in ("latest-unknown","latest-type","latest-missing","latest-duplicate","latest-malformed"):
-            assert calls == ["settings","status","version","latest"], calls
-        if "secret" in calls: assert calls.index("deploy") < calls.index("secret"), mode
-        if mode == "deployed-mismatch": assert "deploy" in calls and "secret" not in calls, calls
-        if mode == "changed-current": assert "secret" in calls and calls.count("status") >= 3, calls
-        if mode in ("latest-known","latest-current-mismatch"):
-            assert "deploy" in calls and "secret" in calls and calls.index("latest") < calls.index("deploy"), calls
-        if mode == "success":
-            assert calls == ["settings","status","version","latest","deploy","version","secret","status","settings","version","status"], calls
-            receipt = json.loads(result.stdout)
-            assert receipt["version"].endswith("000000000003")
-        if mode in ("deploy-fail","secret-fail","readback-unavailable"):
-            rows = [json.loads(line) for line in result.stdout.splitlines() if line.startswith("{")]
-            observed = next(row for row in rows if row.get("scope") == "FAILED_WRITE_CURRENT_AND_LATEST_OBSERVATIONS_ONLY")
-            assert observed["current_migration_tag"] in ("ABSENT","pi-jev-proof-v1"), observed
-            assert observed["latest_pi_migration_tag"] == ("UNKNOWN" if mode=="readback-unavailable" else "ABSENT"), observed
-            assert calls[-1] == "latest" and calls.count("latest") == 2, calls
-    print("PI_RUNTIME_FIXTURES=PASS: 18 migration/ordering/provenance/owner/privacy cases")
+        (runtime/"wrangler.json").write_text(json.dumps({"migrations":[{"tag":"pi-jev-proof-v1","new_sqlite_classes":["Session"]}]}))
+        trace=current/"calls.json"
+        result=subprocess.run([bash,"-c",script],capture_output=True,text=True,env={
+            **os.environ,"PATH":str(tools)+os.pathsep+os.environ["PATH"],
+            "ENVS_EFFECT_BIN":str(tools),"RUNNER_TEMP":str(current),"PI_RUNTIME_DIR":str(runtime),
+            "CLOUDFLARE_API_TOKEN":"fixture-limited","CLOUDFLARE_ACCOUNT_ID":"fixture-account",
+            "JEV_API_KEY":"fixture-jev-only","OPS_SHA":"a"*40,
+            "PI_RUNTIME_CASE":mode,"PI_RUNTIME_TRACE":str(trace)})
+        assert (result.returncode==0)==(mode=="success"),(mode,result.stdout,result.stderr)
+        assert "fixture-private" not in result.stdout+result.stderr,mode
+        calls=json.loads(trace.read_text())
+        if mode in ("namespace-missing","namespace-duplicate","namespace-empty"):
+            assert calls==["settings"],calls
+        if mode in ("history","current-absent","current-empty","malformed"):
+            assert calls==["settings","status","version"],calls
+        if mode=="traffic": assert calls==["settings","status"],calls
+        if mode.startswith("latest-"):
+            assert calls==["settings","status","version","latest"],calls
+        if mode.startswith("subdomain-"):
+            assert calls==["settings","status","version","latest","subdomain"],calls
+        if "secret" in calls: assert calls.index("upload")<calls.index("version-deploy")<calls.index("secret"),calls
+        if mode=="deployed-mismatch": assert "upload" in calls and "version-deploy" not in calls and "secret" not in calls,calls
+        if mode=="changed-current": assert "secret" in calls and calls.count("status")>=3,calls
+        if mode.startswith("post-subdomain-"): assert "secret" in calls and calls.count("subdomain")==2,calls
+        if mode=="namespace-changed": assert "secret" in calls and calls[-1]=="settings",calls
+        if mode=="post-latest-unknown": assert "secret" in calls and calls.count("latest")==2,calls
+        if mode=="success":
+            assert calls==["settings","status","version","latest","subdomain","upload","version","version-deploy","secret","status","settings","version","subdomain","latest","status"],calls
+            receipt=json.loads(result.stdout)
+            assert receipt["version"].endswith("000000000003") and receipt["route"]=="KNOWN_MIGRATION_VERSIONS_RECOVERY"
+        if mode in ("upload-fail","version-deploy-fail","secret-fail","readback-unavailable"):
+            rows=[json.loads(line) for line in result.stdout.splitlines() if line.startswith("{")]
+            observed=next(row for row in rows if row.get("scope")=="FAILED_WRITE_CURRENT_AND_LATEST_OBSERVATIONS_ONLY")
+            assert observed["current_migration_tag"]==("UNKNOWN" if mode=="readback-unavailable" else "pi-jev-proof-v1"),observed
+            assert observed["latest_pi_migration_tag"]==("UNKNOWN" if mode=="readback-unavailable" else "pi-jev-proof-v1"),observed
+            assert calls[-1]=="latest" and calls.count("latest")==2,calls
+            if mode in ("upload-fail","readback-unavailable"): assert "version-deploy" not in calls and "secret" not in calls,calls
+            if mode=="version-deploy-fail": assert "upload" in calls and "secret" not in calls,calls
+    print(f"PI_RUNTIME_FIXTURES=PASS: {len(cases)} known-state/versions/namespace/subdomain/ordering/privacy cases")
 
 
 def pi_diagnostic_fixtures() -> None:
@@ -325,7 +359,7 @@ def pi_diagnostic_fixtures() -> None:
     source = (ROOT / ".github/workflows/deploy-pi-worker-preview.yml").read_text()
     script = textwrap.dedent(source.split(
         "      - name: Read-only runtime API capability diagnostics\n", 1)[1].split(
-        "      - name: Apply finite owner runtime migration and existing Jev binding\n", 1)[0].split("        run: |\n", 1)[1])
+        "      - name: Recover finite owner runtime with its existing migration and Jev binding\n", 1)[0].split("        run: |\n", 1)[1])
     with tempfile.TemporaryDirectory(prefix="envs-pi-diagnostic-") as scratch:
         tools = Path(scratch) / "bin"
         tools.mkdir()

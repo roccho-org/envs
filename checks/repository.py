@@ -1042,10 +1042,14 @@ def pi_screen_projection(source: str) -> str:
         '[.result[] | select(.id == "pi")] | length == 1',
         'FAILED_WRITE_CURRENT_AND_LATEST_OBSERVATIONS_ONLY',
         'latest_pi_migration_tag', 'current_migration_tag',
+        'KNOWN_MIGRATION_VERSIONS_RECOVERY', 'require_existing_subdomain before',
+        'require_existing_subdomain after', '--arg namespace "$namespace"',
+        'failed_write_readback upload', 'failed_write_readback version-deploy',
     ):
         require(marker in source, f"Pi runtime admission lost: {marker}")
-    require(source.index('"$RUNNER_TEMP/pi-runtime-latest.json" >/dev/null') <\
-            source.index('WRANGLER_OUTPUT_FILE_PATH="$deploy_output"'),\
+    runtime_source = source.split("      - name: Recover finite owner runtime with its existing migration and Jev binding\n", 1)[1]
+    require(runtime_source.index('"$RUNNER_TEMP/pi-runtime-latest.json" >/dev/null') <\
+            runtime_source.index('WRANGLER_OUTPUT_FILE_PATH="$upload_output"'),\
             "Latest script tag is checked separately before writing")
     require(source.index('secret put PI_JEV_PROOF_API_KEY') <
             source.index('deployments status --name pi --json > "$RUNNER_TEMP/pi-runtime-deployment.json"'),
@@ -1058,7 +1062,7 @@ def pi_screen_projection(source: str) -> str:
             "No persistent ChatGPT credential admission")
     require(source.count('.base_commit.sha == $sha and (.status == "identical" or .status == "ahead")') == 2,
             "Both runtime and screen require canonical ancestry")
-    diagnostic = source.split("      - name: Read-only runtime API capability diagnostics\n", 1)[1].split("      - name: Apply finite owner runtime migration and existing Jev binding\n", 1)[0]
+    diagnostic = source.split("      - name: Read-only runtime API capability diagnostics\n", 1)[1].split("      - name: Recover finite owner runtime with its existing migration and Jev binding\n", 1)[0]
     require("if: inputs.scope == 'runtime-diagnostic'" in diagnostic
             and "for endpoint in services/pi scripts; do" in diagnostic
             and "--request GET" in diagnostic and "--max-time 20" in diagnostic
