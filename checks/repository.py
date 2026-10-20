@@ -1070,7 +1070,7 @@ def pi_screen_projection(source: str) -> str:
             "Both runtime and screen require canonical ancestry")
     diagnostic = source.split("      - name: Read-only runtime API capability diagnostics\n", 1)[1].split("      - name: Recover finite owner runtime with its existing migration and Jev binding\n", 1)[0]
     require("if: inputs.scope == 'runtime-diagnostic'" in diagnostic
-            and "for endpoint in scripts/pi/settings scripts/pi/script-settings scripts/pi/deployments scripts scripts/pi/subdomain; do" in diagnostic
+            and 'for endpoint in scripts/pi/settings scripts/pi/script-settings scripts/pi/deployments scripts scripts/pi/subdomain "scripts/pi/versions?deployable=true"; do' in diagnostic
             and "--request GET" in diagnostic and "--max-time 20" in diagnostic
             and "READ_ONLY_OBSERVATION_NOT_DEPLOYMENT" in diagnostic,
             "Runtime diagnostics require explicit bounded state observations")
@@ -1083,6 +1083,14 @@ def pi_screen_projection(source: str) -> str:
     require("scripts/pi/versions/$current" in diagnostic and "schema_valid" in diagnostic\
             and "namespace_id_sha256" in diagnostic and "code_etag_sha256" in diagnostic,\
             "Diagnostic version depends on validated current UUID; private metadata is fingerprinted")
+    require('1 <= len(rows) <= 10' in diagnostic and 'len(latest) == 1' in diagnostic
+            and 'datetime.datetime.fromisoformat' in diagnostic and 'LATEST_RETURNED_CANDIDATE' in diagnostic
+            and 'NOT_UPLOAD_IDENTITY_OR_PROVENANCE' in diagnostic,
+            "Bounded latest-returned candidate is distinct from current/upload identity/provenance")
+    require(runtime_source.index('UPLOADED_IDENTITY_NOT_DEPLOYMENT') < runtime_source.index('echo PI_RUNTIME_PHASE=uploaded-code')
+            and runtime_source.count('--retry 3 --retry-all-errors --retry-delay 1 --max-time 20 --retry-max-time 15') == 1
+            and '--request GET --retry 3' in runtime_source,
+            "Validated upload identity precedes bounded same-UUID read-only visibility probes")
     require("PI_RUNTIME_PHASE=uploaded-receipt" in source and "PI_RUNTIME_PHASE=receipt" in source\
             and "BASH_COMMAND" not in source and "trap " not in source,\
             "Runtime uses fixed phase-entry labels, never command/error traps")
