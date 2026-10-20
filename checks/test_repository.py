@@ -211,6 +211,8 @@ def pi_runtime_fixtures() -> None:
 import json, os, sys
 from pathlib import Path
 mode = os.environ["PI_RUNTIME_CASE"]
+null_observation = mode.startswith("null-")
+mode = mode.removeprefix("null-")
 trace = Path(os.environ["PI_RUNTIME_TRACE"])
 calls = json.loads(trace.read_text()) if trace.exists() else []
 args = sys.argv[1:]
@@ -269,11 +271,14 @@ elif url.endswith("/script-settings"):
     kind="script-settings"
     result={"observability":{"enabled":False,"destinations":["fixture-private-destination"]}}
     if mode=="obs-absent": result={}
-    if mode=="obs-null": result["observability"]=None
+    if mode=="obs-null" or null_observation: result["observability"]=None
     if mode=="obs-wrong": result["observability"]={"enabled":"false"}
     if mode=="obs-true": result["observability"]["enabled"]=True
-    if mode=="obs-denied":
-        calls.append(kind); trace.write_text(json.dumps(calls)); sys.exit(22)
+    if mode=="obs-result-string": result="fixture-private-settings"
+    calls.append(kind); trace.write_text(json.dumps(calls))
+    Path(args[args.index("--output")+1]).write_text(json.dumps({"success":mode!="obs-api-false","result":result}))
+    print("403" if mode=="obs-denied" else ("201" if mode=="obs-http" else "200"),end="")
+    sys.exit(0)
 elif url.endswith("/settings"):
     kind = "settings"
     config = Path(os.environ["PI_RUNTIME_DIR"],"wrangler.json")
@@ -316,7 +321,8 @@ print(json.dumps({"success":True,"result":result}))
            "subdomain-disabled","subdomain-preview","subdomain-denied","post-subdomain-preview",
            "post-subdomain-disabled","post-subdomain-denied","namespace-missing","namespace-duplicate",
            "namespace-empty","namespace-changed","post-latest-unknown","upload-receipt",\
-           "obs-absent","obs-null","obs-wrong","obs-true","obs-denied")
+           "obs-absent","obs-null","obs-wrong","obs-true","obs-denied","obs-api-false","obs-http","obs-result-string",\
+           "null-code","null-namespace-changed","null-owner","null-post-subdomain-preview","null-changed-current")
     for mode in cases:
         current=scratch/mode
         current.mkdir()
@@ -330,7 +336,9 @@ print(json.dumps({"success":True,"result":result}))
             "CLOUDFLARE_API_TOKEN":"fixture-limited","CLOUDFLARE_ACCOUNT_ID":"fixture-account",
             "JEV_API_KEY":"fixture-jev-only","OPS_SHA":"a"*40,
             "PI_RUNTIME_CASE":mode,"PI_RUNTIME_TRACE":str(trace)})
-        assert (result.returncode==0)==(mode=="success"),(mode,result.stdout,result.stderr)
+        assert (result.returncode==0)==(mode in ("success","obs-null")),(mode,result.stdout,result.stderr)
+        mode = mode.removeprefix("null-")
+        if result.returncode: assert '"admission"' not in result.stdout, (mode,result.stdout)
         assert "fixture-private" not in result.stdout+result.stderr,mode
         calls=json.loads(trace.read_text())
         if mode in ("namespace-missing","namespace-duplicate","namespace-empty"):
@@ -347,7 +355,7 @@ print(json.dumps({"success":True,"result":result}))
         if mode=="changed-current": assert "secret" in calls and calls.count("status")>=3,calls
         if mode.startswith("post-subdomain-"): assert "secret" in calls and calls.count("subdomain")==2,calls
         if mode=="namespace-changed": assert "secret" in calls and calls[-1]=="script-settings",calls
-        if mode.startswith("obs-"): assert "secret" in calls and calls[-1]=="script-settings",calls
+        if mode.startswith("obs-") and mode!="obs-null": assert "secret" in calls and calls[-1]=="script-settings",calls
         if mode=="post-latest-unknown": assert "secret" in calls and calls.count("latest")==2,calls
         if mode=="upload-receipt": assert calls[-1]=="upload" and "version-deploy" not in calls,calls
         phases=[line.split("=",1)[1] for line in result.stderr.splitlines() if line.startswith("PI_RUNTIME_PHASE=")]
@@ -361,13 +369,16 @@ print(json.dumps({"success":True,"result":result}))
         if mode.startswith("subdomain-"): expected_phase="subdomain-before"
         if mode.startswith("post-subdomain-"): expected_phase="subdomain-after"
         if mode in ("history","current-absent","current-empty","malformed"): expected_phase="current-tag"
-        if mode.startswith("obs-"): expected_phase="final-observability"
+        if mode.startswith("obs-"): expected_phase="receipt" if mode=="obs-null" else "final-observability"
         assert phases[-1]==expected_phase,(mode,phases)
-        if mode=="success":
+        if mode in ("success","obs-null"):
             assert calls==["settings","status","version","latest","subdomain","upload","version","version-deploy","secret","status","settings","script-settings","version","subdomain","latest","status"],calls
             receipt=json.loads(result.stdout)
             assert receipt["version"].endswith("000000000003") and receipt["route"]=="KNOWN_MIGRATION_VERSIONS_RECOVERY"
-            assert receipt["observability"]=={"enabled":False} and "destinations" not in result.stdout
+            assert receipt["observability"]=={"enabled":None if mode=="obs-null" else False} and "destinations" not in result.stdout
+            assert receipt["scope"]==("PROVENANCE_ONLY" if mode=="obs-null" else "DEPLOYMENT_ONLY_NOT_INFERENCE")
+            assert receipt["admission"]==("OBSERVABILITY_UNRESOLVED" if mode=="obs-null" else "API_OFF")
+            assert receipt["remaining_gate"]==("FRESH_OWNER_DASHBOARD_OFF_AND_SEPARATE_LIVE_GO" if mode=="obs-null" else "SEPARATE_LIVE_GO")
         if mode in ("upload-fail","version-deploy-fail","secret-fail","readback-unavailable"):
             rows=[json.loads(line) for line in result.stdout.splitlines() if line.startswith("{")]
             observed=next(row for row in rows if row.get("scope")=="FAILED_WRITE_CURRENT_AND_LATEST_OBSERVATIONS_ONLY")

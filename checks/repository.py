@@ -1038,7 +1038,9 @@ def pi_screen_projection(source: str) -> str:
         'secret put PI_JEV_PROOF_API_KEY', '"PI_PROOF_TRANSIENT": "true"',
         '"PI_ACCESS_OWNER_HASH": "7c51a47a695796b59dd322db878b455cdc725790797a2c388a348a78bd5527b2"',
         '.migration_tag == "pi-jev-proof-v1"', '.name != "PI_CHATGPT_BOOTSTRAP"',
-        'scope:"DEPLOYMENT_ONLY_NOT_INFERENCE"',
+        '"DEPLOYMENT_ONLY_NOT_INFERENCE"', '"PROVENANCE_ONLY"', '"OBSERVABILITY_UNRESOLVED"',
+        '"API_OFF"', '"FRESH_OWNER_DASHBOARD_OFF_AND_SEPARATE_LIVE_GO"',
+        '(.result | has("observability"))', 'if . == null then true elif type == "object"',
         '[.result[] | select(.id == "pi")] | length == 1',
         'FAILED_WRITE_CURRENT_AND_LATEST_OBSERVATIONS_ONLY',
         'latest_pi_migration_tag', 'current_migration_tag',
@@ -1053,6 +1055,8 @@ def pi_screen_projection(source: str) -> str:
     require(runtime_source.index('"$RUNNER_TEMP/pi-runtime-latest.json" >/dev/null') <\
             runtime_source.index('WRANGLER_OUTPUT_FILE_PATH="$upload_output"'),\
             "Latest script tag is checked separately before writing")
+    require(runtime_source.index('echo PI_RUNTIME_PHASE=final-current') < runtime_source.index('"PROVENANCE_ONLY"'),
+            "Unresolved observability receipt still requires every final provenance guard")
     require(source.index('secret put PI_JEV_PROOF_API_KEY') <
             source.index('deployments status --name pi --json > "$RUNNER_TEMP/pi-runtime-deployment.json"'),
             "Current version must be read after secret put")
