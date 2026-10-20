@@ -242,15 +242,15 @@ jobs:
           api="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers"
           diagnostic_exit=0
           observe_get() {
-            local endpoint="$1" file
+            local endpoint="$1" role="${2:-FIXED}" file
             file="$RUNNER_TEMP/pi-observe-${endpoint//\//-}"
             if ! curl --silent --show-error --max-time 20 --request GET --output "$file.json" --write-out '%{http_code}' -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$api/$endpoint" > "$file.http" 2> "$file.stderr"; then
               printf 000 > "$file.http"
             fi
-            if ! "$ENVS_EFFECT_BIN/python3" -I - "$endpoint" "$file" <<'PY'
-          import hashlib, json, re, sys
+            if ! "$ENVS_EFFECT_BIN/python3" -I - "$endpoint" "$file" "$role" <<'PY'
+          import datetime, hashlib, json, re, sys
           from pathlib import Path
-          endpoint, filename = sys.argv[1:]
+          endpoint, filename, role = sys.argv[1:]
           def read(suffix):
               try:
                   return Path(filename + suffix).read_text()
@@ -313,6 +313,32 @@ jobs:
               rows = [row for row in result if row.get("id") == "pi"] if valid else []
               state = {"target_pi_count":len(rows) if valid else None, "latest_pi_migration_tag":tag(rows[0]) if len(rows) == 1 else "UNKNOWN"}
               valid = valid and len(rows) == 1
+          elif endpoint == "scripts/pi/versions?deployable=true":
+              rows = result.get("items") if isinstance(result, dict) else None
+              valid = isinstance(rows, list) and 1 <= len(rows) <= 10
+              parsed = []
+              if valid:
+                  try:
+                      for row in rows:
+                          identity = row.get("id") if isinstance(row, dict) else None
+                          metadata = row.get("metadata") if isinstance(row, dict) else None
+                          created = metadata.get("created_on") if isinstance(metadata, dict) else None
+                          if not isinstance(identity, str) or not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", identity):
+                              raise ValueError("invalid identity")
+                          if not isinstance(created, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)", created):
+                              raise ValueError("invalid timestamp")
+                          parsed.append((datetime.datetime.fromisoformat(created.replace("Z", "+00:00")), identity, created))
+                      valid = len({row[1] for row in parsed}) == len(rows)
+                  except (ValueError, TypeError, OverflowError):
+                      valid = False
+              newest = max((row[0] for row in parsed), default=None) if valid else None
+              latest = [row for row in parsed if row[0] == newest] if valid else []
+              valid = valid and len(latest) == 1
+              candidate = latest[0][1] if valid else "UNKNOWN"
+              Path(filename + ".candidate").write_text(candidate)
+              state = {"candidate_scope":"LATEST_RETURNED_CANDIDATE_NOT_UPLOAD_IDENTITY_OR_PROVENANCE",
+                       "returned_version_count":len(rows) if isinstance(rows, list) else None,
+                       "candidate_version":candidate,"candidate_created_on":latest[0][2] if valid else "UNKNOWN"}
           elif endpoint == "scripts/pi/subdomain":
               valid = isinstance(result, dict) and type(result.get("enabled")) is bool and type(result.get("previews_enabled")) is bool
               state = {"enabled":result.get("enabled") if valid else None,"previews_enabled":result.get("previews_enabled") if valid else None}
@@ -321,8 +347,8 @@ jobs:
               runtime = resources.get("script_runtime") if isinstance(resources, dict) else None
               script = resources.get("script") if isinstance(resources, dict) else None
               valid = isinstance(result, dict) and result.get("id") == endpoint.rsplit("/",1)[1] and isinstance(runtime, dict) and isinstance(script, dict)
-              state = {"current_migration_tag":tag(runtime) if valid else "UNKNOWN","code_etag_sha256":fingerprint(script.get("etag")) if valid else "UNKNOWN"}
-          print(json.dumps({"scope":"READ_ONLY_OBSERVATION_NOT_DEPLOYMENT","endpoint":endpoint,
+              state = {("current_migration_tag" if role == "CURRENT" else "candidate_migration_tag"):tag(runtime) if valid else "UNKNOWN","code_etag_sha256":fingerprint(script.get("etag")) if valid else "UNKNOWN"}
+          print(json.dumps({"scope":"READ_ONLY_OBSERVATION_NOT_DEPLOYMENT","endpoint":endpoint,"observation_role":role,
                             "http":http if re.fullmatch(r"[0-9]{3}", http) else "UNKNOWN",
                             "success":success,"schema_valid":bool(valid),"codes":codes,**state}, separators=(",", ":")))
           sys.exit(0 if valid and success is True and http == "200" else 1)
@@ -331,15 +357,23 @@ jobs:
               diagnostic_exit=1
             fi
           }
-          # Five fixed reads plus at most one version read derived from a validated current UUID.
-          for endpoint in scripts/pi/settings scripts/pi/script-settings scripts/pi/deployments scripts scripts/pi/subdomain; do
+          # Six fixed reads plus at most one current and one latest-returned-candidate version read.
+          for endpoint in scripts/pi/settings scripts/pi/script-settings scripts/pi/deployments scripts scripts/pi/subdomain "scripts/pi/versions?deployable=true"; do
             observe_get "$endpoint"
           done
           current_file="$RUNNER_TEMP/pi-observe-scripts-pi-deployments"
           if [[ "$(cat "$current_file.http")" == 200 ]] && current="$(jq -er 'select(.success == true) | .result.deployments[0].versions | select(length == 1 and .[0].percentage == 100) | .[0].version_id | select(test("^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$"))' "$current_file.json" 2>/dev/null)"; then
-            observe_get "scripts/pi/versions/$current"
+            observe_get "scripts/pi/versions/$current" CURRENT
           else
             echo '{"scope":"READ_ONLY_OBSERVATION_NOT_DEPLOYMENT","endpoint":"scripts/pi/versions/UNKNOWN","http":"NOT_REQUESTED","success":null,"schema_valid":false,"codes":[],"current_migration_tag":"UNKNOWN","code_etag_sha256":"UNKNOWN"}'
+            diagnostic_exit=1
+          fi
+          candidate_file="$RUNNER_TEMP/pi-observe-scripts-pi-versions?deployable=true.candidate"
+          candidate="$(cat "$candidate_file" 2>/dev/null || true)"
+          if [[ "$candidate" =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]]; then
+            observe_get "scripts/pi/versions/$candidate" LATEST_RETURNED_CANDIDATE
+          else
+            echo '{"scope":"READ_ONLY_OBSERVATION_NOT_DEPLOYMENT","observation_role":"LATEST_RETURNED_CANDIDATE","endpoint":"scripts/pi/versions/CANDIDATE_UNKNOWN","http":"NOT_REQUESTED","success":null,"schema_valid":false,"codes":[],"candidate_migration_tag":"UNKNOWN","code_etag_sha256":"UNKNOWN"}'
             diagnostic_exit=1
           fi
           exit "$diagnostic_exit"
@@ -457,9 +491,11 @@ jobs:
             echo "Runtime upload failed; no operator resend or credential fallback"; exit 1
           fi
           echo PI_RUNTIME_PHASE=uploaded-receipt >&2
-          deployed="$(jq -ser '[.[] | select(.type == "version-upload" and .version == 1 and .worker_name == "pi" and .worker_name_overridden == false)] | select(length == 1) | .[0].version_id | select(test("^[0-9a-f-]{36}$"))' "$upload_output")"
+          deployed="$(jq -ser '[.[] | select(.type == "version-upload" and .version == 1 and .worker_name == "pi" and .worker_name_overridden == false)] | select(length == 1) | .[0].version_id | select(test("^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$"))' "$upload_output")"
+          printf '{"scope":"UPLOADED_IDENTITY_NOT_DEPLOYMENT","version":"%s"}\n' "$deployed"
           echo PI_RUNTIME_PHASE=uploaded-code >&2
-          curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$api/scripts/pi/versions/$deployed" > "$RUNNER_TEMP/pi-runtime-code.json"
+          # Visibility probes only: at most four same-UUID GETs; retry-max-time is not a total deadline.
+          curl -fsS --request GET --retry 3 --retry-all-errors --retry-delay 1 --max-time 20 --retry-max-time 15 -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" --output "$RUNNER_TEMP/pi-runtime-code.json" "$api/scripts/pi/versions/$deployed"
           etag="$(jq -er --arg deployed "$deployed" 'select(.success == true and .result.id == $deployed) | .result.resources.script.etag | select(type == "string" and length > 0)' "$RUNNER_TEMP/pi-runtime-code.json")"
           echo PI_RUNTIME_PHASE=version-deploy >&2
           if ! "$ENVS_EFFECT_BIN/wrangler" versions deploy "$deployed@100%" --yes --config "$PI_RUNTIME_DIR/wrangler.json" --name pi > "$RUNNER_TEMP/pi-runtime-version-deploy.stdout" 2> "$RUNNER_TEMP/pi-runtime-version-deploy.stderr"; then
