@@ -298,6 +298,8 @@ print(json.dumps({"success":True,"result":result}))
         assert "fixture-private" not in result.stdout + result.stderr, mode
         calls = json.loads(trace.read_text())
         if mode in ("history", "malformed", "traffic", "latest-unknown", "latest-type", "latest-missing", "latest-duplicate", "latest-malformed"): assert "deploy" not in calls, mode
+        if mode in ("latest-unknown","latest-type","latest-missing","latest-duplicate","latest-malformed"):
+            assert calls == ["settings","status","version","latest"], calls
         if "secret" in calls: assert calls.index("deploy") < calls.index("secret"), mode
         if mode == "deployed-mismatch": assert "deploy" in calls and "secret" not in calls, calls
         if mode == "changed-current": assert "secret" in calls and calls.count("status") >= 3, calls
