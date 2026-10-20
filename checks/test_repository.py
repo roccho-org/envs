@@ -233,7 +233,7 @@ if kind == "wrangler":
         config = json.loads(Path(args[args.index("--config")+1]).read_text())
         assert config["vars"]["PI_PROOF_TRANSIENT"] == "true"
         assert config["migrations"] == [{"tag":"pi-jev-proof-v1","new_sqlite_classes":["Session"]}]
-        Path(os.environ["WRANGLER_OUTPUT_FILE_PATH"]).write_text(json.dumps({
+        if mode=="upload-receipt":\n            Path(os.environ["WRANGLER_OUTPUT_FILE_PATH"]).write_text("{}")\n            sys.exit(0)\n        Path(os.environ["WRANGLER_OUTPUT_FILE_PATH"]).write_text(json.dumps({
             "type":"version-upload","version":1,"worker_name":"pi","worker_name_overridden":False,"version_id":deployed})+"\\n")
     elif kind == "status":
         version = final if "secret" in calls else (deployed if "version-deploy" in calls else old)
@@ -305,7 +305,7 @@ print(json.dumps({"success":True,"result":result}))
            "latest-missing","latest-duplicate","latest-malformed","readback-unavailable",
            "subdomain-disabled","subdomain-preview","subdomain-denied","post-subdomain-preview",
            "post-subdomain-disabled","post-subdomain-denied","namespace-missing","namespace-duplicate",
-           "namespace-empty","namespace-changed","post-latest-unknown")
+           "namespace-empty","namespace-changed","post-latest-unknown","upload-receipt")
     for mode in cases:
         current=scratch/mode
         current.mkdir()
@@ -337,6 +337,19 @@ print(json.dumps({"success":True,"result":result}))
         if mode.startswith("post-subdomain-"): assert "secret" in calls and calls.count("subdomain")==2,calls
         if mode=="namespace-changed": assert "secret" in calls and calls[-1]=="settings",calls
         if mode=="post-latest-unknown": assert "secret" in calls and calls.count("latest")==2,calls
+        if mode=="upload-receipt": assert calls[-1]=="upload" and "version-deploy" not in calls,calls
+        phases=[line.split("=",1)[1] for line in result.stderr.splitlines() if line.startswith("PI_RUNTIME_PHASE=")]
+        assert phases and phases[0]=="pre-settings",phases
+        expected_phase={"success":"receipt","upload-receipt":"uploaded-receipt","owner":"final-owner","code":"final-code",\
+                        "changed-current":"final-current","namespace-changed":"final-namespace","post-latest-unknown":"final-latest",\
+                        "upload-fail":"upload","version-deploy-fail":"version-deploy","secret-fail":"key",\
+                        "readback-unavailable":"upload","deployed-mismatch":"uploaded-code","traffic":"current-status"}.get(mode)
+        if mode.startswith("namespace-") and mode!="namespace-changed": expected_phase="namespace"
+        if mode.startswith("latest-"): expected_phase="latest-tag"
+        if mode.startswith("subdomain-"): expected_phase="subdomain-before"
+        if mode.startswith("post-subdomain-"): expected_phase="subdomain-after"
+        if mode in ("history","current-absent","current-empty","malformed"): expected_phase="current-tag"
+        assert phases[-1]==expected_phase,(mode,phases)
         if mode=="success":
             assert calls==["settings","status","version","latest","subdomain","upload","version","version-deploy","secret","status","settings","version","subdomain","latest","status"],calls
             receipt=json.loads(result.stdout)
@@ -353,7 +366,7 @@ print(json.dumps({"success":True,"result":result}))
 
 
 def pi_diagnostic_fixtures() -> None:
-    """Execute actual two-GET diagnostics; denial is an observation, never a write retry."""
+    """Execute the bounded state-only GETs and prove no private body is projected."""
     bash = shutil.which("bash")
     assert bash
     source = (ROOT / ".github/workflows/deploy-pi-worker-preview.yml").read_text()
@@ -361,52 +374,76 @@ def pi_diagnostic_fixtures() -> None:
         "      - name: Read-only runtime API capability diagnostics\n", 1)[1].split(
         "      - name: Recover finite owner runtime with its existing migration and Jev binding\n", 1)[0].split("        run: |\n", 1)[1])
     with tempfile.TemporaryDirectory(prefix="envs-pi-diagnostic-") as scratch:
-        tools = Path(scratch) / "bin"
+        tools=Path(scratch)/"bin"
         tools.mkdir()
-        (tools / "python3").symlink_to(sys.executable)
-        curl = tools / "curl"
+        (tools/"python3").symlink_to(sys.executable)
+        curl=tools/"curl"
         curl.write_text("""#!PYTHON
 import json, os, sys
 from pathlib import Path
-args = sys.argv[1:]
-assert args[args.index("--request")+1] == "GET"
+args=sys.argv[1:]
+assert args[args.index("--request")+1]=="GET"
 assert "--location" not in args and "--retry" not in args
-endpoint = args[-1].split("/workers/",1)[1]
-assert endpoint in ("services/pi", "scripts")
-trace = Path(os.environ["PI_DIAGNOSTIC_TRACE"])
+endpoint=args[-1].split("/workers/",1)[1]
+current="00000000-0000-4000-8000-000000000001"
+assert endpoint in ("scripts/pi/settings","scripts/pi/deployments","scripts","scripts/pi/subdomain","scripts/pi/versions/"+current)
+trace=Path(os.environ["PI_DIAGNOSTIC_TRACE"])
 with trace.open("a") as stream: stream.write(endpoint+"\\n")
-mode = os.environ["PI_DIAGNOSTIC_CASE"]
-if mode == "network" and endpoint == "services/pi": sys.exit(7)
-denied = (mode == "service-denied" and endpoint == "services/pi") or (mode == "scripts-denied" and endpoint == "scripts")
-value = {"success":not denied,"errors":[{"code":10000,"message":"fixture-private-body"}] if denied else [],
-         "result":[{"id":"pi"},{"id":"private-other-worker"}] if endpoint=="scripts" else {"id":"pi","email":"private@example.invalid"}}
-body = Path(args[args.index("--output")+1])
-if mode == "wrongshape": value["result"] = "fixture-private-body"
-body.write_text("fixture-private-body" if mode=="malformed" else json.dumps(value))
-print("403" if denied else "200", end="")
-""".replace("#!PYTHON", "#!"+sys.executable))
+mode=os.environ["PI_DIAGNOSTIC_CASE"]
+if mode=="network" and endpoint=="scripts/pi/settings": sys.exit(7)
+denied=(mode=="settings-denied" and endpoint=="scripts/pi/settings") or (mode=="current-denied" and endpoint=="scripts/pi/deployments") or (mode=="latest-denied" and endpoint=="scripts") or (mode=="subdomain-denied" and endpoint=="scripts/pi/subdomain") or (mode=="version-denied" and endpoint.startswith("scripts/pi/versions/"))
+if endpoint=="scripts/pi/settings":
+    bindings=[{"name":"SESSIONS","type":"durable_object_namespace","class_name":"Session","namespace_id":"fixture-private-namespace"},
+              {"name":"PI_JEV_PROOF_API_KEY","type":"secret_text"}]
+    if mode=="namespace-missing": bindings=[]
+    if mode=="settings-shape": bindings="fixture-private-body"
+    result={"bindings":bindings,"observability":{"enabled":False},"email":"fixture-private@example.invalid"}
+elif endpoint=="scripts/pi/deployments":
+    result={"deployments":[{"versions":[{"version_id":"fixture-private-invalid" if mode=="current-shape" else current,"percentage":100}]}]}
+elif endpoint=="scripts":
+    result=[{"id":"pi","migration_tag":"fixture-private-tag" if mode=="unknown-tag" else "pi-jev-proof-v1"},{"id":"fixture-private-worker"}]
+    if mode=="latest-duplicate": result.append({"id":"pi"})
+elif endpoint=="scripts/pi/subdomain":
+    result={"enabled":mode!="subdomain-unmet","previews_enabled":mode=="subdomain-unmet","owner":"fixture-private@example.invalid"}
+else:
+    result={"id":"wrong" if mode=="version-shape" else current,"resources":{"script_runtime":{"migration_tag":"pi-jev-proof-v1"},"script":{"etag":"fixture-private-etag"}}}
+value={"success":not denied,"errors":[{"code":10000,"message":"fixture-private-body"}] if denied else [],"result":result}
+Path(args[args.index("--output")+1]).write_text("fixture-private-body" if mode=="malformed-json" and endpoint=="scripts/pi/settings" else json.dumps(value))
+print("403" if denied else "200",end="")
+""".replace("#!PYTHON","#!"+sys.executable))
         curl.chmod(0o700)
-        for mode in ("success","service-denied","scripts-denied","malformed","wrongshape","network"):
-            current = Path(scratch) / mode
+        cases=("success","settings-denied","current-denied","latest-denied","subdomain-denied","version-denied",
+               "malformed-json","settings-shape","current-shape","latest-duplicate","unknown-tag","network",
+               "subdomain-unmet","namespace-missing","version-shape")
+        for mode in cases:
+            current=Path(scratch)/mode
             current.mkdir()
-            trace = current / "calls"
-            result = subprocess.run([bash,"-c",script], capture_output=True,text=True,env={
+            trace=current/"calls"
+            result=subprocess.run([bash,"-c",script],capture_output=True,text=True,env={
                 **os.environ,"PATH":str(tools)+os.pathsep+os.environ["PATH"],
                 "ENVS_EFFECT_BIN":str(tools),"RUNNER_TEMP":str(current),
                 "CLOUDFLARE_API_TOKEN":"fixture-private-token","CLOUDFLARE_ACCOUNT_ID":"fixture-account",
                 "PI_DIAGNOSTIC_CASE":mode,"PI_DIAGNOSTIC_TRACE":str(trace)})
-            assert (result.returncode==0) == (mode=="success"), (mode,result.stdout,result.stderr)
-            assert trace.read_text().splitlines() == ["services/pi","scripts"]
-            assert not any(secret in result.stdout+result.stderr for secret in
-                           ("fixture-private","private-other-worker","private@example.invalid")), mode
-            rows = [json.loads(line) for line in result.stdout.splitlines()]
-            assert len(rows)==2 and all(row["scope"]=="READ_ONLY_OBSERVATION_NOT_DEPLOYMENT" for row in rows)
-            if mode=="success": assert rows[1]["target_pi_present"] is True
-            if mode=="service-denied": assert rows[0]["codes"]==[10000] and rows[1]["success"] is True
-            if mode=="scripts-denied": assert rows[1]["codes"]==[10000] and rows[0]["success"] is True
-            if mode in ("malformed","wrongshape"): assert all(row["success"] is None for row in rows)
-            if mode=="network": assert rows[0]["http"]=="000" and rows[1]["success"] is True
-    print("PI_READ_ONLY_DIAGNOSTIC_FIXTURES=PASS: 6 capability/denial/schema/network/privacy cases")
+            assert (result.returncode==0)==(mode in ("success","unknown-tag","subdomain-unmet","namespace-missing")),(mode,result.stdout,result.stderr)
+            calls=trace.read_text().splitlines()
+            assert calls[:4]==["scripts/pi/settings","scripts/pi/deployments","scripts","scripts/pi/subdomain"],calls
+            assert len(calls)==(4 if mode in ("current-denied","current-shape") else 5),calls
+            assert "fixture-private" not in result.stdout+result.stderr,mode
+            rows=[json.loads(line) for line in result.stdout.splitlines()]
+            assert len(rows)==5 and all(row["scope"]=="READ_ONLY_OBSERVATION_NOT_DEPLOYMENT" for row in rows),rows
+            if mode=="success":
+                assert rows[0]["session_binding_count"]==1 and rows[0]["session_type_ok"] and rows[0]["session_class_ok"]
+                assert len(rows[0]["namespace_id_sha256"])==64 and rows[0]["jev_binding_present"] is True
+                assert rows[0]["owner_vars_match"] is False and rows[0]["observability_disabled"] is True
+                assert rows[2]["latest_pi_migration_tag"]=="pi-jev-proof-v1" and len(rows[4]["code_etag_sha256"])==64
+            if mode in ("current-denied","current-shape"): assert rows[4]["http"]=="NOT_REQUESTED" and rows[4]["current_migration_tag"]=="UNKNOWN"
+            if mode=="unknown-tag": assert rows[2]["latest_pi_migration_tag"]=="UNKNOWN"
+            if mode=="subdomain-unmet": assert rows[3]["enabled"] is False and rows[3]["previews_enabled"] is True
+            if mode=="namespace-missing": assert rows[0]["session_binding_count"]==0 and rows[0]["namespace_id_sha256"]=="UNKNOWN"
+            if mode=="version-shape": assert rows[4]["current_migration_tag"]=="UNKNOWN" and rows[4]["code_etag_sha256"]=="UNKNOWN"
+            for capture in current.glob("pi-observe-*"):
+                assert capture.stat().st_mode & 0o077==0,capture
+    print(f"PI_READ_ONLY_DIAGNOSTIC_FIXTURES=PASS: {len(cases)} bounded-state/denial/schema/namespace/privacy cases")
 
 
 def main() -> None:

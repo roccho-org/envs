@@ -1064,7 +1064,7 @@ def pi_screen_projection(source: str) -> str:
             "Both runtime and screen require canonical ancestry")
     diagnostic = source.split("      - name: Read-only runtime API capability diagnostics\n", 1)[1].split("      - name: Recover finite owner runtime with its existing migration and Jev binding\n", 1)[0]
     require("if: inputs.scope == 'runtime-diagnostic'" in diagnostic
-            and "for endpoint in services/pi scripts; do" in diagnostic
+            and "for endpoint in scripts/pi/settings scripts/pi/deployments scripts scripts/pi/subdomain; do" in diagnostic
             and "--request GET" in diagnostic and "--max-time 20" in diagnostic
             and "READ_ONLY_OBSERVATION_NOT_DEPLOYMENT" in diagnostic,
             "Runtime diagnostics require explicit bounded two-GET observations")
@@ -1072,8 +1072,14 @@ def pi_screen_projection(source: str) -> str:
         ("secrets", "PI_CLOUDFLARE_API_TOKEN"), ("vars", "CLOUDFLARE_ACCOUNT_ID")},
         "Diagnostic admits only existing limited token/account, never Jev")
     for forbidden in ("--request POST", "--request PUT", "--request DELETE", "--location",
-                      "--retry", "wrangler", "JEV", "error.get(\"message\")"):
+                      "--retry", "wrangler", "secrets.JEV", "error.get(\"message\")"):
         require(forbidden not in diagnostic, f"Diagnostic is read-only/private: {forbidden}")
+    require("scripts/pi/versions/$current" in diagnostic and "schema_valid" in diagnostic\
+            and "namespace_id_sha256" in diagnostic and "code_etag_sha256" in diagnostic,\
+            "Diagnostic version depends on validated current UUID; private metadata is fingerprinted")
+    require("PI_RUNTIME_PHASE=uploaded-receipt" in source and "PI_RUNTIME_PHASE=receipt" in source\
+            and "BASH_COMMAND" not in source and "trap " not in source,\
+            "Runtime uses fixed phase-entry labels, never command/error traps")
     require(source.count("if: inputs.scope == 'screen'") == 3
             and "if: inputs.scope != 'runtime'" not in source
             and "if: inputs.scope != 'runtime-diagnostic'" in source,
