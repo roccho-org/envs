@@ -86,7 +86,7 @@ def pi_native_versions_fixtures() -> None:
     assert bash and jq, "the deployment runner's native bash and jq are required"
     workflow = (ROOT / ".github/workflows/deploy-pi-worker-preview.yml").read_text()
     step = workflow.split("      - name: Deploy only the screen preview using existing native auth\n", 1)[1]
-    script = textwrap.dedent(step.split("        run: |\n", 1)[1])
+    script = textwrap.dedent(step.split("        run: |\n", 1)[1].split("\n      - name:", 1)[0])
     # Synthetic scratch is retained only for this ephemeral CI runner's lifetime.
     scratch = Path(tempfile.mkdtemp(prefix="envs-pi-native-fixtures-"))
     tools = scratch / "bin"

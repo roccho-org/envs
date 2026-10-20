@@ -1016,8 +1016,54 @@ def check_relocation(root: Path, source: str, check: str) -> None:
         require(marker in check, f"check must test the relocation entry with the locked PyNaCl: {marker}")
 
 
+def pi_screen_projection(source: str) -> str:
+    """Validate the separate runtime admission, then retain the unchanged screen oracle."""
+    dispatch = """  workflow_dispatch:
+    inputs:
+      scope:
+        type: choice
+        options: [screen, runtime]
+        default: screen
+        description: "Screen only, or separately reviewed finite owner runtime"
+"""
+    require(dispatch in source and "inputs.ops_sha" not in source,
+            "Pi scope is explicit; screen remains default; source is never caller supplied")
+    for marker in (
+        "repos/roccho-org/ops/pulls/608",
+        '.merged == true and .state == "closed" and .base.repo.full_name == "roccho-org/ops" and .base.ref == "proposals" and .head.repo.full_name == "roccho-org/ops" and .head.ref == "codex/pi-jev-worker-20261020" and (.merge_commit_sha | test("^[0-9a-f]{40}$"))',
+        "pi-jev-runtime-$OPS_SHA", '(cd "$art/runtime" && sha256sum -c SHA256SUMS)',
+        '"KEYLESS_SELECTED_OWNER_TRANSIENT_RUNTIME"', '.workers_dev == true',
+        '.migrations == [{"tag":"pi-jev-proof-v1","new_sqlite_classes":["Session"]}]',
+        "if: inputs.scope == 'runtime'", "secrets.JEV_API_KEY",
+        'secret put PI_JEV_PROOF_API_KEY', '"PI_PROOF_TRANSIENT": "true"',
+        '"PI_ACCESS_OWNER_HASH": "7c51a47a695796b59dd322db878b455cdc725790797a2c388a348a78bd5527b2"',
+        '.migration_tag == "pi-jev-proof-v1"', '.name != "PI_CHATGPT_BOOTSTRAP"',
+        'scope:"DEPLOYMENT_ONLY_NOT_INFERENCE"',
+    ):
+        require(marker in source, f"Pi runtime admission lost: {marker}")
+    require(source.index('secret put PI_JEV_PROOF_API_KEY') <
+            source.index('deployments status --name pi --json > "$RUNNER_TEMP/pi-runtime-deployment.json"'),
+            "Current version must be read after secret put")
+    require(set(INPUT_REFERENCE.findall(source)) == {
+        ("secrets", "PI_CLOUDFLARE_API_TOKEN"), ("secrets", "JEV_API_KEY"),
+        ("vars", "CLOUDFLARE_ACCOUNT_ID")},
+        "Runtime may reuse only the existing dedicated token/account/Jev slot")
+    require("secrets.PI_CHATGPT" not in source and "secrets.OPENAI" not in source,
+            "No persistent ChatGPT credential admission")
+    require(source.count('.base_commit.sha == $sha and (.status == "identical" or .status == "ahead")') == 2,
+            "Both runtime and screen require canonical ancestry")
+    source = source.replace(dispatch, "  workflow_dispatch:\n")
+    before, rest = source.split('          if [[ "${{ inputs.scope }}" == runtime ]]; then\n', 1)
+    source = before + rest.split("          fi\n", 1)[1]
+    before, rest = source.split("      - name: Obtain separately admitted owner runtime from successful canonical CI\n", 1)
+    source = before + "      - name: Native Wrangler dry-run before mapping Cloudflare credentials\n" + rest.split("      - name: Native Wrangler dry-run before mapping Cloudflare credentials\n", 1)[1]
+    source = source.split("\n      - name: Apply finite owner runtime migration and existing Jev binding\n", 1)[0] + "\n"
+    return source.replace("        if: inputs.scope != 'runtime'\n", "")
+
+
 def check_pi_worker_preview(source: str, canonical_consumer: str) -> None:
     """One manual projection of the accepted merge; existing secret stays in envs."""
+    source = pi_screen_projection(source)
     require("on:\n  workflow_dispatch:\n\npermissions:\n" in source
             and "inputs.ops_sha" not in source,
             "Pi preview must resolve the accepted source without a copied SHA input")
