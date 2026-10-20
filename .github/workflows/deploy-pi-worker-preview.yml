@@ -241,38 +241,101 @@ jobs:
           test -n "$CLOUDFLARE_API_TOKEN" && test -n "$CLOUDFLARE_ACCOUNT_ID"
           api="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers"
           diagnostic_exit=0
-          for endpoint in services/pi scripts; do
-            body="$(mktemp "$RUNNER_TEMP/pi-capability.XXXXXX.json")"
-            if ! http="$(curl --silent --show-error --max-time 20 --request GET --output "$body" --write-out '%{http_code}' -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$api/$endpoint" 2> "$body.stderr")"; then
-              http=000
+          observe_get() {
+            local endpoint="$1" file
+            file="$RUNNER_TEMP/pi-observe-${endpoint//\//-}"
+            if ! curl --silent --show-error --max-time 20 --request GET --output "$file.json" --write-out '%{http_code}' -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$api/$endpoint" > "$file.http" 2> "$file.stderr"; then
+              printf 000 > "$file.http"
             fi
-            if ! "$ENVS_EFFECT_BIN/python3" -I - "$endpoint" "$http" "$body" <<'PY'
-          import json, re, sys
+            if ! "$ENVS_EFFECT_BIN/python3" -I - "$endpoint" "$file" <<'PY'
+          import hashlib, json, re, sys
           from pathlib import Path
-          endpoint, http, filename = sys.argv[1:]
+          endpoint, filename = sys.argv[1:]
+          def read(suffix):
+              try:
+                  return Path(filename + suffix).read_text()
+              except OSError:
+                  return ""
+          def fingerprint(value):
+              return hashlib.sha256(value.encode()).hexdigest() if isinstance(value, str) and value else "UNKNOWN"
+          def tag(value):
+              if not isinstance(value, dict):
+                  return "UNKNOWN"
+              if "migration_tag" not in value:
+                  return "ABSENT"
+              value = value["migration_tag"]
+              return {"":"EMPTY","pi-jev-proof-v1":"pi-jev-proof-v1"}.get(value, "UNKNOWN") if isinstance(value, str) else "UNKNOWN"
           try:
-              value = json.loads(Path(filename).read_text())
-          except (ValueError, OSError):
+              value = json.loads(read(".json"))
+          except ValueError:
               value = None
+          http = read(".http")
           valid = isinstance(value, dict) and isinstance(value.get("success"), bool)
-          if valid and value["success"]:
-              result = value.get("result")
-              valid = isinstance(result, dict) if endpoint == "services/pi" else (isinstance(result, list) and all(isinstance(item, dict) and isinstance(item.get("id"), str) for item in result))
           success = value.get("success") if valid else None
           codes = sorted({error["code"] for error in value.get("errors", [])
                           if isinstance(error, dict) and type(error.get("code")) is int}) if valid and isinstance(value.get("errors", []), list) else []
-          present = None
-          if valid and success and endpoint == "scripts" and isinstance(value.get("result"), list):
-              present = any(isinstance(item, dict) and item.get("id") == "pi" for item in value["result"])
-          print(json.dumps({"scope":"READ_ONLY_OBSERVATION_NOT_DEPLOYMENT",
-                            "endpoint":endpoint, "http":http if re.fullmatch(r"[0-9]{3}", http) else "UNKNOWN",
-                            "success":success, "codes":codes, "target_pi_present":present}, separators=(",", ":")))
-          sys.exit(0 if success is True and http == "200" else 1)
+          result = value.get("result") if valid and success and http == "200" else None
+          state = {}
+          if endpoint == "scripts/pi/settings":
+              bindings = result.get("bindings") if isinstance(result, dict) else None
+              valid = isinstance(bindings, list) and all(isinstance(row, dict) for row in bindings)
+              sessions = [row for row in bindings if row.get("name") == "SESSIONS"] if valid else []
+              session = sessions[0] if len(sessions) == 1 else {}
+              variables = {row.get("name"):row.get("text") for row in bindings if row.get("type") == "plain_text" and isinstance(row.get("name"), str)} if valid else {}
+              owner = {"PI_PROOF_TRANSIENT":"true","PI_JEV_PROOF_SESSION":"owner-jev-proof-20261020",
+                       "PI_ACCESS_ISSUER":"https://roccho.cloudflareaccess.com",
+                       "PI_ACCESS_AUDIENCE":"3a4db113aeffcad6dcfc27afc21abc1a1c30a4cf1ea2584e4cda7b4edd8319bf",
+                       "PI_ACCESS_OWNER_HASH":"7c51a47a695796b59dd322db878b455cdc725790797a2c388a348a78bd5527b2"}
+              obs = result.get("observability") if isinstance(result, dict) else None
+              state = {"session_binding_count":len(sessions) if valid else None,
+                       "session_type_ok":session.get("type") == "durable_object_namespace" if len(sessions) == 1 else None,
+                       "session_class_ok":session.get("class_name") == "Session" if len(sessions) == 1 else None,
+                       "namespace_id_sha256":fingerprint(session.get("namespace_id")),
+                       "jev_binding_present":any(row.get("name") == "PI_JEV_PROOF_API_KEY" and row.get("type") == "secret_text" for row in bindings) if valid else None,
+                       "bootstrap_present":any(row.get("name") == "PI_CHATGPT_BOOTSTRAP" for row in bindings) if valid else None,
+                       "unexpected_secret_count":sum(row.get("type") == "secret_text" and row.get("name") != "PI_JEV_PROOF_API_KEY" for row in bindings) if valid else None,
+                       "owner_vars_match":all(variables.get(key) == expected for key, expected in owner.items()) if valid else None,
+                       "observability_disabled":obs["enabled"] is False if isinstance(obs, dict) and type(obs.get("enabled")) is bool else None}
+          elif endpoint == "scripts/pi/deployments":
+              deployments = result.get("deployments") if isinstance(result, dict) else None
+              versions = deployments[0].get("versions") if isinstance(deployments, list) and deployments and isinstance(deployments[0], dict) else None
+              current = versions[0].get("version_id") if isinstance(versions, list) and len(versions) == 1 and isinstance(versions[0], dict) and versions[0].get("percentage") == 100 else None
+              valid = isinstance(current, str) and re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", current) is not None
+              state = {"current_version":current if valid else "UNKNOWN"}
+          elif endpoint == "scripts":
+              valid = isinstance(result, list) and all(isinstance(row, dict) for row in result)
+              rows = [row for row in result if row.get("id") == "pi"] if valid else []
+              state = {"target_pi_count":len(rows) if valid else None, "latest_pi_migration_tag":tag(rows[0]) if len(rows) == 1 else "UNKNOWN"}
+              valid = valid and len(rows) == 1
+          elif endpoint == "scripts/pi/subdomain":
+              valid = isinstance(result, dict) and type(result.get("enabled")) is bool and type(result.get("previews_enabled")) is bool
+              state = {"enabled":result.get("enabled") if valid else None,"previews_enabled":result.get("previews_enabled") if valid else None}
+          else:
+              resources = result.get("resources") if isinstance(result, dict) else None
+              runtime = resources.get("script_runtime") if isinstance(resources, dict) else None
+              script = resources.get("script") if isinstance(resources, dict) else None
+              valid = isinstance(result, dict) and result.get("id") == endpoint.rsplit("/",1)[1] and isinstance(runtime, dict) and isinstance(script, dict)
+              state = {"current_migration_tag":tag(runtime) if valid else "UNKNOWN","code_etag_sha256":fingerprint(script.get("etag")) if valid else "UNKNOWN"}
+          print(json.dumps({"scope":"READ_ONLY_OBSERVATION_NOT_DEPLOYMENT","endpoint":endpoint,
+                            "http":http if re.fullmatch(r"[0-9]{3}", http) else "UNKNOWN",
+                            "success":success,"schema_valid":bool(valid),"codes":codes,**state}, separators=(",", ":")))
+          sys.exit(0 if valid and success is True and http == "200" else 1)
           PY
             then
               diagnostic_exit=1
             fi
+          }
+          # Four fixed reads plus at most one version read derived from a validated current UUID.
+          for endpoint in scripts/pi/settings scripts/pi/deployments scripts scripts/pi/subdomain; do
+            observe_get "$endpoint"
           done
+          current_file="$RUNNER_TEMP/pi-observe-scripts-pi-deployments"
+          if [[ "$(cat "$current_file.http")" == 200 ]] && current="$(jq -er 'select(.success == true) | .result.deployments[0].versions | select(length == 1 and .[0].percentage == 100) | .[0].version_id | select(test("^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$"))' "$current_file.json" 2>/dev/null)"; then
+            observe_get "scripts/pi/versions/$current"
+          else
+            echo '{"scope":"READ_ONLY_OBSERVATION_NOT_DEPLOYMENT","endpoint":"scripts/pi/versions/UNKNOWN","http":"NOT_REQUESTED","success":null,"schema_valid":false,"codes":[],"current_migration_tag":"UNKNOWN","code_etag_sha256":"UNKNOWN"}'
+            diagnostic_exit=1
+          fi
           exit "$diagnostic_exit"
 
       - name: Recover finite owner runtime with its existing migration and Jev binding
@@ -287,15 +350,20 @@ jobs:
           umask 077
           test -n "$CLOUDFLARE_API_TOKEN" && test -n "$JEV_API_KEY"
           api="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers"
+          echo PI_RUNTIME_PHASE=pre-settings >&2
           curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$api/scripts/pi/settings" > "$RUNNER_TEMP/pi-runtime-before.json"
           jq -e '.success == true and all(.result.bindings[]; .name != "PI_CHATGPT_BOOTSTRAP" and (.type != "secret_text" or .name == "PI_JEV_PROOF_API_KEY"))' "$RUNNER_TEMP/pi-runtime-before.json" >/dev/null
+          echo PI_RUNTIME_PHASE=namespace >&2
           namespace="$(jq -er '.result.bindings | map(select(.name == "SESSIONS")) | select(length == 1) | .[0] | select(.type == "durable_object_namespace" and .class_name == "Session") | .namespace_id | select(type == "string" and length > 0)' "$RUNNER_TEMP/pi-runtime-before.json")"
+          echo PI_RUNTIME_PHASE=current-status >&2
           "$ENVS_EFFECT_BIN/wrangler" deployments status --name pi --json > "$RUNNER_TEMP/pi-runtime-prior-deployment.json" 2> "$RUNNER_TEMP/pi-runtime-prior-status.stderr"
           prior="$(jq -er '.versions | select(length == 1 and .[0].percentage == 100) | .[0].version_id' "$RUNNER_TEMP/pi-runtime-prior-deployment.json")"
+          echo PI_RUNTIME_PHASE=current-tag >&2
           curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$api/scripts/pi/versions/$prior" > "$RUNNER_TEMP/pi-runtime-history.json"
           # Recovery/update only: the migration must already be applied in BOTH distinct views.
           jq -e --arg prior "$prior" '.success == true and .result.id == $prior and (.result.resources.script_runtime | type == "object") and (.result.resources.script_runtime.migration_tag == "pi-jev-proof-v1")' "$RUNNER_TEMP/pi-runtime-history.json" >/dev/null
           # Wrangler reads this latest script tag; it is distinct from the current deployed version above.
+          echo PI_RUNTIME_PHASE=latest-tag >&2
           curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$api/scripts" > "$RUNNER_TEMP/pi-runtime-latest.json"
           jq -e '.success == true and (.result | type == "array") and ([.result[] | select(.id == "pi")] | length == 1) and ([.result[] | select(.id == "pi")][0].migration_tag == "pi-jev-proof-v1")' "$RUNNER_TEMP/pi-runtime-latest.json" >/dev/null
           require_existing_subdomain() {
@@ -303,8 +371,10 @@ jobs:
             test "$(curl -sS --max-time 20 -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" --output "$RUNNER_TEMP/pi-runtime-$pi_snapshot-subdomain.json" --write-out '%{http_code}' "$api/scripts/pi/subdomain" 2> "$RUNNER_TEMP/pi-runtime-$pi_snapshot-subdomain.stderr")" = 200
             jq -e '.success == true and .result.enabled == true and .result.previews_enabled == false' "$RUNNER_TEMP/pi-runtime-$pi_snapshot-subdomain.json" >/dev/null
           }
+          echo PI_RUNTIME_PHASE=subdomain-before >&2
           require_existing_subdomain before
           # No migration/hostname changes or broader credentials are admitted by this recovery path.
+          echo PI_RUNTIME_PHASE=config >&2
           "$ENVS_EFFECT_BIN/python3" -I - "$PI_RUNTIME_DIR/wrangler.json" <<'PY'
           import json, pathlib, sys
           path = pathlib.Path(sys.argv[1])
@@ -374,37 +444,51 @@ jobs:
           PY
           }
           # Same known final migration tag yields no pending steps in standard Wrangler4.93.
+          echo PI_RUNTIME_PHASE=upload >&2
           upload_output="$(mktemp "$RUNNER_TEMP/pi-runtime-upload.XXXXXX.jsonl")"
           if ! WRANGLER_OUTPUT_FILE_PATH="$upload_output" "$ENVS_EFFECT_BIN/wrangler" versions upload --config "$PI_RUNTIME_DIR/wrangler.json" --name pi --no-bundle > "$RUNNER_TEMP/pi-runtime-upload.stdout" 2> "$RUNNER_TEMP/pi-runtime-upload.stderr"; then
             failed_write_readback upload
             echo "Runtime upload failed; no operator resend or credential fallback"; exit 1
           fi
+          echo PI_RUNTIME_PHASE=uploaded-receipt >&2
           deployed="$(jq -ser '[.[] | select(.type == "version-upload" and .version == 1 and .worker_name == "pi" and .worker_name_overridden == false)] | select(length == 1) | .[0].version_id | select(test("^[0-9a-f-]{36}$"))' "$upload_output")"
+          echo PI_RUNTIME_PHASE=uploaded-code >&2
           curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$api/scripts/pi/versions/$deployed" > "$RUNNER_TEMP/pi-runtime-code.json"
           etag="$(jq -er --arg deployed "$deployed" 'select(.success == true and .result.id == $deployed) | .result.resources.script.etag | select(type == "string" and length > 0)' "$RUNNER_TEMP/pi-runtime-code.json")"
+          echo PI_RUNTIME_PHASE=version-deploy >&2
           if ! "$ENVS_EFFECT_BIN/wrangler" versions deploy "$deployed@100%" --yes --config "$PI_RUNTIME_DIR/wrangler.json" --name pi > "$RUNNER_TEMP/pi-runtime-version-deploy.stdout" 2> "$RUNNER_TEMP/pi-runtime-version-deploy.stderr"; then
             failed_write_readback version-deploy
             echo "Runtime version deployment failed; no operator resend or credential fallback"; exit 1
           fi
           # Only the existing Jev key is persistent. Never bind ChatGPT credentials.
+          echo PI_RUNTIME_PHASE=key >&2
           if ! printf %s "$JEV_API_KEY" | "$ENVS_EFFECT_BIN/wrangler" secret put PI_JEV_PROOF_API_KEY --config "$PI_RUNTIME_DIR/wrangler.json" --name pi > "$RUNNER_TEMP/pi-runtime-key.stdout" 2> "$RUNNER_TEMP/pi-runtime-key.stderr"; then
             failed_write_readback key
             echo "Jev binding failed; runtime remains unproved; no automatic retry"; exit 1
           fi
           # secret put can create another version: read the CURRENT deployment only after it.
+          echo PI_RUNTIME_PHASE=final-status >&2
           "$ENVS_EFFECT_BIN/wrangler" deployments status --name pi --json > "$RUNNER_TEMP/pi-runtime-deployment.json" 2> "$RUNNER_TEMP/pi-runtime-status.stderr"
           jq -e '(.versions | length) == 1 and .versions[0].percentage == 100' "$RUNNER_TEMP/pi-runtime-deployment.json" >/dev/null
           version="$(jq -r .versions[0].version_id "$RUNNER_TEMP/pi-runtime-deployment.json")"
+          echo PI_RUNTIME_PHASE=final-settings >&2
           curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$api/scripts/pi/settings" > "$RUNNER_TEMP/pi-runtime-settings.json"
           jq -e '.success == true and any(.result.bindings[]; .name == "SESSIONS" and .type == "durable_object_namespace" and .class_name == "Session") and any(.result.bindings[]; .name == "PI_JEV_PROOF_API_KEY" and .type == "secret_text") and all(.result.bindings[]; .name != "PI_CHATGPT_BOOTSTRAP") and .result.observability.enabled == false' "$RUNNER_TEMP/pi-runtime-settings.json" >/dev/null
+          echo PI_RUNTIME_PHASE=final-namespace >&2
           jq -e --arg namespace "$namespace" '(.result.bindings | map(select(.name == "SESSIONS"))) as $sessions | ($sessions | length == 1) and $sessions[0].namespace_id == $namespace' "$RUNNER_TEMP/pi-runtime-settings.json" >/dev/null
+          echo PI_RUNTIME_PHASE=final-code >&2
           curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$api/scripts/pi/versions/$version" > "$RUNNER_TEMP/pi-runtime-version.json"
           jq -e --arg etag "$etag" --arg version "$version" '.success == true and .result.id == $version and .result.resources.script.etag == $etag and .result.resources.script_runtime.migration_tag == "pi-jev-proof-v1"' "$RUNNER_TEMP/pi-runtime-version.json" >/dev/null
+          echo PI_RUNTIME_PHASE=final-owner >&2
           jq -e '(.result.bindings | map(select(.type == "plain_text")) | map({key:.name,value:.text}) | from_entries) as $vars | $vars.PI_PROOF_TRANSIENT == "true" and $vars.PI_JEV_PROOF_SESSION == "owner-jev-proof-20261020" and $vars.PI_ACCESS_ISSUER == "https://roccho.cloudflareaccess.com" and $vars.PI_ACCESS_AUDIENCE == "3a4db113aeffcad6dcfc27afc21abc1a1c30a4cf1ea2584e4cda7b4edd8319bf" and $vars.PI_ACCESS_OWNER_HASH == "7c51a47a695796b59dd322db878b455cdc725790797a2c388a348a78bd5527b2"' "$RUNNER_TEMP/pi-runtime-settings.json" >/dev/null
+          echo PI_RUNTIME_PHASE=subdomain-after >&2
           require_existing_subdomain after
+          echo PI_RUNTIME_PHASE=final-latest >&2
           curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$api/scripts" > "$RUNNER_TEMP/pi-runtime-final-latest.json"
           jq -e '.success == true and (.result | type == "array") and ([.result[] | select(.id == "pi")] | length == 1) and ([.result[] | select(.id == "pi")][0].migration_tag == "pi-jev-proof-v1")' "$RUNNER_TEMP/pi-runtime-final-latest.json" >/dev/null
+          echo PI_RUNTIME_PHASE=final-current >&2
           "$ENVS_EFFECT_BIN/wrangler" deployments status --name pi --json > "$RUNNER_TEMP/pi-runtime-confirmation.json" 2> "$RUNNER_TEMP/pi-runtime-confirmation.stderr"
           jq -e --arg version "$version" '(.versions | length) == 1 and .versions[0].percentage == 100 and .versions[0].version_id == $version' "$RUNNER_TEMP/pi-runtime-confirmation.json" >/dev/null
           # A bounded consistent snapshot, not a guarantee against every future writer.
+          echo PI_RUNTIME_PHASE=receipt >&2
           jq -c --arg version "$version" --arg deployed "$deployed" --arg etag "$etag" --arg source "$OPS_SHA" '{scope:"DEPLOYMENT_ONLY_NOT_INFERENCE",route:"KNOWN_MIGRATION_VERSIONS_RECOVERY",ops_sha:$source,version:$version,deployed_version:$deployed,code_etag:$etag,migration_tag:"pi-jev-proof-v1",bindings:[.result.bindings[] | {name,type,class_name,namespace_id}],observability:.result.observability}' "$RUNNER_TEMP/pi-runtime-settings.json"
