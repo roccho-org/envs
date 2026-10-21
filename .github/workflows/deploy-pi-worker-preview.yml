@@ -160,7 +160,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          "$ENVS_EFFECT_BIN/envs-effect" check
+          "$ENVS_EFFECT_BIN/envs-effect" --root "$GITHUB_WORKSPACE" check
           jq -e '.kind == "envs.opencodeWorkerProjectionReceipt.v1" and .binding == "opencode-go.pi-worker" and .target.worker_name == "pi" and .target.secret_name == "OPENCODE_API_KEY" and .provider_use == "NOT_RUN"' handoffs/dev-opencode-go.pi-worker.json >/dev/null
           api="$GITHUB_API_URL/repos/roccho-org/ops/actions"
           art="$(mktemp -d)"

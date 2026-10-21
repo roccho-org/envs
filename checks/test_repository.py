@@ -582,7 +582,7 @@ def worker_go_projection_fixtures() -> None:
         ('JEV_API_KEY: ${{ inputs.scope == \'runtime\' && secrets.JEV_API_KEY || \'\' }}', 'JEV_API_KEY: ${{ secrets.JEV_API_KEY }}'),
         ('else test -z "$JEV_API_KEY"; fi', 'else true; fi'),
         ('handoffs/dev-opencode-go.pi-worker.json >/dev/null', 'handoffs/dev-jev-api.json >/dev/null'),
-        ('"$ENVS_EFFECT_BIN/envs-effect" check', 'true'),
+        ('"$ENVS_EFFECT_BIN/envs-effect" --root "$GITHUB_WORKSPACE" check', 'true'),
         ('$vars.PI_PROOF_AUTH_MODE == "opencode-go"', '$vars.PI_PROOF_AUTH_MODE == "other"'),
         ('([.result.bindings[] | select(.type == "secret_text") | .name] | sort) == ["OPENCODE_API_KEY","PI_JEV_PROOF_API_KEY"]', 'true'),
     ]:

@@ -1048,7 +1048,7 @@ def check_opencode_runtime(source: str) -> str:
         'repos/roccho-org/ops/pulls/631',
         '.head.ref == "codex/pi-opencode-worker-20261021"',
         'pi-opencode-runtime-$OPS_SHA', 'KEY_BOUND_SELECTED_OWNER_OPENCODE_RUNTIME',
-        '"$ENVS_EFFECT_BIN/envs-effect" check', 'handoffs/dev-opencode-go.pi-worker.json >/dev/null',
+        '"$ENVS_EFFECT_BIN/envs-effect" --root "$GITHUB_WORKSPACE" check', 'handoffs/dev-opencode-go.pi-worker.json >/dev/null',
         '.provider == "opencode-go" and .model == "gpt-6-luna"',
         '.base_url == "https://opencode.ai/inference/go/openai/v1"',
         '.model_post_limit == 3', '.proof_session == "owner-jev-opencode-proof-20261021"',
