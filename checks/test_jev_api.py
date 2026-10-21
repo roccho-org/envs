@@ -146,6 +146,11 @@ def copy_root() -> Path:
         (target / path).unlink(missing_ok=True)
     for path in jev.TYPELLM_CIPHERTEXTS.values():
         (target / path).unlink(missing_ok=True)
+    # A configured production receipt is source data, not a synthetic test's input.
+    # Reset only this declared Worker target; preserve every other source plane.
+    for path in (jev.WORKER_GO_CIPHER, jev.WORKER_GO_HANDOFF):
+        (target / path).unlink(missing_ok=True)
+    jev.set_worker_go_active(target, False)
     return target
 
 
@@ -171,7 +176,7 @@ def go_fixture_clear(root: Path) -> None:
     baseline = [p for p in ROOT.rglob("*") if included(p.relative_to(ROOT))]
     known_files = {p.relative_to(ROOT) for p in baseline if p.is_file()}
     known_dirs = {p.relative_to(ROOT) for p in baseline if p.is_dir()}
-    for path in (*jev.GO_CIPHERTEXTS.values(), *jev.TYPELLM_CIPHERTEXTS.values()):
+    for path in (*jev.GO_CIPHERTEXTS.values(), *jev.TYPELLM_CIPHERTEXTS.values(), jev.WORKER_GO_CIPHER, jev.WORKER_GO_HANDOFF):
         known_files.add(path)
         known_dirs.add(path.parent)
     observed = list(root.rglob("*"))
@@ -371,6 +376,7 @@ def test_worker_go_authoring_isolated_and_rotation() -> None:
 
 
 def test_worker_go_project_order_custody_and_failures() -> None:
+    global ROOT
     for failure in (None, "missing-worker", "wrong-key", "malformed", "decrypt", "missing-readback"):
         root = copy_root()
         events = []
@@ -418,6 +424,29 @@ def test_worker_go_project_order_custody_and_failures() -> None:
                     assert result["provider_use"] == "NOT_RUN" and events == ["list", "decrypt", "put", "list"]
                     jev.validate_worker_go_receipt(result, root)
                     assert jev.validate_contracts(root)["environments"][jev.WORKER_GO_PLANE]["migration_state"] == "ACTIVE"
+                    # Exercise the next canonical source state without a real key or provider.
+                    declared = (jev.WORKER_GO_CIPHER, jev.WORKER_GO_HANDOFF, Path("contracts/environments.jsonl"))
+                    before = {path: (root / path).read_bytes() for path in declared}
+                    actual_source, ROOT = ROOT, root
+                    try:
+                        isolated = copy_root()
+                    finally:
+                        ROOT = actual_source
+                    try:
+                        assert all(not (isolated / path).exists() for path in declared[:2])
+                        assert jev.validate_contracts(isolated)["environments"][jev.WORKER_GO_PLANE]["migration_state"] == "NOT_CONFIGURED"
+                        assert {path: (root / path).read_bytes() for path in declared} == before
+                        foreign = isolated / "unexpected-worker-fixture.txt"
+                        foreign.write_text("foreign file must survive refusal")
+                        try:
+                            go_fixture_clear(isolated)
+                        except AssertionError:
+                            assert foreign.read_text() == "foreign file must survive refusal"
+                        else:
+                            raise AssertionError("Worker fixture cleanup accepted a foreign file")
+                        foreign.unlink()
+                    finally:
+                        go_fixture_clear(isolated)
                     for field, replacement in [("capability", "jev-api"), ("provider_use", "PASS"), ("target", PAGES_TARGET)]:
                         bad = copy.deepcopy(result);bad[field] = replacement
                         try:
