@@ -1,0 +1,6 @@
+{
+  "role": "own",
+  "site": "VERSAPRO",
+  "tool": "/nix/store/zfmdsa9lnn0gp45flv2d2wcwl0pcfc25-own-tool-profile",
+  "toolFrom": "roccho-dev/resources Release windows-f59ddd76d4640d412934e8aa53156b13b255c4ea; asset=own-tool.json; url=https://github.com/roccho-dev/resources/releases/download/windows-f59ddd76d4640d412934e8aa53156b13b255c4ea/own-tool.json; assetDigest=sha256:cfd3bcc222739c900094acebbc4ebaac95775b83fc488277ac999b9730137175; source=f59ddd76d4640d412934e8aa53156b13b255c4ea; workflow=ci; run=39363898720"
+}
