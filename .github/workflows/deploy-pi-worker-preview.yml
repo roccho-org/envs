@@ -72,8 +72,8 @@ jobs:
         run: |
           set -euo pipefail
           if [[ "${{ inputs.scope }}" == runtime ]]; then
-            gh api repos/roccho-org/ops/pulls/619 > "$RUNNER_TEMP/pi-runtime-pr.json"
-            jq -e '.merged == true and .state == "closed" and .base.repo.full_name == "roccho-org/ops" and .base.ref == "proposals" and .head.repo.full_name == "roccho-org/ops" and .head.ref == "codex/pi-owner-lifecycle-20261021" and (.merge_commit_sha | test("^[0-9a-f]{40}$"))' "$RUNNER_TEMP/pi-runtime-pr.json" >/dev/null
+            gh api repos/roccho-org/ops/pulls/627 > "$RUNNER_TEMP/pi-runtime-pr.json"
+            jq -e '.merged == true and .state == "closed" and .base.repo.full_name == "roccho-org/ops" and .base.ref == "proposals" and .head.repo.full_name == "roccho-org/ops" and .head.ref == "codex/pi-worker-manual-redirect-20261021" and (.merge_commit_sha | test("^[0-9a-f]{40}$"))' "$RUNNER_TEMP/pi-runtime-pr.json" >/dev/null
             OPS_SHA="$(jq -r .merge_commit_sha "$RUNNER_TEMP/pi-runtime-pr.json")"
             gh api "repos/roccho-org/ops/compare/$OPS_SHA...proposals" > "$RUNNER_TEMP/pi-runtime-canonical.json"
             jq -e --arg sha "$OPS_SHA" '.base_commit.sha == $sha and (.status == "identical" or .status == "ahead")' "$RUNNER_TEMP/pi-runtime-canonical.json" >/dev/null
