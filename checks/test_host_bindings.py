@@ -87,6 +87,7 @@ def main() -> None:
         if tool_from(binding, path.parent.name) is not None:
             selected.append(path.relative_to(ROOT).as_posix())
     assert "own/G6I3.json" in selected, "own/G6I3 selects no T"
+    assert "own/VERSAPRO.json" in selected, "own/VERSAPRO (native own) selects no T"
 
     # Synthetic descriptor and binding for the consumer rule.
     source = "1" * 40
