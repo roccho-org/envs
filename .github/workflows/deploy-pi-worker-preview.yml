@@ -5,7 +5,7 @@ on:
     inputs:
       scope:
         type: choice
-        options: [screen, runtime, runtime-diagnostic, opencode-runtime]
+        options: [screen, runtime, runtime-diagnostic, opencode-runtime, opencode-credit-runtime]
         default: screen
         description: "Screen, finite OAuth/API owner runtime, or read-only runtime diagnostics"
 
@@ -71,6 +71,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          if [[ "${{ inputs.scope }}" == opencode-credit-runtime ]]; then
+            gh api repos/roccho-org/ops/pulls/634 > "$RUNNER_TEMP/pi-opencode-pr.json"
+            jq -e '.merged == true and .state == "closed" and .base.repo.full_name == "roccho-org/ops" and .base.ref == "proposals" and .head.repo.full_name == "roccho-org/ops" and .head.ref == "codex/pi-opencode-credit-worker-20261021" and (.merge_commit_sha | test("^[0-9a-f]{40}$"))' "$RUNNER_TEMP/pi-opencode-pr.json" >/dev/null
+            OPS_SHA="$(jq -r .merge_commit_sha "$RUNNER_TEMP/pi-opencode-pr.json")"
+            gh api "repos/roccho-org/ops/compare/$OPS_SHA...proposals" > "$RUNNER_TEMP/pi-opencode-canonical.json"
+            jq -e --arg sha "$OPS_SHA" '.base_commit.sha == $sha and (.status == "identical" or .status == "ahead")' "$RUNNER_TEMP/pi-opencode-canonical.json" >/dev/null
+            gh api "repos/roccho-org/ops/commits/$OPS_SHA/check-runs?per_page=100" > "$RUNNER_TEMP/pi-opencode-checks.json"
+            jq -e '[.check_runs[] | select(.name == "proof" or .name == "flake-check" or .name == "jev-review-fresh-consumer")] | (map(.name) | unique | sort) == ["flake-check", "jev-review-fresh-consumer", "proof"] and all(.status == "completed" and .conclusion == "success")' "$RUNNER_TEMP/pi-opencode-checks.json" >/dev/null
+            echo "OPS_SHA=$OPS_SHA" >> "$GITHUB_ENV"
+            exit 0
+          fi
           if [[ "${{ inputs.scope }}" == opencode-runtime ]]; then
             gh api repos/roccho-org/ops/pulls/631 > "$RUNNER_TEMP/pi-opencode-pr.json"
             jq -e '.merged == true and .state == "closed" and .base.repo.full_name == "roccho-org/ops" and .base.ref == "proposals" and .head.repo.full_name == "roccho-org/ops" and .head.ref == "codex/pi-opencode-worker-20261021" and (.merge_commit_sha | test("^[0-9a-f]{40}$"))' "$RUNNER_TEMP/pi-opencode-pr.json" >/dev/null
@@ -155,7 +166,7 @@ jobs:
           "$ENVS_EFFECT_BIN/wrangler" deploy --config "$art/runtime/wrangler.json" --name pi --no-bundle --dry-run
 
       - name: Obtain separately admitted OpenCode runtime from successful canonical CI
-        if: inputs.scope == 'opencode-runtime'
+        if: inputs.scope == 'opencode-runtime' || inputs.scope == 'opencode-credit-runtime'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -164,7 +175,12 @@ jobs:
           jq -e '.kind == "envs.opencodeWorkerProjectionReceipt.v1" and .binding == "opencode-go.pi-worker" and .target.worker_name == "pi" and .target.secret_name == "OPENCODE_API_KEY" and .provider_use == "NOT_RUN"' handoffs/dev-opencode-go.pi-worker.json >/dev/null
           api="$GITHUB_API_URL/repos/roccho-org/ops/actions"
           art="$(mktemp -d)"
-          gh api "repos/roccho-org/ops/actions/artifacts?name=pi-opencode-runtime-$OPS_SHA&per_page=100" > "$art/list.json"
+          if [[ "${{ inputs.scope }}" == opencode-credit-runtime ]]; then
+            runtime_artifact="pi-opencode-credit-runtime-$OPS_SHA"
+          else
+            runtime_artifact="pi-opencode-runtime-$OPS_SHA"
+          fi
+          gh api "repos/roccho-org/ops/actions/artifacts?name=$runtime_artifact&per_page=100" > "$art/list.json"
           jq '[.artifacts[] | select(.expired | not)] | sort_by(.created_at) | last' "$art/list.json" > "$art/artifact.json"
           id="$(jq -er .id "$art/artifact.json")"
           digest="$(jq -er '.digest | select(test("^sha256:[0-9a-f]{64}$"))' "$art/artifact.json")"
@@ -175,8 +191,13 @@ jobs:
           echo "${digest#sha256:}  $art/runtime.zip" | sha256sum -c -
           unzip -q "$art/runtime.zip" -d "$art/runtime"
           (cd "$art/runtime" && sha256sum -c SHA256SUMS)
-          jq -e --arg sha "$OPS_SHA" '.schema == "pi-jev-runtime-source.v1" and .ops_sha == $sha and .upstream_sha == "dcb56ce2d174babb3f00112ac5b8cd597e58ab45" and .scope == "KEY_BOUND_SELECTED_OWNER_OPENCODE_RUNTIME" and .deployment == "NOT_RUN"' "$art/runtime/source.json" >/dev/null
-          jq -e '.provider == "opencode-go" and .model == "gpt-6-luna" and .base_url == "https://opencode.ai/inference/go/openai/v1" and .model_post_limit == 3 and  .required_secret == "OPENCODE_API_KEY and PI_JEV_PROOF_API_KEY via separately admitted standard bindings" and .required_vars == ["PI_PROOF_AUTH_MODE","PI_PROOF_PROVIDER","PI_PROOF_MODEL","PI_JEV_PROOF_SESSION","PI_ACCESS_ISSUER","PI_ACCESS_AUDIENCE","PI_ACCESS_OWNER_HASH"] and .proof_session == "owner-jev-opencode-proof-20261021" and .forbidden_binding == "PI_CHATGPT_BOOTSTRAP"' "$art/runtime/source.json" >/dev/null
+          if [[ "${{ inputs.scope }}" == opencode-credit-runtime ]]; then
+            jq -e --arg sha "$OPS_SHA" '.schema == "pi-jev-runtime-source.v1" and .ops_sha == $sha and .upstream_sha == "dcb56ce2d174babb3f00112ac5b8cd597e58ab45" and .scope == "KEY_BOUND_SELECTED_OWNER_OPENCODE_CREDIT_RUNTIME" and .deployment == "NOT_RUN"' "$art/runtime/source.json" >/dev/null
+            jq -e '.provider == "opencode" and .model == "gpt-6-luna" and .base_url == "https://opencode.ai/inference/openai/v1" and .model_post_limit == 4 and .recovery_start_offset == 1 and  .required_secret == "OPENCODE_API_KEY and PI_JEV_PROOF_API_KEY via separately admitted standard bindings" and .required_vars == ["PI_PROOF_AUTH_MODE","PI_PROOF_PROVIDER","PI_PROOF_MODEL","PI_JEV_PROOF_SESSION","PI_ACCESS_ISSUER","PI_ACCESS_AUDIENCE","PI_ACCESS_OWNER_HASH"] and .proof_session == "owner-jev-opencode-proof-20261021" and .forbidden_binding == "PI_CHATGPT_BOOTSTRAP"' "$art/runtime/source.json" >/dev/null
+          else
+            jq -e --arg sha "$OPS_SHA" '.schema == "pi-jev-runtime-source.v1" and .ops_sha == $sha and .upstream_sha == "dcb56ce2d174babb3f00112ac5b8cd597e58ab45" and .scope == "KEY_BOUND_SELECTED_OWNER_OPENCODE_RUNTIME" and .deployment == "NOT_RUN"' "$art/runtime/source.json" >/dev/null
+            jq -e '.provider == "opencode-go" and .model == "gpt-6-luna" and .base_url == "https://opencode.ai/inference/go/openai/v1" and .model_post_limit == 3 and  .required_secret == "OPENCODE_API_KEY and PI_JEV_PROOF_API_KEY via separately admitted standard bindings" and .required_vars == ["PI_PROOF_AUTH_MODE","PI_PROOF_PROVIDER","PI_PROOF_MODEL","PI_JEV_PROOF_SESSION","PI_ACCESS_ISSUER","PI_ACCESS_AUDIENCE","PI_ACCESS_OWNER_HASH"] and .proof_session == "owner-jev-opencode-proof-20261021" and .forbidden_binding == "PI_CHATGPT_BOOTSTRAP"' "$art/runtime/source.json" >/dev/null
+          fi
           jq -e '.main == "runtime-entry.js" and .no_bundle == true and .workers_dev == true and .preview_urls == false and .observability.enabled == false and .durable_objects.bindings == [{"name":"SESSIONS","class_name":"Session"}] and .migrations == [{"tag":"pi-jev-proof-v1","new_sqlite_classes":["Session"]}] and (has("vars") or has("assets") or has("services") | not)' "$art/runtime/wrangler.json" >/dev/null
           echo "PI_RUNTIME_DIR=$art/runtime" >> "$GITHUB_ENV"
           echo "Runtime source=$OPS_SHA producer=$run artifact=$id digest=$digest"
@@ -418,7 +439,7 @@ jobs:
           exit "$diagnostic_exit"
 
       - name: Recover finite owner runtime with its existing migration and Jev binding
-        if: inputs.scope == 'runtime' || inputs.scope == 'opencode-runtime'
+        if: inputs.scope == 'runtime' || inputs.scope == 'opencode-runtime' || inputs.scope == 'opencode-credit-runtime'
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.PI_CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
@@ -433,7 +454,7 @@ jobs:
           api="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers"
           echo PI_RUNTIME_PHASE=pre-settings >&2
           curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$api/scripts/pi/settings" > "$RUNNER_TEMP/pi-runtime-before.json"
-          if [[ "${PI_RUNTIME_MODE:-runtime}" == opencode-runtime ]]; then
+          if [[ "${PI_RUNTIME_MODE:-runtime}" == opencode-runtime || "${PI_RUNTIME_MODE:-runtime}" == opencode-credit-runtime ]]; then
             jq -e '.success == true and ([.result.bindings[] | select(.type == "secret_text") | .name] | sort) == ["OPENCODE_API_KEY","PI_JEV_PROOF_API_KEY"] and all(.result.bindings[]; .name != "PI_CHATGPT_BOOTSTRAP")' "$RUNNER_TEMP/pi-runtime-before.json" >/dev/null
           else
           jq -e '.success == true and all(.result.bindings[]; .name != "PI_CHATGPT_BOOTSTRAP" and (.type != "secret_text" or .name == "PI_JEV_PROOF_API_KEY"))' "$RUNNER_TEMP/pi-runtime-before.json" >/dev/null
@@ -474,6 +495,9 @@ jobs:
           if sys.argv[2] == "opencode-runtime":
               config["vars"] = {key: value for key, value in owner_vars.items() if key != "PI_PROOF_TRANSIENT"}
               config["vars"].update({"PI_PROOF_AUTH_MODE":"opencode-go", "PI_PROOF_PROVIDER":"opencode-go", "PI_PROOF_MODEL":"gpt-6-luna", "PI_JEV_PROOF_SESSION":"owner-jev-opencode-proof-20261021"})
+          elif sys.argv[2] == "opencode-credit-runtime":
+              config["vars"] = {key: value for key, value in owner_vars.items() if key != "PI_PROOF_TRANSIENT"}
+              config["vars"].update({"PI_PROOF_AUTH_MODE":"opencode", "PI_PROOF_PROVIDER":"opencode", "PI_PROOF_MODEL":"gpt-6-luna", "PI_JEV_PROOF_SESSION":"owner-jev-opencode-proof-20261021"})
           else:
               config["vars"] = owner_vars
           path.write_text(json.dumps(config, indent=2) + "\n")
@@ -579,8 +603,12 @@ jobs:
           curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$api/scripts/pi/versions/$version" > "$RUNNER_TEMP/pi-runtime-version.json"
           jq -e --arg etag "$etag" --arg version "$version" '.success == true and .result.id == $version and .result.resources.script.etag == $etag and .result.resources.script_runtime.migration_tag == "pi-jev-proof-v1"' "$RUNNER_TEMP/pi-runtime-version.json" >/dev/null
           echo PI_RUNTIME_PHASE=final-owner >&2
-          if [[ "${PI_RUNTIME_MODE:-runtime}" == opencode-runtime ]]; then
+          if [[ "${PI_RUNTIME_MODE:-runtime}" == opencode-runtime || "${PI_RUNTIME_MODE:-runtime}" == opencode-credit-runtime ]]; then
+          if [[ "${PI_RUNTIME_MODE:-runtime}" == opencode-credit-runtime ]]; then
+          jq -e '(.result.bindings | map(select(.type == "plain_text")) | map({key:.name,value:.text}) | from_entries) as $vars | $vars.PI_PROOF_AUTH_MODE == "opencode" and $vars.PI_PROOF_PROVIDER == "opencode" and $vars.PI_PROOF_MODEL == "gpt-6-luna" and $vars.PI_JEV_PROOF_SESSION == "owner-jev-opencode-proof-20261021" and ($vars | has("PI_PROOF_TRANSIENT") | not) and $vars.PI_ACCESS_ISSUER == "https://roccho.cloudflareaccess.com" and $vars.PI_ACCESS_AUDIENCE == "3a4db113aeffcad6dcfc27afc21abc1a1c30a4cf1ea2584e4cda7b4edd8319bf" and $vars.PI_ACCESS_OWNER_HASH == "7c51a47a695796b59dd322db878b455cdc725790797a2c388a348a78bd5527b2"' "$RUNNER_TEMP/pi-runtime-settings.json" >/dev/null
+          else
           jq -e '(.result.bindings | map(select(.type == "plain_text")) | map({key:.name,value:.text}) | from_entries) as $vars | $vars.PI_PROOF_AUTH_MODE == "opencode-go" and $vars.PI_PROOF_PROVIDER == "opencode-go" and $vars.PI_PROOF_MODEL == "gpt-6-luna" and $vars.PI_JEV_PROOF_SESSION == "owner-jev-opencode-proof-20261021" and ($vars | has("PI_PROOF_TRANSIENT") | not) and $vars.PI_ACCESS_ISSUER == "https://roccho.cloudflareaccess.com" and $vars.PI_ACCESS_AUDIENCE == "3a4db113aeffcad6dcfc27afc21abc1a1c30a4cf1ea2584e4cda7b4edd8319bf" and $vars.PI_ACCESS_OWNER_HASH == "7c51a47a695796b59dd322db878b455cdc725790797a2c388a348a78bd5527b2"' "$RUNNER_TEMP/pi-runtime-settings.json" >/dev/null
+          fi
             jq -e '([.result.bindings[] | select(.type == "secret_text") | .name] | sort) == ["OPENCODE_API_KEY","PI_JEV_PROOF_API_KEY"]' "$RUNNER_TEMP/pi-runtime-settings.json" >/dev/null
           else
           jq -e '(.result.bindings | map(select(.type == "plain_text")) | map({key:.name,value:.text}) | from_entries) as $vars | $vars.PI_PROOF_TRANSIENT == "true" and $vars.PI_JEV_PROOF_SESSION == "owner-jev-proof-20261020" and $vars.PI_ACCESS_ISSUER == "https://roccho.cloudflareaccess.com" and $vars.PI_ACCESS_AUDIENCE == "3a4db113aeffcad6dcfc27afc21abc1a1c30a4cf1ea2584e4cda7b4edd8319bf" and $vars.PI_ACCESS_OWNER_HASH == "7c51a47a695796b59dd322db878b455cdc725790797a2c388a348a78bd5527b2"' "$RUNNER_TEMP/pi-runtime-settings.json" >/dev/null
