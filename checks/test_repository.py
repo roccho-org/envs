@@ -211,14 +211,18 @@ def pi_runtime_fixtures() -> None:
 import json, os, sys
 from pathlib import Path
 mode = os.environ["PI_RUNTIME_CASE"]
+api_mode = mode.startswith("api-")
+mode = mode.removeprefix("api-")
 null_observation = mode.startswith("null-")
 mode = mode.removeprefix("null-")
 trace = Path(os.environ["PI_RUNTIME_TRACE"])
 calls = json.loads(trace.read_text()) if trace.exists() else []
+def after(): return "version-deploy" in calls if api_mode else "secret" in calls
 args = sys.argv[1:]
 kind = Path(sys.argv[0]).name
 old, deployed, final = [f"00000000-0000-4000-8000-{i:012d}" for i in (1,2,3)]
 if kind == "wrangler":
+    if api_mode: assert os.environ.get("JEV_API_KEY") == ""
     if args[:2] == ["deployments","status"]: kind = "status"
     elif args[:2] == ["versions","upload"]: kind = "upload"
     elif args[:2] == ["versions","deploy"]:
@@ -236,12 +240,18 @@ if kind == "wrangler":
     if kind == "upload":
         assert "--retry" not in args
         config = json.loads(Path(args[args.index("--config")+1]).read_text())
-        assert config["vars"]["PI_PROOF_TRANSIENT"] == "true"
+        if api_mode:
+            assert config["vars"]["PI_PROOF_AUTH_MODE"] == "opencode-go"
+            assert config["vars"]["PI_PROOF_PROVIDER"] == "opencode-go"
+            assert config["vars"]["PI_PROOF_MODEL"] == "gpt-6-luna"
+            assert config["vars"]["PI_JEV_PROOF_SESSION"] == "owner-jev-opencode-proof-20261021"
+            assert "PI_PROOF_TRANSIENT" not in config["vars"]
+        else: assert config["vars"]["PI_PROOF_TRANSIENT"] == "true"
         assert config["migrations"] == [{"tag":"pi-jev-proof-v1","new_sqlite_classes":["Session"]}]
         if mode=="upload-receipt":\n            Path(os.environ["WRANGLER_OUTPUT_FILE_PATH"]).write_text("{}")\n            sys.exit(0)\n        Path(os.environ["WRANGLER_OUTPUT_FILE_PATH"]).write_text(json.dumps({
             "type":"version-upload","version":1,"worker_name":"pi","worker_name_overridden":False,"version_id":"a"*36 if mode=="upload-id-malformed" else deployed})+"\\n")
     elif kind == "status":
-        version = final if "secret" in calls else (deployed if "version-deploy" in calls else old)
+        version = (deployed if api_mode else final) if after() else (deployed if "version-deploy" in calls else old)
         if mode=="changed-current" and calls.count("status")>=3: version=old
         print(json.dumps({"author_email":"fixture-private@example.invalid","versions":[
             {"version_id":version,"percentage":50 if mode=="traffic" else 100}]}))
@@ -252,7 +262,7 @@ if url.endswith("/scripts"):
     row = {"id":"pi","migration_tag":"pi-jev-proof-v1"}
     if mode=="latest-absent": row.pop("migration_tag")
     if mode=="latest-empty": row["migration_tag"]=""
-    if mode=="latest-unknown" or (mode=="post-latest-unknown" and "secret" in calls): row["migration_tag"]="fixture-private-latest"
+    if mode=="latest-unknown" or (mode=="post-latest-unknown" and after()): row["migration_tag"]="fixture-private-latest"
     if mode=="latest-type": row["migration_tag"]=None
     result=[] if mode=="latest-missing" else [row]
     if mode=="latest-duplicate": result.append(row)
@@ -261,7 +271,7 @@ if url.endswith("/scripts"):
         calls.append(kind); trace.write_text(json.dumps(calls)); sys.exit(22)
 elif url.endswith("/subdomain"):
     kind = "subdomain"
-    post = "secret" in calls
+    post = after()
     denied = mode=="subdomain-denied" or (mode=="post-subdomain-denied" and post)
     result={"enabled":not (mode=="subdomain-disabled" or (mode=="post-subdomain-disabled" and post)),
             "previews_enabled":mode=="subdomain-preview" or (mode=="post-subdomain-preview" and post),
@@ -286,13 +296,18 @@ elif url.endswith("/settings"):
     kind = "settings"
     config = Path(os.environ["PI_RUNTIME_DIR"],"wrangler.json")
     vars = json.loads(config.read_text()).get("vars",{})
-    if mode=="owner" and "secret" in calls: vars["PI_ACCESS_OWNER_HASH"]="wrong"
-    namespace = "changed" if mode=="namespace-changed" and "secret" in calls else ("" if mode=="namespace-empty" else "fixture-namespace")
+    if mode=="owner" and after(): vars["PI_ACCESS_OWNER_HASH"]="wrong"
+    namespace = "changed" if mode=="namespace-changed" and after() else ("" if mode=="namespace-empty" else "fixture-namespace")
     sessions=[{"type":"durable_object_namespace","name":"SESSIONS","class_name":"Session","namespace_id":namespace}]
     if mode=="namespace-missing": sessions=[]
     if mode=="namespace-duplicate": sessions*=2
     bindings=[{"type":"plain_text","name":k,"text":v} for k,v in vars.items()]+sessions
-    if "secret" in calls: bindings += [{"type":"secret_text","name":"PI_JEV_PROOF_API_KEY"}]
+    if api_mode:
+        names=["OPENCODE_API_KEY","PI_JEV_PROOF_API_KEY"]
+        if mode=="bindings-missing": names.remove("OPENCODE_API_KEY")
+        if mode=="bindings-extra": names.append("UNADMITTED_SECRET")
+        bindings += [{"type":"secret_text","name":name} for name in names]
+    elif after(): bindings += [{"type":"secret_text","name":"PI_JEV_PROOF_API_KEY"}]
     result={"bindings":bindings,"author_email":"fixture-private@example.invalid"}
     if mode.startswith("obs-"): result["observability"]={"enabled":False}
 else:
@@ -307,7 +322,7 @@ else:
         if mode=="current-empty": runtime["migration_tag"]=""
         if mode=="history": runtime["migration_tag"]="fixture-private-unknown"
     result={"id":version,"resources":{"script_runtime":runtime,"script":{
-        "etag":"wrong" if mode=="code" and version==final else ("old" if version==old else "accepted-code")}}}
+        "etag":"wrong" if mode=="code" and version==(deployed if api_mode else final) and after() else ("old" if version==old else "accepted-code")}}}
     if mode=="deployed-mismatch" and version==deployed: result["id"]=old
     if version==deployed and calls[-1]=="upload":
         assert args[args.index("--request")+1]=="GET"
@@ -334,7 +349,9 @@ else: print(json.dumps({"success":True,"result":result}))
            "post-subdomain-disabled","post-subdomain-denied","namespace-missing","namespace-duplicate",
            "namespace-empty","namespace-changed","post-latest-unknown","upload-receipt",\
            "obs-absent","obs-null","obs-wrong","obs-true","obs-denied","obs-api-false","obs-http","obs-result-string",\
-           "null-code","null-namespace-changed","null-owner","null-post-subdomain-preview","null-changed-current","upload-id-malformed","uploaded404")
+           "null-code","null-namespace-changed","null-owner","null-post-subdomain-preview","null-changed-current","upload-id-malformed","uploaded404",
+           "api-success","api-bindings-missing","api-bindings-extra","api-owner","api-code","api-upload-fail",
+           "api-version-deploy-fail","api-changed-current","api-obs-null","api-namespace-changed")
     for mode in cases:
         current=scratch/mode
         current.mkdir()
@@ -346,9 +363,21 @@ else: print(json.dumps({"success":True,"result":result}))
             **os.environ,"PATH":str(tools)+os.pathsep+os.environ["PATH"],
             "ENVS_EFFECT_BIN":str(tools),"RUNNER_TEMP":str(current),"PI_RUNTIME_DIR":str(runtime),
             "CLOUDFLARE_API_TOKEN":"fixture-limited","CLOUDFLARE_ACCOUNT_ID":"fixture-account",
-            "JEV_API_KEY":"fixture-jev-only","OPS_SHA":"a"*40,
+            "JEV_API_KEY":"" if mode.startswith("api-") else "fixture-jev-only","PI_RUNTIME_MODE":"opencode-runtime" if mode.startswith("api-") else "runtime","OPS_SHA":"a"*40,
             "PI_RUNTIME_CASE":mode,"PI_RUNTIME_TRACE":str(trace)})
-        assert (result.returncode==0)==(mode in ("success","obs-null")),(mode,result.stdout,result.stderr)
+        assert (result.returncode==0)==(mode in ("success","obs-null","api-success","api-obs-null")),(mode,result.stdout,result.stderr)
+        if mode.startswith("api-"):
+            calls=json.loads(trace.read_text())
+            assert "secret" not in calls,calls
+            assert "fixture-private" not in result.stdout+result.stderr,mode
+            if mode in ("api-bindings-missing","api-bindings-extra"): assert calls==["settings"],calls
+            if mode in ("api-success","api-obs-null"):
+                assert calls==["settings","status","version","latest","subdomain","upload","version","version-deploy","status","settings","script-settings","version","subdomain","latest","status"],calls
+                receipt=[json.loads(line) for line in result.stdout.splitlines() if line.startswith("{")][-1]
+                assert receipt["version"].endswith("000000000002") and {r["name"] for r in receipt["bindings"] if r["type"]=="secret_text"}=={"OPENCODE_API_KEY","PI_JEV_PROOF_API_KEY"}
+                assert receipt["admission"]==("API_OFF" if mode=="api-success" else "OBSERVABILITY_UNRESOLVED")
+            else: assert '"admission"' not in result.stdout,(mode,result.stdout)
+            continue
         mode = mode.removeprefix("null-")
         if result.returncode: assert '"admission"' not in result.stdout, (mode,result.stdout)
         identities=[json.loads(line) for line in result.stdout.splitlines() if line.startswith('{"scope":"UPLOADED_IDENTITY_NOT_DEPLOYMENT"')]
@@ -544,7 +573,21 @@ def worker_go_projection_fixtures() -> None:
     expect_red(replace_text("contracts/bindings.jsonl", '"worker_name":"pi"', '"worker_name":"other-worker"'))
     expect_red(mutate_plane("dev.pi-opencode-projection", lambda row: row["required_secrets"][-1].update({"name": "CLOUDFLARE_API_TOKEN"})))
     expect_red(mutate_plane("dev.pi-opencode-projection", lambda row: row.update({"migration_state": "ACTIVE", "active_github_environment": "dev-projection"})))
-    print("PI_OPENCODE_PROJECTION_FIXTURES=PASS: 8 boundary negatives")
+    runtime_path = ".github/workflows/deploy-pi-worker-preview.yml"
+    for old, new in [
+        ("repos/roccho-org/ops/pulls/631", "repos/roccho-org/ops/pulls/627"),
+        ("pi-opencode-runtime-$OPS_SHA", "pi-jev-runtime-$OPS_SHA"),
+        ("KEY_BOUND_SELECTED_OWNER_OPENCODE_RUNTIME", "KEYLESS_SELECTED_OWNER_TRANSIENT_RUNTIME"),
+        ('.model_post_limit == 3', '.model_post_limit == 500'),
+        ('JEV_API_KEY: ${{ inputs.scope == \'runtime\' && secrets.JEV_API_KEY || \'\' }}', 'JEV_API_KEY: ${{ secrets.JEV_API_KEY }}'),
+        ('else test -z "$JEV_API_KEY"; fi', 'else true; fi'),
+        ('handoffs/dev-opencode-go.pi-worker.json >/dev/null', 'handoffs/dev-jev-api.json >/dev/null'),
+        ('"$ENVS_EFFECT_BIN/envs-effect" check', 'true'),
+        ('$vars.PI_PROOF_AUTH_MODE == "opencode-go"', '$vars.PI_PROOF_AUTH_MODE == "other"'),
+        ('([.result.bindings[] | select(.type == "secret_text") | .name] | sort) == ["OPENCODE_API_KEY","PI_JEV_PROOF_API_KEY"]', 'true'),
+    ]:
+        expect_red(replace_text(runtime_path, old, new))
+    print("PI_OPENCODE_PROJECTION_FIXTURES=PASS: 18 boundary negatives")
 
 
 def main() -> None:

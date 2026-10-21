@@ -694,3 +694,14 @@ flowchart TB
   Receipt --> Runtime["🧪 Independent actual Pi→Jev→recreated-conversation proof"]
   Project -->|mismatch or UNKNOWN| Stop["🛑 No fallback · no automatic resend"]
 ```
+
+The `opencode-runtime` selector resolves accepted Ops #631 from its actual merge,
+checks canonical source/CI and its distinct `pi-opencode-runtime` artifact, and
+requires the canonical target projection receipt before deployment. It reuses the
+existing Wrangler recovery body. API mode receives no authoring OpenCode key or
+Jev key from the deployment Environment and performs no secret write; both names
+must already be bound on the existing Worker. Final current/code/namespace/owner
+and privacy guards still apply. This registration/deployment evidence is separate
+from successful inference. The API proof disconnects its owner socket without
+keepalives or probes, then requires a new DO and exact neutral recall; its native
+operator retains only nonsecret expected data in memory within one process.

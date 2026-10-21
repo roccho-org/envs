@@ -1039,6 +1039,47 @@ def check_relocation(root: Path, source: str, check: str) -> None:
         require(marker in check, f"check must test the relocation entry with the locked PyNaCl: {marker}")
 
 
+def check_opencode_runtime(source: str) -> str:
+    """Admit the fixed API composition, then retain the prior OAuth/screen oracles."""
+    for marker in (
+        'options: [screen, runtime, runtime-diagnostic, opencode-runtime]',
+        "if: inputs.scope == 'opencode-runtime'",
+        "if: inputs.scope == 'runtime' || inputs.scope == 'opencode-runtime'",
+        'repos/roccho-org/ops/pulls/631',
+        '.head.ref == "codex/pi-opencode-worker-20261021"',
+        'pi-opencode-runtime-$OPS_SHA', 'KEY_BOUND_SELECTED_OWNER_OPENCODE_RUNTIME',
+        '"$ENVS_EFFECT_BIN/envs-effect" check', 'handoffs/dev-opencode-go.pi-worker.json >/dev/null',
+        '.provider == "opencode-go" and .model == "gpt-6-luna"',
+        '.base_url == "https://opencode.ai/inference/go/openai/v1"',
+        '.model_post_limit == 3', '.proof_session == "owner-jev-opencode-proof-20261021"',
+        '.required_vars == ["PI_PROOF_AUTH_MODE","PI_PROOF_PROVIDER","PI_PROOF_MODEL","PI_JEV_PROOF_SESSION","PI_ACCESS_ISSUER","PI_ACCESS_AUDIENCE","PI_ACCESS_OWNER_HASH"]',
+        '.forbidden_binding == "PI_CHATGPT_BOOTSTRAP"',
+        '"PI_PROOF_AUTH_MODE":"opencode-go", "PI_PROOF_PROVIDER":"opencode-go", "PI_PROOF_MODEL":"gpt-6-luna"',
+        '([.result.bindings[] | select(.type == "secret_text") | .name] | sort) == ["OPENCODE_API_KEY","PI_JEV_PROOF_API_KEY"]',
+        "JEV_API_KEY: ${{ inputs.scope == 'runtime' && secrets.JEV_API_KEY || '' }}",
+        'PI_RUNTIME_MODE: ${{ inputs.scope }}',
+        'if [[ "${PI_RUNTIME_MODE:-runtime}" == runtime ]]; then test -n "$JEV_API_KEY"; else test -z "$JEV_API_KEY"; fi',
+        'if [[ "${PI_RUNTIME_MODE:-runtime}" == runtime ]]; then\n          # Only the existing Jev key',
+        '$vars.PI_PROOF_AUTH_MODE == "opencode-go" and $vars.PI_PROOF_PROVIDER == "opencode-go" and $vars.PI_PROOF_MODEL == "gpt-6-luna"',
+        '$vars.PI_JEV_PROOF_SESSION == "owner-jev-opencode-proof-20261021" and ($vars | has("PI_PROOF_TRANSIENT") | not)',
+    ):
+        require(marker in source, f"OpenCode selected-runtime boundary lost: {marker}")
+    require('secrets.OPENCODE' not in source and 'secret put OPENCODE' not in source,
+            "API runtime consumes the separately projected key without delivery or mutation")
+    require(source.count('([.result.bindings[] | select(.type == "secret_text") | .name] | sort) == ["OPENCODE_API_KEY","PI_JEV_PROOF_API_KEY"]') == 2,
+            "Both preflight and final bindings require exactly the two admitted API secrets")
+    # Strip only the separately validated API resolver/artifact. Existing oracles still
+    # inspect the actual shared effect body and unchanged legacy source guards.
+    source = source.replace('options: [screen, runtime, runtime-diagnostic, opencode-runtime]', 'options: [screen, runtime, runtime-diagnostic]')
+    source = source.replace('description: "Screen, finite OAuth/API owner runtime, or read-only runtime diagnostics"', 'description: "Screen, finite owner runtime, or read-only runtime diagnostics"')
+    before, rest = source.split('          if [[ "${{ inputs.scope }}" == opencode-runtime ]]; then\n', 1)
+    source = before + rest.split('          fi\n', 1)[1]
+    before, rest = source.split('      - name: Obtain separately admitted OpenCode runtime from successful canonical CI\n', 1)
+    source = before + '      - name: Native Wrangler dry-run before mapping Cloudflare credentials\n' + rest.split('      - name: Native Wrangler dry-run before mapping Cloudflare credentials\n', 1)[1]
+    source = source.replace("if: inputs.scope == 'runtime' || inputs.scope == 'opencode-runtime'", "if: inputs.scope == 'runtime'")
+    return source.replace("JEV_API_KEY: ${{ inputs.scope == 'runtime' && secrets.JEV_API_KEY || '' }}", 'JEV_API_KEY: ${{ secrets.JEV_API_KEY }}')
+
+
 def pi_screen_projection(source: str) -> str:
     """Validate the separate runtime admission, then retain the unchanged screen oracle."""
     dispatch = """  workflow_dispatch:
@@ -1134,7 +1175,7 @@ def pi_screen_projection(source: str) -> str:
 
 def check_pi_worker_preview(source: str, canonical_consumer: str) -> None:
     """One manual projection of the accepted merge; existing secret stays in envs."""
-    source = pi_screen_projection(source)
+    source = pi_screen_projection(check_opencode_runtime(source))
     require("on:\n  workflow_dispatch:\n\npermissions:\n" in source
             and "inputs.ops_sha" not in source,
             "Pi preview must resolve the accepted source without a copied SHA input")

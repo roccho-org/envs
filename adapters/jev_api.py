@@ -1102,7 +1102,7 @@ def validate_worker_go_receipt(receipt: dict[str, Any], root: Path = ROOT) -> No
     require(receipt["effect"] == {"operation": "cloudflare_workers_secret_put", "status": "PASS"}, "OpenCode Worker effect differs")
     require(receipt["readback"] == {"kind": "secret_name_presence", "status": "PASS", "present": True}, "OpenCode Worker readback differs")
     wf = receipt["workflow"]
-    require(set(wf) == {"repository", "ref", "run_id", "run_attempt"} and wf["repository"] == "roccho-org/envs"
+    require(isinstance(wf, dict) and set(wf) == {"repository", "ref", "run_id", "run_attempt"} and wf["repository"] == "roccho-org/envs"
             and wf["ref"] == "proposals" and type(wf["run_id"]) is int and wf["run_id"] > 0
             and type(wf["run_attempt"]) is int and wf["run_attempt"] > 0, "OpenCode Worker workflow differs")
     require(receipt["provider_use"] == "NOT_RUN", "registration must not claim inference")
@@ -1119,6 +1119,11 @@ def project_worker_go(*, envs_sha: str, run_id: int, run_attempt: int, created_a
     contracts = validate_contracts(root)
     require(isinstance(envs_sha, str) and SHA40.fullmatch(envs_sha), "expected exact envs SHA")
     require(type(run_id) is int and run_id > 0 and type(run_attempt) is int and run_attempt > 0, "invalid workflow identity")
+    require(isinstance(created_at, str) and created_at.endswith("Z"), "invalid receipt time")
+    try:
+        datetime.fromisoformat(created_at[:-1] + "+00:00")
+    except ValueError:
+        raise EnvsError("invalid receipt time") from None
     target = contracts["bindings"][WORKER_GO_BINDING]["target"]
     require(target == WORKER_GO_TARGET, "OpenCode Worker target differs")
     cipher = root / WORKER_GO_CIPHER
