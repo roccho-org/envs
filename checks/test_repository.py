@@ -572,7 +572,11 @@ def worker_go_projection_fixtures() -> None:
         expect_red(replace_text(path, old, new))
     expect_red(replace_text("contracts/bindings.jsonl", '"worker_name":"pi"', '"worker_name":"other-worker"'))
     expect_red(mutate_plane("dev.pi-opencode-projection", lambda row: row["required_secrets"][-1].update({"name": "CLOUDFLARE_API_TOKEN"})))
-    expect_red(mutate_plane("dev.pi-opencode-projection", lambda row: row.update({"migration_state": "ACTIVE", "active_github_environment": "dev-projection"})))
+    def active_without_worker_receipt(root: Path) -> None:
+        # Remain a real negative after a valid projection receipt becomes canonical.
+        (root / "handoffs/dev-opencode-go.pi-worker.json").unlink(missing_ok=True)
+        mutate_plane("dev.pi-opencode-projection", lambda row: row.update({"migration_state": "ACTIVE", "active_github_environment": "dev-projection"}))(root)
+    expect_red(active_without_worker_receipt)
     runtime_path = ".github/workflows/deploy-pi-worker-preview.yml"
     for old, new in [
         ("repos/roccho-org/ops/pulls/631", "repos/roccho-org/ops/pulls/627"),
