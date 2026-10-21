@@ -14,6 +14,7 @@ on:
           - opencode-go.versapro-own-oci
           - typellm-api.oci-dev
           - typellm-api.versapro-own-oci
+          - opencode-go.pi-worker
 
 permissions:
   actions: read
@@ -118,6 +119,13 @@ jobs:
           TYPELLM_API_KEY: ${{ secrets.TYPELLM_API_KEY }}
           VERSAPRO_OWN_OCI_AGE_RECIPIENT: ${{ vars.VERSAPRO_OWN_OCI_AGE_RECIPIENT }}
         run: '"$ENVS_EFFECT_BIN/envs-effect" --root "$GITHUB_WORKSPACE" author --target typellm-api.versapro-own-oci'
+
+      - name: Author OpenCode Go Worker ciphertext
+        if: inputs.target == 'opencode-go.pi-worker'
+        env:
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          SOPS_AGE_RECIPIENTS: ${{ vars.SOPS_AGE_RECIPIENTS }}
+        run: '"$ENVS_EFFECT_BIN/envs-effect" --root "$GITHUB_WORKSPACE" author --target opencode-go.pi-worker'
 
       - name: Verify candidate tree
         run: '"$ENVS_EFFECT_BIN/python3" -I checks/repository.py'

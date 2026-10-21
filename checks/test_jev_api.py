@@ -335,11 +335,113 @@ def test_author_oci() -> None:
         shutil.rmtree(root.parent, ignore_errors=True)
 
 
+def test_worker_go_authoring_isolated_and_rotation() -> None:
+    root = copy_root()
+    try:
+        calls = []
+        def runner(argv, input_data, env):
+            calls.append(list(argv))
+            assert json.loads(input_data) == {jev.GO_KEY: GO_KEY}
+            assert env["SOPS_AGE_RECIPIENTS"] == RECIPIENT
+            assert not any(key in env for key in (jev.GO_KEY, "JEV_API_KEY", "SOPS_AGE_KEY", "PI_CLOUDFLARE_API_TOKEN"))
+            return subprocess.CompletedProcess(argv, 0, stdout=oci_ciphertext((RECIPIENT,), key=jev.GO_KEY), stderr=b"")
+        with environment({jev.GO_KEY: GO_KEY, "SOPS_AGE_RECIPIENTS": RECIPIENT, "ENVS_EFFECT_TOOLCHAIN": MANIFEST}):
+            result = jev.author_worker_go(root, runner)
+        assert result["provider_use"] == "NOT_RUN" and result["binding"] == jev.WORKER_GO_BINDING
+        assert len(calls) == 1 and not (root / jev.CIPHERTEXT).exists()
+        for name in ("dev.authoring", "dev.projection", jev.WORKER_GO_PLANE):
+            assert jev.validate_contracts(root)["environments"][name]["migration_state"] == "NOT_CONFIGURED"
+        with environment({jev.GO_KEY: GO_KEY, "SOPS_AGE_RECIPIENTS": RECIPIENT, "ENVS_EFFECT_TOOLCHAIN": MANIFEST}):
+            jev.author_worker_go(root, runner)
+        # Neither extra plaintext fields nor a different recipient may become the committed envelope.
+        for bad in (oci_ciphertext((OCI_OTHER,), key=jev.GO_KEY),
+                    oci_ciphertext((RECIPIENT,), extra="other: plain\n", key=jev.GO_KEY),
+                    oci_ciphertext((RECIPIENT,), key="JEV_API_KEY")):
+            before = (root / jev.WORKER_GO_CIPHER).read_bytes()
+            with environment({jev.GO_KEY: GO_KEY, "SOPS_AGE_RECIPIENTS": RECIPIENT, "ENVS_EFFECT_TOOLCHAIN": MANIFEST}):
+                try:
+                    jev.author_worker_go(root, lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, stdout=bad, stderr=b""))
+                except jev.EnvsError:
+                    pass
+                else:
+                    raise AssertionError("invalid Worker envelope accepted")
+            assert (root / jev.WORKER_GO_CIPHER).read_bytes() == before
+    finally:
+        shutil.rmtree(root.parent, ignore_errors=True)
+
+
+def test_worker_go_project_order_custody_and_failures() -> None:
+    for failure in (None, "missing-worker", "wrong-key", "malformed", "decrypt", "missing-readback"):
+        root = copy_root()
+        events = []
+        requests = []
+        try:
+            path = root / jev.WORKER_GO_CIPHER
+            path.parent.mkdir(exist_ok=True)
+            path.write_bytes(oci_ciphertext((RECIPIENT,), key=jev.GO_KEY))
+            lists = 0
+            def runner(argv, input_data, env):
+                nonlocal lists
+                if argv[0] == TOOLS["wrangler"]:
+                    assert list(argv) == [TOOLS["wrangler"], "secret", "list", "--name", "pi", "--format", "json"]
+                    assert env["CLOUDFLARE_API_TOKEN"] == "limited-pi-fixture"
+                    assert "SOPS_AGE_KEY" not in env and "PI_CLOUDFLARE_API_TOKEN" not in env and jev.GO_KEY not in env
+                    lists += 1; events.append("list")
+                    if failure == "missing-worker" and lists == 1:
+                        return subprocess.CompletedProcess(argv, 1, stdout=b"", stderr=b"not found")
+                    result = [] if lists == 1 or failure == "missing-readback" else [{"name": jev.GO_KEY, "type": "secret_text"}]
+                    return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(result).encode(), stderr=b"misleading " + jev.GO_KEY.encode())
+                assert argv[0] == TOOLS["sops"] and "--decrypt" in argv
+                events.append("decrypt")
+                assert env["SOPS_AGE_KEY"] == AGE_KEY and "CLOUDFLARE_API_TOKEN" not in env
+                if failure == "decrypt":
+                    return subprocess.CompletedProcess(argv, 1, stdout=b"", stderr=GO_KEY.encode())
+                body = b"not-json" if failure == "malformed" else json.dumps({"JEV_API_KEY" if failure == "wrong-key" else jev.GO_KEY: GO_KEY}).encode()
+                return subprocess.CompletedProcess(argv, 0, stdout=body, stderr=b"")
+            def opener(request, **kwargs):
+                requests.append(request);events.append("put")
+                assert json.loads(request.data) == {"name": jev.GO_KEY, "text": GO_KEY, "type": "secret_text"}
+                assert request.full_url.endswith("/workers/scripts/pi/secrets")
+                return FakeProviderResponse(body=json.dumps({"success": True, "result": {"name": jev.GO_KEY, "type": "secret_text"}}).encode())
+            values = {"ENVS_EFFECT_TOOLCHAIN": MANIFEST, "SOPS_AGE_KEY": AGE_KEY,
+                      "CLOUDFLARE_ACCOUNT_ID": jev.WORKER_GO_TARGET["account_id"],
+                      "PI_CLOUDFLARE_API_TOKEN": "limited-pi-fixture", "CLOUDFLARE_API_TOKEN": "DO-NOT-READ"}
+            with environment(values):
+                try:
+                    result = jev.project_worker_go(envs_sha="a" * 40, run_id=123, run_attempt=1,
+                        created_at=CREATED_AT, root=root, runner=runner, opener=opener)
+                except jev.EnvsError as exc:
+                    assert failure is not None, str(exc)
+                    assert GO_KEY not in str(exc) and AGE_IDENTITY not in str(exc)
+                else:
+                    assert failure is None
+                    assert result["provider_use"] == "NOT_RUN" and events == ["list", "decrypt", "put", "list"]
+                    jev.validate_worker_go_receipt(result, root)
+                    assert jev.validate_contracts(root)["environments"][jev.WORKER_GO_PLANE]["migration_state"] == "ACTIVE"
+                    for field, replacement in [("capability", "jev-api"), ("provider_use", "PASS"), ("target", PAGES_TARGET)]:
+                        bad = copy.deepcopy(result);bad[field] = replacement
+                        try:
+                            jev.validate_worker_go_receipt(bad, root)
+                        except jev.EnvsError:
+                            pass
+                        else:
+                            raise AssertionError("altered Worker receipt accepted")
+            if failure == "missing-worker":
+                assert events == ["list"]
+            if failure in ("wrong-key", "malformed", "decrypt"):
+                assert events == ["list", "decrypt"]
+            assert len(requests) == (0 if failure in ("missing-worker", "wrong-key", "malformed", "decrypt") else 1)
+            assert (root / jev.WORKER_GO_HANDOFF).is_file() == (failure is None)
+        finally:
+            shutil.rmtree(root.parent, ignore_errors=True)
+
+
 def test_targets_are_separate() -> None:
     contracts = jev.validate_contracts(ROOT)
     names = {target: [entry["name"] for entry in jev.authoring_inputs(contracts, target)] for target in jev.AUTHOR_TARGETS}
     assert names == {
         "jev-api": ["JEV_API_KEY", "SOPS_AGE_RECIPIENTS"],
+        jev.WORKER_GO_BINDING: [jev.GO_KEY, "SOPS_AGE_RECIPIENTS"],
         jev.OCI_BINDING: ["JEV_API_KEY", jev.OCI_RECIPIENT],
         jev.GO_BINDING: [jev.GO_KEY, jev.OCI_RECIPIENT],
         jev.OWN_GO_BINDING: [jev.GO_KEY, jev.OWN_GO_RECIPIENT],
@@ -1687,6 +1789,8 @@ def main() -> None:
         test_own_typellm_binding_red()
         test_go_fixture_cleanup_refuses_foreign()
         test_targets_are_separate()
+        test_worker_go_authoring_isolated_and_rotation()
+        test_worker_go_project_order_custody_and_failures()
         test_author_oci_red()
         test_author_go_red()
         test_author_own_go()

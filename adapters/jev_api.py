@@ -178,7 +178,7 @@ OWN_TYPELLM_RECIPIENT = OWN_GO_RECIPIENT
 TYPELLM_CIPHERTEXTS = {TYPELLM_BINDING: TYPELLM_CIPHERTEXT, OWN_TYPELLM_BINDING: OWN_TYPELLM_CIPHERTEXT}
 OCI_CIPHERTEXTS = {OCI_BINDING: OCI_CIPHERTEXT, **GO_CIPHERTEXTS, **TYPELLM_CIPHERTEXTS}
 # Every binding `author --target` can select; a dispatch names exactly one of them.
-AUTHOR_TARGETS = ("jev-api", *OCI_CIPHERTEXTS)
+AUTHOR_TARGETS = ("jev-api", *OCI_CIPHERTEXTS, "opencode-go.pi-worker")
 ORG_BINDING = "jev-api.github-actions"
 ORG_HANDOFF = Path("handoffs/dev-jev-api.github-actions.json")
 ORG_RECEIPT_KIND = "envs.orgSecretProjectionReceipt.v1"
@@ -290,10 +290,37 @@ def validate_jev_target(target: Any) -> dict[str, Any]:
     return target
 
 
+WORKER_GO_BINDING = "opencode-go.pi-worker"
+WORKER_GO_PLANE = "dev.pi-opencode-projection"
+WORKER_GO_CIPHER = Path("ciphertexts/dev-opencode-go.pi-worker.sops.yaml")
+WORKER_GO_HANDOFF = Path("handoffs/dev-opencode-go.pi-worker.json")
+WORKER_GO_BOUNDARY = "dev.opencode-go-pi-worker.provider"
+WORKER_GO_TARGET = {"provider": "cloudflare-workers", "account_id": "3d17cd263c27a0ea241f0a8fc09ac2bb",
+                    "worker_name": "pi", "secret_name": "OPENCODE_API_KEY"}
+
+
+def expected_worker_go_binding() -> dict[str, Any]:
+    return {"id": WORKER_GO_BINDING, "kind": "envs.authCapability.v1", "capability": "opencode-go",
+            "ciphertext": WORKER_GO_CIPHER.as_posix(), "source_key": GO_KEY,
+            "github_environment": "dev-authoring",
+            "required_variables": [{"name": "SOPS_AGE_RECIPIENTS", "type": "age_recipient_list", "lifecycle": "persistent"}],
+            "target": dict(WORKER_GO_TARGET)}
+
+
+def expected_worker_go_boundary() -> dict[str, Any]:
+    return {"id": WORKER_GO_BOUNDARY, "kind": "envs.providerConsumerBoundary.v1", "role": "provider",
+            "repository": "roccho-org/envs", "stage": "dev", "capability": "opencode-go",
+            "binding": WORKER_GO_BINDING, "source_kind": "public_sops", "target_kind": "target_native_auth",
+            "owns": ["contract", "target_selected_authoring", "projection", "provider_readback", "projection_receipt"],
+            "does_not_own": ["application_runtime_acceptance", "consumer_independent_execution"],
+            "handoff_ref_kind": "exact_commit_sha"}
+
+
 def expected_bindings(jev_target: dict[str, Any] | None = None) -> dict[str, dict[str, Any]]:
     target = {"provider": "cloudflare-pages", "project": "voice-ui", "secret_name": "JEV_API_KEY"} \
         if jev_target is None else validate_jev_target(jev_target)
     return {
+        WORKER_GO_BINDING: expected_worker_go_binding(),
         "voice-ui": {
             "id": "voice-ui",
             "kind": "envs.applicationBinding.v1",
@@ -544,6 +571,11 @@ def expected_inputs() -> dict[str, dict[str, list[dict[str, str]]]]:
             "required_variables": entries((OCI_RECIPIENT, "age_recipient", "persistent"),
                                           (OWN_TYPELLM_RECIPIENT, "age_recipient", "persistent")),
         },
+        WORKER_GO_PLANE: {
+            "required_secrets": entries(("SOPS_AGE_KEY", "age_identity", "persistent"),
+                                        ("PI_CLOUDFLARE_API_TOKEN", "opaque", "persistent")),
+            "required_variables": entries(("CLOUDFLARE_ACCOUNT_ID", "cloudflare_account_id", "persistent")),
+        },
         "dev.projection": {
             "required_secrets": entries(
                 ("SOPS_AGE_KEY", "age_identity", "persistent"),
@@ -618,7 +650,7 @@ def validate_contracts(root: Path = ROOT) -> dict[str, dict[str, dict[str, Any]]
     boundary = index(root / BOUNDARY)
 
     require(set(envs) == {
-        "dev.authoring", GO_PLANE, TYPELLM_PLANE, "dev.projection", "dev.runtime", RENT_PLANE, CLIENT_PLANE, ROOT_PLANE, LINODE_READ_PLANE,
+        "dev.authoring", GO_PLANE, TYPELLM_PLANE, WORKER_GO_PLANE, "dev.projection", "dev.runtime", RENT_PLANE, CLIENT_PLANE, ROOT_PLANE, LINODE_READ_PLANE,
         "stg.projection", "stg.runtime", "prd.projection", "prd.runtime",
         "voice-ui.dev", "voice-ui.stg", "voice-ui.prd",
     }, "environment set differs")
@@ -747,7 +779,7 @@ def validate_contracts(root: Path = ROOT) -> dict[str, dict[str, dict[str, Any]]
     jev_target = validate_jev_target(bindings.get("jev-api", {}).get("target"))
     require(bindings == expected_bindings(jev_target), "binding set differs")
     require(set(boundary) == {
-        "repository.branch-policy", "dev.jev-api.provider", "dev.rent-tunnel.provider",
+        WORKER_GO_BOUNDARY, "repository.branch-policy", "dev.jev-api.provider", "dev.rent-tunnel.provider",
         "dev.jev-api-oci-dev.provider", "apps.voice-ui.consumer", "ops.voice-ui.consumer",
         "normal.consumer.path", "dev.rent-client.provider", "dev.rent-root.provider", WINDOWS_CONSUMER,
         "dev.opencode-go-oci-dev.provider", "dev.opencode-go-versapro-own-oci.provider",
@@ -755,6 +787,19 @@ def validate_contracts(root: Path = ROOT) -> dict[str, dict[str, dict[str, Any]]
     } | set(expected_org_boundaries()), "provider-consumer boundary set differs")
     for identity, expected in expected_org_boundaries().items():
         require(boundary[identity] == expected, "Org provider-consumer boundary differs")
+    require(boundary[WORKER_GO_BOUNDARY] == expected_worker_go_boundary(), "OpenCode Worker boundary differs")
+    worker_plane = envs[WORKER_GO_PLANE]
+    require(worker_plane["github_environment"] == "dev-projection" and worker_plane["owner"] == "envs"
+            and worker_plane["source_kind"] == "public_sops" and worker_plane["target_kind"] == "target_native_auth",
+            "OpenCode Worker projection plane differs")
+    if (root / WORKER_GO_CIPHER).is_file():
+        validate_worker_go_ciphertext((root / WORKER_GO_CIPHER).read_bytes())
+    configured = (root / WORKER_GO_HANDOFF).is_file()
+    require(worker_plane["migration_state"] == ("ACTIVE" if configured else "NOT_CONFIGURED")
+            and worker_plane["active_github_environment"] == ("dev-projection" if configured else None),
+            "OpenCode Worker projection state differs")
+    if configured:
+        validate_worker_go_receipt(json.loads((root / WORKER_GO_HANDOFF).read_text()), root)
     require(boundary["dev.rent-tunnel.provider"] == expected_rent_boundary(), "rent tunnel provider boundary differs")
     require(boundary["dev.rent-client.provider"] == expected_client_boundary(), "rent client provider boundary differs")
     require(boundary["dev.rent-root.provider"] == expected_root_boundary(), "rent root provider boundary differs")
@@ -857,7 +902,7 @@ def reject_live_values(root: Path, name: str, values: list[str],
     for path in repository_files(root):
         relative = path.relative_to(root).as_posix()
         data = path.read_bytes()
-        if relative in {CIPHERTEXT.as_posix(), RENT_CIPHERTEXT.as_posix(), CLIENT_CIPHERTEXT.as_posix(),
+        if relative in {WORKER_GO_CIPHER.as_posix(), CIPHERTEXT.as_posix(), RENT_CIPHERTEXT.as_posix(), CLIENT_CIPHERTEXT.as_posix(),
                         *(path.as_posix() for path in OCI_CIPHERTEXTS.values())}:
             data = without_recipient_metadata(data.decode("utf-8", errors="replace")).encode()
         for value in values:
@@ -896,6 +941,10 @@ def gate(root: Path, contracts: dict[str, dict[str, dict[str, Any]]], plane: str
                 # closed selected binding and its non-secret handoff receipt; every other
                 # repository occurrence remains rejected.
                 allowed_paths = (BINDINGS.as_posix(), HANDOFF.as_posix())
+        if plane == WORKER_GO_PLANE and entry["name"] == "CLOUDFLARE_ACCOUNT_ID":
+            require(value == WORKER_GO_TARGET["account_id"], "OpenCode Worker account differs")
+            # This fixed public account identifier is allowed only in the declared target, adapter and receipt.
+            allowed_paths = (BINDINGS.as_posix(), WORKER_GO_HANDOFF.as_posix(), "adapters/jev_api.py")
         reject_live_values(root, entry["name"], live or [], allowed_paths)
     return values
 
@@ -995,11 +1044,133 @@ def author(root: Path = ROOT, runner: Runner = default_runner) -> dict[str, Any]
     return {"kind": "envs.authoringResult.v1", "status": "PASS", "ciphertext": CIPHERTEXT.as_posix()}
 
 
+def validate_worker_go_ciphertext(data: bytes, secret: bytes | None = None,
+                                 recipients: list[str] | None = None) -> None:
+    validate_ciphertext(data, secret, recipients, key=GO_KEY)
+    require(set(re.findall(r"(?m)^([^\s#][^:]*):", data.decode())) == {GO_KEY, "sops"},
+            "OpenCode Worker ciphertext fields differ")
+
+
+def set_worker_go_active(root: Path, active: bool) -> None:
+    path = root / ENVIRONMENTS
+    rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    row = next(item for item in rows if item["id"] == WORKER_GO_PLANE)
+    row.update(active_github_environment="dev-projection" if active else None,
+               migration_state="ACTIVE" if active else "NOT_CONFIGURED")
+    path.write_text("".join(json.dumps(item, separators=(",", ":")) + "\n" for item in rows))
+
+
+def author_worker_go(root: Path = ROOT, runner: Runner = default_runner) -> dict[str, Any]:
+    contracts = validate_contracts(root)
+    tools = toolchain(root)
+    values = {}
+    for entry in authoring_inputs(contracts, WORKER_GO_BINDING):
+        value = os.environ.get(entry["name"], "")
+        require(bool(value) and INPUT_TYPES[entry["type"]](value), "OpenCode Worker authoring input invalid")
+        values[entry["name"]] = value
+    source = values[GO_KEY]
+    recipients = recipient_items(values["SOPS_AGE_RECIPIENTS"]) or []
+    require(bool(recipients), "OpenCode Worker recipient is missing")
+    reject_live_values(root, GO_KEY, [source])
+    reject_live_values(root, "SOPS_AGE_RECIPIENTS", recipients)
+    result = run_checked([tools["sops"], "--encrypt", "--input-type", "json", "--output-type", "yaml", "/dev/stdin"],
+                         input_data=json.dumps({GO_KEY: source}, separators=(",", ":")).encode() + b"\n",
+                         env=clean_env(tools, {"SOPS_AGE_RECIPIENTS": ",".join(recipients)}),
+                         runner=runner, label="OpenCode Worker SOPS encryption")
+    validate_worker_go_ciphertext(result.stdout, source.encode(), recipients)
+    output = root / WORKER_GO_CIPHER
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_bytes(result.stdout)
+    (root / WORKER_GO_HANDOFF).unlink(missing_ok=True)
+    set_worker_go_active(root, False)
+    validate_contracts(root)
+    return {"kind": "envs.targetAuthoringResult.v1", "status": "PASS", "binding": WORKER_GO_BINDING,
+            "ciphertext": WORKER_GO_CIPHER.as_posix(), "recipient_count": len(recipients), "provider_use": "NOT_RUN"}
+
+
+def validate_worker_go_receipt(receipt: dict[str, Any], root: Path = ROOT) -> None:
+    require(set(receipt) == {"kind", "status", "envs_sha", "capability", "binding", "source", "target", "effect",
+                             "readback", "workflow", "created_at", "provider_use"}, "OpenCode Worker receipt fields differ")
+    require(receipt["kind"] == "envs.opencodeWorkerProjectionReceipt.v1" and receipt["status"] == "PASS"
+            and receipt["capability"] == "opencode-go" and receipt["binding"] == WORKER_GO_BINDING,
+            "OpenCode Worker receipt identity differs")
+    require(isinstance(receipt["envs_sha"], str) and SHA40.fullmatch(receipt["envs_sha"]), "invalid envs SHA")
+    cipher = root / WORKER_GO_CIPHER
+    require(cipher.is_file() and receipt["source"] == {"kind": "public_sops", "ref": WORKER_GO_CIPHER.as_posix(),
+            "sha256": "sha256:" + hashlib.sha256(cipher.read_bytes()).hexdigest()}, "OpenCode Worker source differs")
+    require(receipt["target"] == WORKER_GO_TARGET, "OpenCode Worker receipt target differs")
+    require(receipt["effect"] == {"operation": "cloudflare_workers_secret_put", "status": "PASS"}, "OpenCode Worker effect differs")
+    require(receipt["readback"] == {"kind": "secret_name_presence", "status": "PASS", "present": True}, "OpenCode Worker readback differs")
+    wf = receipt["workflow"]
+    require(set(wf) == {"repository", "ref", "run_id", "run_attempt"} and wf["repository"] == "roccho-org/envs"
+            and wf["ref"] == "proposals" and type(wf["run_id"]) is int and wf["run_id"] > 0
+            and type(wf["run_attempt"]) is int and wf["run_attempt"] > 0, "OpenCode Worker workflow differs")
+    require(receipt["provider_use"] == "NOT_RUN", "registration must not claim inference")
+    require(isinstance(receipt["created_at"], str) and receipt["created_at"].endswith("Z"), "invalid receipt time")
+    try:
+        datetime.fromisoformat(receipt["created_at"][:-1] + "+00:00")
+    except ValueError:
+        raise EnvsError("invalid receipt time") from None
+    walk_receipt(receipt)
+
+
+def project_worker_go(*, envs_sha: str, run_id: int, run_attempt: int, created_at: str,
+                      root: Path = ROOT, runner: Runner = default_runner, opener=None) -> dict[str, Any]:
+    contracts = validate_contracts(root)
+    require(isinstance(envs_sha, str) and SHA40.fullmatch(envs_sha), "expected exact envs SHA")
+    require(type(run_id) is int and run_id > 0 and type(run_attempt) is int and run_attempt > 0, "invalid workflow identity")
+    target = contracts["bindings"][WORKER_GO_BINDING]["target"]
+    require(target == WORKER_GO_TARGET, "OpenCode Worker target differs")
+    cipher = root / WORKER_GO_CIPHER
+    require(cipher.is_file(), "OpenCode Worker ciphertext is not configured")
+    tools = toolchain(root)
+    inputs = gate(root, contracts, WORKER_GO_PLANE)
+    provider_env = clean_env(tools, {"CLOUDFLARE_ACCOUNT_ID": inputs["CLOUDFLARE_ACCOUNT_ID"],
+                                  "CLOUDFLARE_API_TOKEN": inputs["PI_CLOUDFLARE_API_TOKEN"]})
+    argv = [tools["wrangler"], "secret", "list", "--name", target["worker_name"], "--format", "json"]
+    # Existing Worker before decrypt; the shared PUT primitive cannot create a draft on a deletion race.
+    preflight = run_checked(argv, env=provider_env, runner=runner, label="OpenCode Worker existence preflight")
+    parse_workers_secret_list(preflight.stdout)
+    decrypted = run_checked([tools["sops"], "--decrypt", "--output-type", "json", str(cipher)],
+                            env=clean_env(tools, {"SOPS_AGE_KEY": inputs["SOPS_AGE_KEY"]}),
+                            runner=runner, label="OpenCode Worker SOPS decryption").stdout
+    try:
+        payload = json.loads(decrypted)
+    except (ValueError, UnicodeError):
+        raise EnvsError("OpenCode Worker decrypted payload invalid") from None
+    require(isinstance(payload, dict) and set(payload) == {GO_KEY}, "OpenCode Worker decrypted fields differ")
+    secret = payload[GO_KEY]
+    require(isinstance(secret, str) and bool(secret), "OpenCode Worker key is empty")
+    if opener is None:
+        def opener(request, *, timeout, context):
+            return urllib.request.build_opener(urllib.request.HTTPSHandler(context=context), NoRedirect).open(request, timeout=timeout)
+    _workers_secret_put(account_id=target["account_id"], worker_name=target["worker_name"],
+                        secret_name=target["secret_name"], secret=secret,
+                        token=inputs["PI_CLOUDFLARE_API_TOKEN"], opener=opener)
+    readback = run_checked(argv, env=provider_env, runner=runner, label="OpenCode Worker secret readback")
+    parse_workers_secret_list(readback.stdout, target["secret_name"])
+    receipt = {"kind": "envs.opencodeWorkerProjectionReceipt.v1", "status": "PASS", "envs_sha": envs_sha,
+               "capability": "opencode-go", "binding": WORKER_GO_BINDING,
+               "source": {"kind": "public_sops", "ref": WORKER_GO_CIPHER.as_posix(),
+                          "sha256": "sha256:" + hashlib.sha256(cipher.read_bytes()).hexdigest()},
+               "target": dict(target), "effect": {"operation": "cloudflare_workers_secret_put", "status": "PASS"},
+               "readback": {"kind": "secret_name_presence", "status": "PASS", "present": True},
+               "workflow": {"repository": "roccho-org/envs", "ref": "proposals", "run_id": run_id, "run_attempt": run_attempt},
+               "created_at": created_at, "provider_use": "NOT_RUN"}
+    validate_worker_go_receipt(receipt, root)
+    output = root / WORKER_GO_HANDOFF
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
+    set_worker_go_active(root, True)
+    validate_contracts(root)
+    return receipt
+
+
 def authoring_inputs(contracts: dict[str, dict[str, dict[str, Any]]], target: str) -> list[dict[str, str]]:
     # A selected author target reads only its own source plane and recipient. The GitHub Environment
     # can be shared without leaking one source key into another target's process environment.
     require(target in AUTHOR_TARGETS, f"unknown author target: {target}")
-    plane_id = TYPELLM_PLANE if target in TYPELLM_CIPHERTEXTS else GO_PLANE if target in GO_CIPHERTEXTS else "dev.authoring"
+    plane_id = TYPELLM_PLANE if target in TYPELLM_CIPHERTEXTS else GO_PLANE if target in GO_CIPHERTEXTS or target == WORKER_GO_BINDING else "dev.authoring"
     plane = contracts["environments"][plane_id]
     if target == "jev-api":
         return plane["required_secrets"] + plane["required_variables"]
@@ -1808,7 +1979,8 @@ def _workers_secret_put(*, account_id: str, worker_name: str, secret_name: str,
     # A missing/deleted Worker therefore fails instead of creating infrastructure.
     require(CLOUDFLARE_ACCOUNT_ID.fullmatch(account_id) is not None, "Workers account id invalid")
     require(CLOUDFLARE_WORKER_NAME.fullmatch(worker_name) is not None, "Workers name invalid")
-    require(secret_name == "JEV_API_KEY" and isinstance(secret, str) and secret, "Workers secret input invalid")
+    require((secret_name == "JEV_API_KEY" or (secret_name == GO_KEY and account_id == WORKER_GO_TARGET["account_id"] and worker_name == "pi"))
+            and isinstance(secret, str) and secret, "Workers secret input invalid")
     open_request = urllib.request.urlopen if opener is None else opener
     url = (CLOUDFLARE_API + "/accounts/" + account_id + "/workers/scripts/"
            + urllib.parse.quote(worker_name, safe="") + "/secrets")
@@ -2311,6 +2483,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     sub.add_parser("rent-root-plan")
     sub.add_parser("linode-read-probe")
     project_parser = sub.add_parser("project")
+    project_parser.add_argument("--target", choices=("jev-api", WORKER_GO_BINDING), default="jev-api")
     project_parser.add_argument("--envs-sha", required=True)
     project_parser.add_argument("--run-id", type=int, required=True)
     project_parser.add_argument("--run-attempt", type=int, required=True)
@@ -2343,7 +2516,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                                     identity=args.identity, apply=args.apply, root=root)
             print(json.dumps(result, indent=2, sort_keys=True))
         elif args.command == "author":
-            result = author(root) if args.target == "jev-api" else author_oci(root, target=args.target)
+            result = author(root) if args.target == "jev-api" else author_worker_go(root) if args.target == WORKER_GO_BINDING else author_oci(root, target=args.target)
             print(json.dumps(result, indent=2, sort_keys=True))
         elif args.command == "rent-tunnel":
             print(json.dumps(rent_author(root), indent=2, sort_keys=True))
@@ -2388,6 +2561,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "linode-read-probe":
             print(json.dumps(linode_read_probe(root), indent=2, sort_keys=True))
             return 0
+        elif args.command == "project" and args.target == WORKER_GO_BINDING:
+            require(args.output == HANDOFF or args.output == WORKER_GO_HANDOFF, "OpenCode Worker output differs")
+            receipt = project_worker_go(envs_sha=args.envs_sha, run_id=args.run_id, run_attempt=args.run_attempt,
+                                        created_at=args.created_at or utc_now(), root=root)
+            print(json.dumps({"kind": receipt["kind"], "status": "PASS", "output": WORKER_GO_HANDOFF.as_posix(),
+                              "provider_use": "NOT_RUN"}, sort_keys=True))
         else:
             receipt = project(
                 envs_sha=args.envs_sha, run_id=args.run_id, run_attempt=args.run_attempt,

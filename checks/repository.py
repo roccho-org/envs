@@ -230,6 +230,7 @@ CIPHERTEXTS = {
     "ciphertexts/dev-jev-api.sops.yaml", "ciphertexts/dev-rent-tunnel.sops.yaml", "ciphertexts/dev-jev-api.oci-dev.sops.yaml",
     "ciphertexts/dev-rent-client.sops.yaml", "ciphertexts/dev-opencode-go.oci-dev.sops.yaml",
     "ciphertexts/dev-opencode-go.versapro-own-oci.sops.yaml",
+    "ciphertexts/dev-opencode-go.pi-worker.sops.yaml",
     "ciphertexts/dev-typellm-api.oci-dev.sops.yaml",
     "ciphertexts/dev-typellm-api.versapro-own-oci.sops.yaml",
 }
@@ -370,7 +371,7 @@ def check_shape(root: Path) -> None:
     handoff_dir = root / "handoffs"
     if handoff_dir.exists():
         handoffs = sorted(path.relative_to(root).as_posix() for path in handoff_dir.rglob("*") if path.is_file())
-        require(bool(handoffs) and set(handoffs) <= {"handoffs/dev-jev-api.json", "handoffs/dev-jev-api.github-actions.json"},
+        require(bool(handoffs) and set(handoffs) <= {"handoffs/dev-jev-api.json", "handoffs/dev-jev-api.github-actions.json", "handoffs/dev-opencode-go.pi-worker.json"},
                 f"unexpected handoffs: {handoffs}")
 
 
@@ -437,12 +438,31 @@ def declared_inputs(row: dict[str, Any]) -> set[tuple[str, str]]:
     }
 
 
+def check_worker_go_projection(text: str) -> None:
+    guard = "    if: github.ref_name == 'proposals' && ((inputs.target == 'opencode-go.pi-worker' && github.repository == 'roccho-org/envs') || (inputs.target != 'opencode-go.pi-worker' && github.repository == 'roccho-dev/envs'))"
+    require(guard in text, "OpenCode Worker repository/target dispatch guard differs")
+    require("options: [jev-api, opencode-go.pi-worker]" in text and "default: jev-api" in text,
+            "projection selector differs")
+    selected = re.search(r"(?ms)^      - name: Project and read back only the existing Pi Worker OpenCode key\n(.*?)(?=^      - name: |\Z)", text)
+    legacy = re.search(r"(?ms)^      - name: Project and read back target-native auth\n(.*?)(?=^      - name: |\Z)", text)
+    require(selected is not None and legacy is not None, "projection target steps missing")
+    require("if: inputs.target == 'opencode-go.pi-worker'" in selected[1], "Worker selector missing")
+    require("if: inputs.target != 'opencode-go.pi-worker'" in legacy[1], "legacy selector missing")
+    require(set(INPUT_REFERENCE.findall(selected[1])) == {("secrets", "SOPS_AGE_KEY"),
+            ("secrets", "PI_CLOUDFLARE_API_TOKEN"), ("vars", "CLOUDFLARE_ACCOUNT_ID")}, "Worker projection inputs differ")
+    require(set(INPUT_REFERENCE.findall(legacy[1])) == {("secrets", "SOPS_AGE_KEY"),
+            ("secrets", "CLOUDFLARE_API_TOKEN"), ("vars", "CLOUDFLARE_ACCOUNT_ID")}, "legacy projection inputs differ")
+    require("project --target opencode-go.pi-worker" in selected[1], "Worker projection command differs")
+    require('"$ENVS_EFFECT_BIN/git" add -- handoffs/dev-opencode-go.pi-worker.json contracts/environments.jsonl' in text,
+            "Worker handoff file set differs")
+
+
 def author_target_inputs(adapter, contracts: dict[str, dict[str, dict[str, Any]]]) -> dict[str, set[tuple[str, str]]]:
     # Each author target's Environment inputs as the adapter reads them, in (namespace, name) form.
     result = {}
     for target in adapter.AUTHOR_TARGETS:
         plane_id = (adapter.TYPELLM_PLANE if target in adapter.TYPELLM_CIPHERTEXTS
-                    else adapter.GO_PLANE if target in adapter.GO_CIPHERTEXTS else "dev.authoring")
+                    else adapter.GO_PLANE if target in adapter.GO_CIPHERTEXTS or target == adapter.WORKER_GO_BINDING else "dev.authoring")
         secrets = {item["name"] for item in contracts["environments"][plane_id]["required_secrets"]}
         result[target] = {("secrets" if item["name"] in secrets else "vars", item["name"])
                           for item in adapter.authoring_inputs(contracts, target)}
@@ -817,6 +837,8 @@ def check_workflows(root: Path, environments: dict[str, dict[str, Any]],
         require(re.search(r"(?m)^ {0,4}env:", text) is None, f"{name}: workflow or job env is forbidden")
         # The author Environment also carries each binding's declared inputs; its steps prove which one reads which.
         declared = set().union(*author_targets.values()) if name == "author-dev-jev-api.yml" else declared_inputs(row)
+        if name == "project-dev-jev-api.yml":
+            declared |= declared_inputs(environments["dev.pi-opencode-projection"])
         if name == "probe-dev-mail-routing.yml":
             # P v2 explicitly permits this ONE existing non-secret account
             # locator at the native vars-to-runtime boundary. It is not a
@@ -857,6 +879,7 @@ def check_workflows(root: Path, environments: dict[str, dict[str, Any]],
     require(f"{EFFECT_ENTRY} author" in texts["author-dev-jev-api.yml"], "author workflow entry call missing")
     check_author_targets(texts["author-dev-jev-api.yml"], author_targets)
     require(f"{EFFECT_ENTRY} project" in texts["project-dev-jev-api.yml"], "project workflow entry call missing")
+    check_worker_go_projection(texts["project-dev-jev-api.yml"])
     rent = texts["project-dev-rent-tunnel.yml"]
     # The apply/handoff job keeps its whole-job literal false, before Environment resolution, consumer/artifact,
     # apply, ciphertext or PR handoff. The only active selector is a second, repository-read-only job: the native

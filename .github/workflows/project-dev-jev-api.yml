@@ -2,6 +2,12 @@ name: project-dev-jev-api
 
 on:
   workflow_dispatch:
+    inputs:
+      target:
+        description: Fixed target-native credential binding
+        type: choice
+        default: jev-api
+        options: [jev-api, opencode-go.pi-worker]
 
 permissions:
   actions: read
@@ -14,7 +20,7 @@ concurrency:
 
 jobs:
   project:
-    if: github.repository == 'roccho-dev/envs' && github.ref_name == 'proposals'
+    if: github.ref_name == 'proposals' && ((inputs.target == 'opencode-go.pi-worker' && github.repository == 'roccho-org/envs') || (inputs.target != 'opencode-go.pi-worker' && github.repository == 'roccho-dev/envs'))
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     environment: dev-projection
@@ -65,6 +71,7 @@ jobs:
         run: '"$ENVS_EFFECT_BIN/envs-effect" --root "$GITHUB_WORKSPACE" toolchain'
 
       - name: Project and read back target-native auth
+        if: inputs.target != 'opencode-go.pi-worker'
         env:
           SOPS_AGE_KEY: ${{ secrets.SOPS_AGE_KEY }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -75,8 +82,26 @@ jobs:
           --run-id "${GITHUB_RUN_ID}"
           --run-attempt "${GITHUB_RUN_ATTEMPT}"
 
+      - name: Project and read back only the existing Pi Worker OpenCode key
+        if: inputs.target == 'opencode-go.pi-worker'
+        env:
+          SOPS_AGE_KEY: ${{ secrets.SOPS_AGE_KEY }}
+          PI_CLOUDFLARE_API_TOKEN: ${{ secrets.PI_CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: >-
+          "$ENVS_EFFECT_BIN/envs-effect" --root "$GITHUB_WORKSPACE" project --target opencode-go.pi-worker
+          --envs-sha "${GITHUB_SHA}" --run-id "${GITHUB_RUN_ID}" --run-attempt "${GITHUB_RUN_ATTEMPT}"
+
       - name: Verify candidate handoff
         run: '"$ENVS_EFFECT_BIN/python3" -I checks/repository.py'
+
+      - name: Stage only the OpenCode Worker receipt and plane state
+        if: inputs.target == 'opencode-go.pi-worker'
+        run: '"$ENVS_EFFECT_BIN/git" add -- handoffs/dev-opencode-go.pi-worker.json contracts/environments.jsonl'
+
+      - name: Stage only the legacy Jev receipt
+        if: inputs.target != 'opencode-go.pi-worker'
+        run: '"$ENVS_EFFECT_BIN/git" add -- handoffs/dev-jev-api.json'
 
       - name: Open non-secret handoff PR
         env:
@@ -84,16 +109,15 @@ jobs:
         run: |
           set -euo pipefail
           tool="$ENVS_EFFECT_BIN"
-          branch="handoff/dev-jev-api-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          branch="handoff/dev-auth-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           "$tool/git" switch -c "$branch"
-          "$tool/git" add handoffs/dev-jev-api.json
           "$tool/git" diff --cached --check
           "$tool/git" config user.name "github-actions[bot]"
           "$tool/git" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          "$tool/git" commit -m "chore: record dev Jev projection handoff"
+          "$tool/git" commit -m "chore: record target-native auth projection"
           "$tool/git" push origin "HEAD:refs/heads/$branch"
           "$tool/gh" pr create \
             --base proposals \
             --head "$branch" \
-            --title "chore: record dev Jev projection handoff" \
+            --title "chore: record target-native auth projection" \
             --body "Generated after provider effect and name-only readback. Contains no plaintext secret, private key, or secret-value hash."

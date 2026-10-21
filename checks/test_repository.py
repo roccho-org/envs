@@ -530,7 +530,25 @@ print("403" if denied else ("404" if mode=="candidate404" and endpoint.endswith(
     print(f"PI_READ_ONLY_DIAGNOSTIC_FIXTURES=PASS: {len(cases)} bounded-state/denial/schema/namespace/privacy cases")
 
 
+def worker_go_projection_fixtures() -> None:
+    path = ".github/workflows/project-dev-jev-api.yml"
+    repository.inspect(ROOT)
+    for old, new in [
+        ("inputs.target == 'opencode-go.pi-worker' && github.repository == 'roccho-org/envs'", "inputs.target == 'opencode-go.pi-worker' && github.repository == 'fork/envs'"),
+        ("PI_CLOUDFLARE_API_TOKEN: ${{ secrets.PI_CLOUDFLARE_API_TOKEN }}", "PI_CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}"),
+        ("if: inputs.target == 'opencode-go.pi-worker'", "if: inputs.target != 'opencode-go.pi-worker'"),
+        ("project --target opencode-go.pi-worker", "project --target jev-api"),
+        ("handoffs/dev-opencode-go.pi-worker.json contracts/environments.jsonl", "handoffs/dev-jev-api.json contracts/environments.jsonl"),
+    ]:
+        expect_red(replace_text(path, old, new))
+    expect_red(replace_text("contracts/bindings.jsonl", '"worker_name":"pi"', '"worker_name":"other-worker"'))
+    expect_red(mutate_plane("dev.pi-opencode-projection", lambda row: row["required_secrets"][-1].update({"name": "CLOUDFLARE_API_TOKEN"})))
+    expect_red(mutate_plane("dev.pi-opencode-projection", lambda row: row.update({"migration_state": "ACTIVE", "active_github_environment": "dev-projection"})))
+    print("PI_OPENCODE_PROJECTION_FIXTURES=PASS: 8 boundary negatives")
+
+
 def main() -> None:
+    worker_go_projection_fixtures()
     baseline = repository.inspect(ROOT)
     assert baseline["status"] == "PASS"
     assert baseline["canonical_branch"] == "proposals"
