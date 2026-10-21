@@ -670,3 +670,38 @@ custody and every live effect need their own later phase grants.
 The static product bytes are owned by `roccho-dev/apps/packages/calendar/src`. This repo owns only one explicitly authorized provider upload of an exact, CI-green apps source to the fixed `roccho-family-calendar-2026` Direct Upload Pages project. `dev-projection` supplies its existing `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` to a single bounded effect step. No secret is transferred to apps, no Pages secret is projected into the browser, and this is not a generic deployment platform.
 
 On [envs Issue #69](https://github.com/roccho-org/envs/issues/69), the existing `roccho-dev` principal comments `/deploy-calendar <40-character apps SHA>`. The comment becomes data for a strict validator; envs only fetches that commit after its `calendar acceptance` and `nix-check` runs are both success. It uses the envs exact-commit Nix toolchain artifact, deploys only the two static files to Pages, and accepts completion only after public byte-for-byte readback of both. A failure never represents success. All data in `events.jsonl` is public. The provider secret scope must independently include `Pages Write` (a working zone read alone does not prove it).
+
+
+## Pi Worker OpenCode key projection
+
+The selected `opencode-go.pi-worker` binding reuses the existing author/project pipeline.
+It reads `dev-authoring/OPENCODE_API_KEY` and the existing `SOPS_AGE_RECIPIENTS` only in its literal author step,
+then hands public SOPS ciphertext to the separate `dev.pi-opencode-projection` plane on existing `dev-projection`.
+Only existing `PI_CLOUDFLARE_API_TOKEN`, `SOPS_AGE_KEY` and the declared account reach that projection.
+No OCI recipient, generic Cloudflare principal, org-secret widening or host plaintext copy is a fallback.
+The existing Worker is checked before decryption; the shared native-provider PUT cannot create a missing Worker.
+A strict OPENCODE-only payload is required before write, followed by name-only Wrangler readback.
+The separate receipt and plane become ACTIVE only after actual projection; name presence is not model entitlement.
+Legacy Jev authoring/projection inputs, target semantics and NOT_CONFIGURED states remain separate.
+
+```mermaid
+flowchart TB
+  Source["🔐 Existing dev-authoring key"] --> Author["📦 Existing SOPS authoring · exact configured recipients"]
+  Author --> Cipher["🧾 Reviewed ciphertext-only PR"]
+  Cipher --> Project["☁️ Existing pi preflight · limited principal · SOPS decrypt"]
+  Project --> Secret["🗝️ Native Worker secret · exact name readback"]
+  Secret --> Receipt["📋 Projection receipt · inference NOT_RUN"]
+  Receipt --> Runtime["🧪 Independent actual Pi→Jev→recreated-conversation proof"]
+  Project -->|mismatch or UNKNOWN| Stop["🛑 No fallback · no automatic resend"]
+```
+
+The `opencode-runtime` selector resolves accepted Ops #631 from its actual merge,
+checks canonical source/CI and its distinct `pi-opencode-runtime` artifact, and
+requires the canonical target projection receipt before deployment. It reuses the
+existing Wrangler recovery body. API mode receives no authoring OpenCode key or
+Jev key from the deployment Environment and performs no secret write; both names
+must already be bound on the existing Worker. Final current/code/namespace/owner
+and privacy guards still apply. This registration/deployment evidence is separate
+from successful inference. The API proof disconnects its owner socket without
+keepalives or probes, then requires a new DO and exact neutral recall; its native
+operator retains only nonsecret expected data in memory within one process.
