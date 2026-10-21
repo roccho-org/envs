@@ -211,8 +211,9 @@ def pi_runtime_fixtures() -> None:
 import json, os, sys
 from pathlib import Path
 mode = os.environ["PI_RUNTIME_CASE"]
-api_mode = mode.startswith("api-")
-mode = mode.removeprefix("api-")
+credit_mode = mode.startswith("credit-")
+api_mode = mode.startswith(("api-", "credit-"))
+mode = mode.removeprefix("api-").removeprefix("credit-")
 null_observation = mode.startswith("null-")
 mode = mode.removeprefix("null-")
 trace = Path(os.environ["PI_RUNTIME_TRACE"])
@@ -241,8 +242,8 @@ if kind == "wrangler":
         assert "--retry" not in args
         config = json.loads(Path(args[args.index("--config")+1]).read_text())
         if api_mode:
-            assert config["vars"]["PI_PROOF_AUTH_MODE"] == "opencode-go"
-            assert config["vars"]["PI_PROOF_PROVIDER"] == "opencode-go"
+            assert config["vars"]["PI_PROOF_AUTH_MODE"] == ("opencode" if credit_mode else "opencode-go")
+            assert config["vars"]["PI_PROOF_PROVIDER"] == ("opencode" if credit_mode else "opencode-go")
             assert config["vars"]["PI_PROOF_MODEL"] == "gpt-6-luna"
             assert config["vars"]["PI_JEV_PROOF_SESSION"] == "owner-jev-opencode-proof-20261021"
             assert "PI_PROOF_TRANSIENT" not in config["vars"]
@@ -297,6 +298,10 @@ elif url.endswith("/settings"):
     config = Path(os.environ["PI_RUNTIME_DIR"],"wrangler.json")
     vars = json.loads(config.read_text()).get("vars",{})
     if mode=="owner" and after(): vars["PI_ACCESS_OWNER_HASH"]="wrong"
+    if mode=="provider" and after(): vars["PI_PROOF_PROVIDER"]="wrong"
+    if mode=="model" and after(): vars["PI_PROOF_MODEL"]="wrong"
+    if mode=="session" and after(): vars["PI_JEV_PROOF_SESSION"]="wrong"
+    if mode=="transient" and after(): vars["PI_PROOF_TRANSIENT"]="true"
     namespace = "changed" if mode=="namespace-changed" and after() else ("" if mode=="namespace-empty" else "fixture-namespace")
     sessions=[{"type":"durable_object_namespace","name":"SESSIONS","class_name":"Session","namespace_id":namespace}]
     if mode=="namespace-missing": sessions=[]
@@ -351,7 +356,10 @@ else: print(json.dumps({"success":True,"result":result}))
            "obs-absent","obs-null","obs-wrong","obs-true","obs-denied","obs-api-false","obs-http","obs-result-string",\
            "null-code","null-namespace-changed","null-owner","null-post-subdomain-preview","null-changed-current","upload-id-malformed","uploaded404",
            "api-success","api-bindings-missing","api-bindings-extra","api-owner","api-code","api-upload-fail",
-           "api-version-deploy-fail","api-changed-current","api-obs-null","api-namespace-changed")
+           "api-version-deploy-fail","api-changed-current","api-obs-null","api-namespace-changed",
+           "credit-success","credit-bindings-missing","credit-bindings-extra","credit-owner","credit-code",
+           "credit-upload-fail","credit-version-deploy-fail","credit-changed-current","credit-obs-null",
+           "credit-namespace-changed","credit-provider","credit-model","credit-session","credit-transient")
     for mode in cases:
         current=scratch/mode
         current.mkdir()
@@ -363,19 +371,19 @@ else: print(json.dumps({"success":True,"result":result}))
             **os.environ,"PATH":str(tools)+os.pathsep+os.environ["PATH"],
             "ENVS_EFFECT_BIN":str(tools),"RUNNER_TEMP":str(current),"PI_RUNTIME_DIR":str(runtime),
             "CLOUDFLARE_API_TOKEN":"fixture-limited","CLOUDFLARE_ACCOUNT_ID":"fixture-account",
-            "JEV_API_KEY":"" if mode.startswith("api-") else "fixture-jev-only","PI_RUNTIME_MODE":"opencode-runtime" if mode.startswith("api-") else "runtime","OPS_SHA":"a"*40,
+            "JEV_API_KEY":"" if mode.startswith(("api-","credit-")) else "fixture-jev-only","PI_RUNTIME_MODE":"opencode-credit-runtime" if mode.startswith("credit-") else ("opencode-runtime" if mode.startswith("api-") else "runtime"),"OPS_SHA":"a"*40,
             "PI_RUNTIME_CASE":mode,"PI_RUNTIME_TRACE":str(trace)})
-        assert (result.returncode==0)==(mode in ("success","obs-null","api-success","api-obs-null")),(mode,result.stdout,result.stderr)
-        if mode.startswith("api-"):
+        assert (result.returncode==0)==(mode in ("success","obs-null","api-success","api-obs-null","credit-success","credit-obs-null")),(mode,result.stdout,result.stderr)
+        if mode.startswith(("api-","credit-")):
             calls=json.loads(trace.read_text())
             assert "secret" not in calls,calls
             assert "fixture-private" not in result.stdout+result.stderr,mode
-            if mode in ("api-bindings-missing","api-bindings-extra"): assert calls==["settings"],calls
-            if mode in ("api-success","api-obs-null"):
+            if mode.removeprefix("api-").removeprefix("credit-") in ("bindings-missing","bindings-extra"): assert calls==["settings"],calls
+            if mode.removeprefix("api-").removeprefix("credit-") in ("success","obs-null"):
                 assert calls==["settings","status","version","latest","subdomain","upload","version","version-deploy","status","settings","script-settings","version","subdomain","latest","status"],calls
                 receipt=[json.loads(line) for line in result.stdout.splitlines() if line.startswith("{")][-1]
                 assert receipt["version"].endswith("000000000002") and {r["name"] for r in receipt["bindings"] if r["type"]=="secret_text"}=={"OPENCODE_API_KEY","PI_JEV_PROOF_API_KEY"}
-                assert receipt["admission"]==("API_OFF" if mode=="api-success" else "OBSERVABILITY_UNRESOLVED")
+                assert receipt["admission"]==("API_OFF" if mode.endswith("success") else "OBSERVABILITY_UNRESOLVED")
             else: assert '"admission"' not in result.stdout,(mode,result.stdout)
             continue
         mode = mode.removeprefix("null-")
@@ -591,7 +599,9 @@ def worker_go_projection_fixtures() -> None:
         ('([.result.bindings[] | select(.type == "secret_text") | .name] | sort) == ["OPENCODE_API_KEY","PI_JEV_PROOF_API_KEY"]', 'true'),
     ]:
         expect_red(replace_text(runtime_path, old, new))
-    print("PI_OPENCODE_PROJECTION_FIXTURES=PASS: 18 boundary negatives")
+    for old, new in [('/pulls/634', '/pulls/631'), ('pi-opencode-credit-runtime-$OPS_SHA', 'pi-opencode-runtime-$OPS_SHA'), ('KEY_BOUND_SELECTED_OWNER_OPENCODE_CREDIT_RUNTIME', 'KEY_BOUND_SELECTED_OWNER_OPENCODE_RUNTIME'), ('.model_post_limit == 4 and .recovery_start_offset == 1', '.model_post_limit == 4 and .recovery_start_offset == 0'), ('.provider == "opencode" and .model == "gpt-6-luna"', '.provider == "opencode-go" and .model == "gpt-6-luna"'), ('https://opencode.ai/inference/openai/v1', 'https://opencode.ai/inference/go/openai/v1'), ('"PI_PROOF_AUTH_MODE":"opencode", "PI_PROOF_PROVIDER":"opencode"', '"PI_PROOF_AUTH_MODE":"opencode-go", "PI_PROOF_PROVIDER":"opencode-go"'), ('$vars.PI_PROOF_AUTH_MODE == "opencode" and $vars.PI_PROOF_PROVIDER == "opencode"', '$vars.PI_PROOF_AUTH_MODE == "opencode-go" and $vars.PI_PROOF_PROVIDER == "opencode-go"')]:
+        expect_red(replace_text(runtime_path, old, new))
+    print("PI_OPENCODE_PROJECTION_FIXTURES=PASS: 18 existing + 8 PAYG boundary negatives")
 
 
 def main() -> None:

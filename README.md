@@ -705,3 +705,31 @@ and privacy guards still apply. This registration/deployment evidence is separat
 from successful inference. The API proof disconnects its owner socket without
 keepalives or probes, then requires a new DO and exact neutral recall; its native
 operator retains only nonsecret expected data in memory within one process.
+
+
+### Explicit PAYG recovery after the first rejected Go request
+
+`opencode-credit-runtime` admits the separate accepted Ops PAYG recovery artifact.
+It uses the existing built-in `opencode` provider, current general Responses base,
+same GPT 6 Luna model and already-registered key. The historical
+`opencode-go.pi-worker` ciphertext/receipt identifier records key delivery; it is
+not evidence of a Go subscription. No key reauthoring, projection or secret write
+occurs during this correction. Existing Go, OAuth, screen and diagnostic scopes
+retain their own admission paths.
+
+The failed first model admission remains consumed in the same session and
+conversation. Explicit manual recovery requires its unique settled 403 history
+and no pending work before a new prompt. The cumulative cap is four: historical
+failure one, new code review and Jev consumption two/three, actual new DO and
+same-conversation neutral exact recall four. This is one authorized operator
+invocation, not a durable retry service; crash/UNKNOWN never automatically rearms.
+Actual inference success still requires independent live evidence.
+
+```mermaid
+flowchart TB
+  Key["🔐 Existing projected key · unchanged custody"] --> Pi["☁️ Same Worker · explicit PAYG provider"]
+  Pi <--> Model["🧠 GPT 6 Luna · general Responses"]
+  Pi <--> Jev["⚡ One typed judgment"]
+  Pi <--> History["💾 Same conversation · failed admission retained"]
+  History --> Recall["♻️ Actual new DO · exact neutral recall"]
+```
