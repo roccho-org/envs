@@ -1,0 +1,35 @@
+{
+  "binding": "opencode-go.pi-worker",
+  "capability": "opencode-go",
+  "created_at": "2026-10-21T07:35:02Z",
+  "effect": {
+    "operation": "cloudflare_workers_secret_put",
+    "status": "PASS"
+  },
+  "envs_sha": "fffc186fd02ab6699b8d5405cb3f577b7c890201",
+  "kind": "envs.opencodeWorkerProjectionReceipt.v1",
+  "provider_use": "NOT_RUN",
+  "readback": {
+    "kind": "secret_name_presence",
+    "present": true,
+    "status": "PASS"
+  },
+  "source": {
+    "kind": "public_sops",
+    "ref": "ciphertexts/dev-opencode-go.pi-worker.sops.yaml",
+    "sha256": "sha256:9684d752f78a0088c439382f73d0e08a0f8deb853013e20d5d8fa4b202517eca"
+  },
+  "status": "PASS",
+  "target": {
+    "account_id": "3d17cd263c27a0ea241f0a8fc09ac2bb",
+    "provider": "cloudflare-workers",
+    "secret_name": "OPENCODE_API_KEY",
+    "worker_name": "pi"
+  },
+  "workflow": {
+    "ref": "proposals",
+    "repository": "roccho-org/envs",
+    "run_attempt": 1,
+    "run_id": 39562905629
+  }
+}
