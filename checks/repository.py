@@ -1029,8 +1029,8 @@ def pi_screen_projection(source: str) -> str:
     require(dispatch in source and "inputs.ops_sha" not in source,
             "Pi scope is explicit; screen remains default; source is never caller supplied")
     for marker in (
-        "repos/roccho-org/ops/pulls/608",
-        '.merged == true and .state == "closed" and .base.repo.full_name == "roccho-org/ops" and .base.ref == "proposals" and .head.repo.full_name == "roccho-org/ops" and .head.ref == "codex/pi-jev-worker-20261020" and (.merge_commit_sha | test("^[0-9a-f]{40}$"))',
+        "repos/roccho-org/ops/pulls/619",
+        '.merged == true and .state == "closed" and .base.repo.full_name == "roccho-org/ops" and .base.ref == "proposals" and .head.repo.full_name == "roccho-org/ops" and .head.ref == "codex/pi-owner-lifecycle-20261021" and (.merge_commit_sha | test("^[0-9a-f]{40}$"))',
         "pi-jev-runtime-$OPS_SHA", '(cd "$art/runtime" && sha256sum -c SHA256SUMS)',
         '"KEYLESS_SELECTED_OWNER_TRANSIENT_RUNTIME"', '.workers_dev == true',
         '.migrations == [{"tag":"pi-jev-proof-v1","new_sqlite_classes":["Session"]}]',
