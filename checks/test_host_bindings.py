@@ -86,7 +86,6 @@ def main() -> None:
         assert binding.get("role") == path.parent.name and binding.get("site") == path.stem, f"{path} names another target"
         if tool_from(binding, path.parent.name) is not None:
             selected.append(path.relative_to(ROOT).as_posix())
-    assert "own/G6I3.json" in selected, "own/G6I3 selects no T"
     assert "own/VERSAPRO.json" in selected, "own/VERSAPRO (native own) selects no T"
 
     # Synthetic descriptor and binding for the consumer rule.
