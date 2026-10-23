@@ -138,7 +138,7 @@ jobs:
         run: '"$ENVS_EFFECT_BIN/python3" -I checks/repository.py'
 
       # GitHub Actions may not create pull requests in this organization (run 39888672016): the job ends by pushing
-      # the ciphertext-only branch, and the reviewer opens the PR from it.
+      # the ciphertext-only branch (named in the push log), and the reviewer opens the PR from it.
       - name: Push ciphertext-only authority branch
         run: |
           set -euo pipefail
@@ -151,4 +151,3 @@ jobs:
           "$tool/git" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           "$tool/git" commit -m "chore: author dev Jev ciphertext"
           "$tool/git" push origin "HEAD:refs/heads/$branch"
-          echo "ciphertext-only authority branch: $branch (open a PR to proposals from it)" >> "$GITHUB_STEP_SUMMARY"
