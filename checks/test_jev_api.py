@@ -141,7 +141,8 @@ def environment(values: dict[str, str]):
 def copy_root() -> Path:
     target = Path(tempfile.mkdtemp(prefix="envs-jev-test-")) / "repo"
     shutil.copytree(ROOT, target, ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".git"))
-    (target / jev.OCI_CIPHERTEXT).unlink(missing_ok=True)
+    for path in jev.JEV_CIPHERTEXTS.values():
+        (target / path).unlink(missing_ok=True)
     for path in jev.GO_CIPHERTEXTS.values():
         (target / path).unlink(missing_ok=True)
     for path in jev.TYPELLM_CIPHERTEXTS.values():
@@ -340,6 +341,49 @@ def test_author_oci() -> None:
         shutil.rmtree(root.parent, ignore_errors=True)
 
 
+def test_author_own_oci() -> None:
+    # The VersaPro own Jev target reads only JEV_API_KEY and its own recipient. The OCI dev recipient holds another
+    # valid value: it must be neither read nor used, and its ciphertext is never accepted as the own target's.
+    root = copy_root()
+    calls: list[tuple[list[str], bytes | None, dict[str, str]]] = []
+    try:
+        before = snapshot(root)
+
+        def runner(argv, input_data, env):
+            calls.append((list(argv), input_data, dict(env)))
+            return subprocess.CompletedProcess(argv, 0, stdout=oci_ciphertext((OWN_RECIPIENT,)), stderr=b"")
+
+        values = oci_env(**{jev.OWN_JEV_RECIPIENT: OWN_RECIPIENT, jev.OCI_RECIPIENT: OCI_OTHER})
+        with environment(values):
+            result = jev.author_oci(root, runner, target=jev.OWN_JEV_BINDING)
+        assert result == {
+            "kind": "envs.targetAuthoringResult.v1", "status": "PASS", "binding": jev.OWN_JEV_BINDING,
+            "ciphertext": jev.OWN_JEV_CIPHERTEXT.as_posix(), "recipient_count": 1,
+            "target_apply": "NOT_RUN", "application_runtime": "NOT_RUN",
+        }
+        assert len(calls) == 1
+        argv, stdin, env = calls[0]
+        assert json.loads(stdin) == {"JEV_API_KEY": OCI_KEY}
+        assert env["SOPS_AGE_RECIPIENTS"] == OWN_RECIPIENT
+        assert not {"JEV_API_KEY", jev.OCI_RECIPIENT, jev.OWN_JEV_RECIPIENT} & env.keys()
+        assert not any(OCI_KEY in item for item in [*argv, *env.values()])
+        after = snapshot(root)
+        assert set(after) - set(before) == {jev.OWN_JEV_CIPHERTEXT.as_posix()}
+        assert all(after[name] == data for name, data in before.items())
+        written = (root / jev.OWN_JEV_CIPHERTEXT).read_bytes()
+        with environment(values):
+            try:
+                jev.author_oci(root, lambda argv, input_data, env: subprocess.CompletedProcess(
+                    argv, 0, stdout=oci_ciphertext((OCI_OTHER,)), stderr=b""), target=jev.OWN_JEV_BINDING)
+            except jev.EnvsError:
+                pass
+            else:
+                raise AssertionError("own Jev target accepted another recipient's ciphertext")
+        assert (root / jev.OWN_JEV_CIPHERTEXT).read_bytes() == written
+    finally:
+        shutil.rmtree(root.parent, ignore_errors=True)
+
+
 def test_worker_go_authoring_isolated_and_rotation() -> None:
     root = copy_root()
     try:
@@ -472,6 +516,7 @@ def test_targets_are_separate() -> None:
         "jev-api": ["JEV_API_KEY", "SOPS_AGE_RECIPIENTS"],
         jev.WORKER_GO_BINDING: [jev.GO_KEY, "SOPS_AGE_RECIPIENTS"],
         jev.OCI_BINDING: ["JEV_API_KEY", jev.OCI_RECIPIENT],
+        jev.OWN_JEV_BINDING: ["JEV_API_KEY", jev.OWN_JEV_RECIPIENT],
         jev.GO_BINDING: [jev.GO_KEY, jev.OCI_RECIPIENT],
         jev.OWN_GO_BINDING: [jev.GO_KEY, jev.OWN_GO_RECIPIENT],
         jev.TYPELLM_BINDING: [jev.TYPELLM_KEY, jev.OCI_RECIPIENT],
@@ -1812,6 +1857,7 @@ def main() -> None:
         test_author()
         test_author_red_inputs()
         test_author_oci()
+        test_author_own_oci()
         test_author_go()
         test_author_typellm()
         test_author_own_typellm()

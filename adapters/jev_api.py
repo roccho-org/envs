@@ -176,7 +176,13 @@ OWN_TYPELLM_BINDING = "typellm-api.versapro-own-oci"
 OWN_TYPELLM_CIPHERTEXT = Path("ciphertexts/dev-typellm-api.versapro-own-oci.sops.yaml")
 OWN_TYPELLM_RECIPIENT = OWN_GO_RECIPIENT
 TYPELLM_CIPHERTEXTS = {TYPELLM_BINDING: TYPELLM_CIPHERTEXT, OWN_TYPELLM_BINDING: OWN_TYPELLM_CIPHERTEXT}
-OCI_CIPHERTEXTS = {OCI_BINDING: OCI_CIPHERTEXT, **GO_CIPHERTEXTS, **TYPELLM_CIPHERTEXTS}
+# The VersaPro own OCI target for the same one-shot Jev source: its own ciphertext and the existing own public
+# recipient that the Go and TypeLLM own targets already use. The OCI dev recipient is never a fallback.
+OWN_JEV_BINDING = "jev-api.versapro-own-oci"
+OWN_JEV_CIPHERTEXT = Path("ciphertexts/dev-jev-api.versapro-own-oci.sops.yaml")
+OWN_JEV_RECIPIENT = OWN_GO_RECIPIENT
+JEV_CIPHERTEXTS = {OCI_BINDING: OCI_CIPHERTEXT, OWN_JEV_BINDING: OWN_JEV_CIPHERTEXT}
+OCI_CIPHERTEXTS = {**JEV_CIPHERTEXTS, **GO_CIPHERTEXTS, **TYPELLM_CIPHERTEXTS}
 # Every binding `author --target` can select; a dispatch names exactly one of them.
 AUTHOR_TARGETS = ("jev-api", *OCI_CIPHERTEXTS, "opencode-go.pi-worker")
 ORG_BINDING = "jev-api.github-actions"
@@ -353,6 +359,16 @@ def expected_bindings(jev_target: dict[str, Any] | None = None) -> dict[str, dic
             "required_variables": [{"name": OCI_RECIPIENT, "type": "age_recipient", "lifecycle": "persistent"}],
             "target": {"repository": "roccho-dev/windows", "host": "oci-dev", "kind": "process_env", "secret_name": "JEV_API_KEY"},
         },
+        OWN_JEV_BINDING: {
+            "id": OWN_JEV_BINDING,
+            "kind": "envs.authCapability.v1",
+            "capability": "jev-api",
+            "ciphertext": OWN_JEV_CIPHERTEXT.as_posix(),
+            "source_key": "JEV_API_KEY",
+            "github_environment": "dev-authoring",
+            "required_variables": [{"name": OWN_JEV_RECIPIENT, "type": "age_recipient", "lifecycle": "persistent"}],
+            "target": {"repository": "roccho-dev/resources", "host": "versapro-own-oci", "kind": "process_env", "secret_name": "JEV_API_KEY"},
+        },
         GO_BINDING: {
             "id": GO_BINDING,
             "kind": "envs.authCapability.v1",
@@ -510,6 +526,10 @@ def expected_oci_boundary() -> dict[str, Any]:
         "does_not_own": ["target_apply", "target_age_identity", "application_runtime_acceptance", "deployment"],
         "handoff_ref_kind": "exact_commit_sha",
     }
+
+
+def expected_own_jev_boundary() -> dict[str, Any]:
+    return {**expected_oci_boundary(), "id": "dev.jev-api-versapro-own-oci.provider", "binding": OWN_JEV_BINDING}
 
 
 def expected_go_boundary() -> dict[str, Any]:
@@ -766,9 +786,9 @@ def validate_contracts(root: Path = ROOT) -> dict[str, dict[str, dict[str, Any]]
             f"{LINODE_READ_PLANE} must be a NOT_CONFIGURED read-only probe plane")
 
     # The OCI target has no state of its own: its ciphertext, when present, is simply valid or RED.
-    oci_cipher = root / OCI_CIPHERTEXT
-    if oci_cipher.is_file():
-        validate_oci_ciphertext(oci_cipher.read_bytes(), None, None)
+    for path in JEV_CIPHERTEXTS.values():
+        if (root / path).is_file():
+            validate_oci_ciphertext((root / path).read_bytes(), None, None)
     for path in GO_CIPHERTEXTS.values():
         if (root / path).is_file():
             validate_oci_ciphertext((root / path).read_bytes(), None, None, key=GO_KEY)
@@ -784,6 +804,7 @@ def validate_contracts(root: Path = ROOT) -> dict[str, dict[str, dict[str, Any]]
         "normal.consumer.path", "dev.rent-client.provider", "dev.rent-root.provider", WINDOWS_CONSUMER,
         "dev.opencode-go-oci-dev.provider", "dev.opencode-go-versapro-own-oci.provider",
         "dev.typellm-api-oci-dev.provider", "dev.typellm-api-versapro-own-oci.provider",
+        "dev.jev-api-versapro-own-oci.provider",
     } | set(expected_org_boundaries()), "provider-consumer boundary set differs")
     for identity, expected in expected_org_boundaries().items():
         require(boundary[identity] == expected, "Org provider-consumer boundary differs")
@@ -807,6 +828,8 @@ def validate_contracts(root: Path = ROOT) -> dict[str, dict[str, dict[str, Any]]
     require(isinstance(source, str) and SHA40.fullmatch(source) is not None
             and boundary[WINDOWS_CONSUMER] == expected_windows_consumer(source), "windows rent consumer boundary differs")
     require(boundary["dev.jev-api-oci-dev.provider"] == expected_oci_boundary(), "OCI dev provider boundary differs")
+    require(boundary["dev.jev-api-versapro-own-oci.provider"] == expected_own_jev_boundary(),
+            "Jev own OCI provider boundary differs")
     require(boundary["dev.opencode-go-oci-dev.provider"] == expected_go_boundary(),
             "OpenCode Go provider boundary differs")
     require(boundary["dev.opencode-go-versapro-own-oci.provider"] == expected_own_go_boundary(),
