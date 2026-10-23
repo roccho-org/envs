@@ -852,7 +852,7 @@ def main() -> None:
     expect_red(replace_text(author, f"{entry} author", "python3 adapters/jev_api.py author"))
     expect_red(replace_text(project, f"{entry} project", "nix shell .#effect-toolchain -c envs-effect project"))
     expect_red(replace_text(project, f"{entry} project", f"npx --yes wrangler@4 && {entry} project"))
-    expect_red(replace_text(author, '"$tool/gh" pr create', "gh pr create"))
+    expect_red(replace_text(author, '"$tool/git" commit', "git commit"))
     expect_red(replace_text(author, '"$tool/git" push', "git push"))
     # Effect workflows consume the provided artifact; any rebuild or Nix install there is RED.
     expect_red(replace_text(project, identity_step, f"      - name: Rebuild\n        run: {build}\n\n{identity_step}"))
