@@ -516,7 +516,7 @@ def expected_oci_boundary() -> dict[str, Any]:
         "id": "dev.jev-api-oci-dev.provider",
         "kind": "envs.providerConsumerBoundary.v1",
         "role": "provider",
-        "repository": "roccho-dev/envs",
+        "repository": "roccho-org/envs",
         "stage": "dev",
         "capability": "jev-api",
         "binding": OCI_BINDING,
