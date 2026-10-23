@@ -397,6 +397,29 @@ steps. The existing own public recipient may be reused only after matching it
 to the existing target identity; neither the identity nor a plaintext key is
 copied off the target. Existing OCI dev TypeLLM and own Go bindings are retained.
 
+## Jev VersaPro own OCI authoring
+
+`jev-api.versapro-own-oci` selects the existing one-shot Jev source and the
+VersaPro own OCI's existing public recipient. It does not reuse the OCI dev
+ciphertext or another target's source key.
+
+```text
+dev-authoring/JEV_API_KEY + dev-authoring/VERSAPRO_OWN_OCI_AGE_RECIPIENT
+→ author-dev-jev-api, `author --target jev-api.versapro-own-oci`
+→ ciphertexts/dev-jev-api.versapro-own-oci.sops.yaml
+→ ciphertext-only PR → accepted exact proposals revision
+```
+
+The selected literal workflow step receives only those two inputs. The OCI dev
+recipient is not a fallback, and an unselected recipient never reaches SOPS.
+The envelope contains exactly `JEV_API_KEY` plus SOPS metadata for one
+recipient. The closed consumer target is
+`{"repository":"roccho-dev/resources","host":"versapro-own-oci","kind":"process_env","secret_name":"JEV_API_KEY"}`.
+
+This source binding adds no ciphertext, target deployment or model invocation.
+Authoring, when manually dispatched, records target application and application
+runtime as `NOT_RUN`. The OCI dev and GitHub Actions Jev bindings are retained.
+
 ## Dev rent tunnel flow (windows #14)
 
 The rent OCI host runs `cloudflared` from a token file. envs owns only the step from the provider-issued Named Tunnel token to a ciphertext that exactly one target can open:

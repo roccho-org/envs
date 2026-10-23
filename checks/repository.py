@@ -233,6 +233,7 @@ CIPHERTEXTS = {
     "ciphertexts/dev-opencode-go.pi-worker.sops.yaml",
     "ciphertexts/dev-typellm-api.oci-dev.sops.yaml",
     "ciphertexts/dev-typellm-api.versapro-own-oci.sops.yaml",
+    "ciphertexts/dev-jev-api.versapro-own-oci.sops.yaml",
 }
 # The real SOPS roundtrip runs the locked sops with a check-only age that never enters the effect toolchain; the
 # closure tofu joins it so a real root output reaches the production sealing path.
@@ -1469,6 +1470,8 @@ def check_readme(root: Path, environments: dict[str, dict[str, Any]]) -> None:
         "`author --target typellm-api.oci-dev`",
         "ciphertexts/dev-typellm-api.versapro-own-oci.sops.yaml",
         "`author --target typellm-api.versapro-own-oci`",
+        "ciphertexts/dev-jev-api.versapro-own-oci.sops.yaml",
+        "`author --target jev-api.versapro-own-oci`",
         "dev-authoring/VERSAPRO_OWN_OCI_AGE_RECIPIENT",
         "ciphertexts/dev-jev-api.oci-dev.sops.yaml",
         "ciphertexts/dev-opencode-go.oci-dev.sops.yaml",
