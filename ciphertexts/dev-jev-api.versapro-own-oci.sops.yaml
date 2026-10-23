@@ -1,0 +1,16 @@
+JEV_API_KEY: ENC[AES256_GCM,data:XgJxdZEKKC8x98ziBiFKC1YubR97YQuHepk9T6Ip6M83xnPOOzX5KhKfk6IdmXcUzLJqk0Ah4EFDEVRelaP0m7TfLWe+uScDKV2heowAf/9zIS0brj9GDio/68q/dv5s8PIxCJQj9DEkLNGI,iv:VmmIr6nD48PmjqTy8YFFrL9xgzFTLS3iFj78U9J46cM=,tag:HIO7+M+Ig2iwi4Io5u/KhQ==,type:str]
+sops:
+    age:
+        - enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBJVnVOTXBETWNoUTlvUnlW
+            ZTBFVFFRSVBRS2tkaUJUUGk1R2NrcE9PckdBClcxOTlQclFNeW9Ld2VXREtFdlN0
+            OUlTVG9adlhGUDVSNDhNdmllRkF0U2cKLS0tIE1JTFRoMVEzU1JXUmYxYXFnckYr
+            WW83c0luSGViU0FBUktIYVVSYTVaTk0KmJSmIVLdHx83Xxz1XEjf0NZ5Qjfz7aSK
+            iX7hYgPjPLY+Z3m6pGmWO5HXKIfkLwAOiYmFLrXY4mzz62zCdJbeNg==
+            -----END AGE ENCRYPTED FILE-----
+          recipient: age1uenvvwd6cc0gm5gw8wk0s9es3t7t2qkfzz97ste0se0tqgllypfqla98fu
+    lastmodified: "2026-10-23T02:17:07Z"
+    mac: ENC[AES256_GCM,data:41HfsiVorf9oyx9bI97sEc9WOdRmIL7aoqBuVzH4g2hHszDg0KxNiMl9MmhlMGqf0lXUgPRZzY7wyNqqkjS5jl2c6C/Ai0Mr5O09Slg0KgjPJx5Alp8MQUlbrNXgg+PAMah27gHLlbcjA/lQVqOpts7Mu10+a8zMRsgA/I14+ow=,iv:7VeHcJgpielbU7zWQPvGdbTiJ8iXdp66lL8iWso7xgo=,tag:s3kP5sXvX9Z/1+wC96oyeA==,type:str]
+    unencrypted_suffix: _unencrypted
+    version: 3.13.2
