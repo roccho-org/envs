@@ -24,7 +24,7 @@ variables {
 run "identity_only_loopback_ssh" {
   command = plan
   assert {
-    condition     = cloudflare_zero_trust_access_policy.host.decision == "allow" && length(cloudflare_zero_trust_access_policy.host.include) == 1 && cloudflare_zero_trust_access_policy.host.include[0].email.email == "fixture@example.invalid"
+    condition     = cloudflare_zero_trust_access_policy.host.decision == "allow" && length(cloudflare_zero_trust_access_policy.host.include) == 1 && one(cloudflare_zero_trust_access_policy.host.include).email.email == "fixture@example.invalid"
     error_message = "Exactly the adopted browser identity must be allowed."
   }
   assert {
