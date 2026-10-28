@@ -150,6 +150,8 @@
         default = effect-toolchain;
         # Check-only: a throwaway identity for the real SOPS roundtrip; never in the effect toolchain or artifact.
         check-age = pkgs.age;
+        # The Atlas HQ user unit (roccho-dev/adrs#701 I3): generic, runs the flake its data directory's app.ref names.
+        atlas-hq-unit = import ./adapters/atlas-hq-unit.nix { inherit pkgs; };
       };
       checks.${system}.contract-projection = contract-projection;
     };
