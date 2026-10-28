@@ -37,6 +37,7 @@ REQUIRED_FILES = {
     "adapters/rent-receive.sh",
     "checks/repository.py",
     "checks/test_jev_api.py",
+    "checks/test_browser_ssh.py",
     "checks/test_calendar_pages.py",
     "checks/test_linode_read_probe.py",
     "checks/test_mail_routing_read.py",
@@ -159,6 +160,15 @@ EFFECT_WORKFLOWS = {
     "probe-dev-mail-routing.yml": "dev.projection",
 }
 RENT_CONFIG = "providers/dev-rent-cloudflare/main.tf"
+BROWSER_SSH_FILES = {
+    "providers/ssh-browser-host/main.tf",
+    "providers/ssh-browser-host/variables.tf",
+    "providers/ssh-browser-host/README.md",
+    "providers/ssh-browser-host/owner.auto.tfvars.json.example",
+    "providers/ssh-browser-host/check_initial_plan.py",
+    "providers/ssh-browser-host/test_initial_plan.py",
+    "providers/ssh-browser-host/tests/browser.tftest.hcl",
+}
 # Host-specific GitHub Environments are retired: rent stage ingress lives in dev-projection. No workflow may select
 # one of these names, and nothing may declare it as a plane's Environment.
 RETIRED_ENVIRONMENTS = ("dev-rent-tunnel", "dev-rent-client", "dev-rent-access-probe")
@@ -363,7 +373,7 @@ def check_shape(root: Path) -> None:
         require(bool(ciphertexts) and set(ciphertexts) <= CIPHERTEXTS, f"unexpected ciphertexts: {ciphertexts}")
 
     providers = sorted(path.relative_to(root).as_posix() for path in (root / "providers").rglob("*") if path.is_file())
-    require(providers == [RENT_CONFIG],
+    require(providers == sorted({RENT_CONFIG} | BROWSER_SSH_FILES),
             f"unexpected provider files (state or lock files are never committed): {providers}")
     for retired in RETIRED_PATHS:
         require(not (root / retired).exists(), f"retired probe/state-proof path survives: {retired}")
