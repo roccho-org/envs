@@ -9,7 +9,7 @@ for required in (
     'config_src = "cloudflare"', '"versa-private-ssh"',
     'endswith(var.versa_ipv4_cidr, "/32")',
     '10[.]|192[.]168[.]|172[.]',
-    'net.dst.port == 22', "muccho_posture_check_id", "identity.email",
+    'net.dst.port == 22', 'net.protocol == \\"tcp\\"', "muccho_posture_check_id", "identity.email",
     'action         = "allow"', 'action      = "block"',
     "cloudflare_zero_trust_gateway_policy.versa_allow,",
     "cloudflare_zero_trust_gateway_policy.versa_block,",
