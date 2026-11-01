@@ -1229,6 +1229,16 @@ def main() -> None:
                             "clean_env(tools, {\"GIT_PASSWORD\": token, \"HOME\": str(home), \"GIT_USERNAME\""))
     expect_red(replace_text(adapter, "ROOT_LEGACY_S3_CONFIG = \"\"\"terraform {\n",
                             "ROOT_LEGACY_S3_CONFIG = \"\"\"terraform {\n  backend \"s3\" {\n  }\n"))
+    # The additional Versa root is a separate, creation-only authority: deny all public ingress
+    # and reject a route before its dedicated muccho policy is verified.
+    versa = "providers/dev-versa-cloudflare/main.tf"
+    expect_red(lambda root: (root / versa).unlink())
+    expect_red(replace_text(versa, 'service = "http_status:404"', 'service = "ssh://localhost:22"'))
+    expect_red(replace_text(versa, '  sensitive = true\\n', '  sensitive = false\\n'))
+    expect_red(lambda root: (root / "providers/dev-versa-cloudflare/.terraform.lock.hcl").write_text("state"))
+    expect_red(replace_text(versa, 'config_src = "cloudflare"', 'config_src = "local"'))
+    expect_red(replace_text(versa, '  backend "http" {}', '  backend "local" {}'))
+
     expect_red(replace_text(rent, "    plan {\n      enforced = true\n    }\n", "    plan {\n      enforced = false\n    }\n"))
     expect_red(replace_text(rent, "    state {\n      enforced = true\n    }\n", ""))
     expect_red(replace_text(rent, 'output "credentials" {\n  sensitive = true\n', 'output "credentials" {\n'))
