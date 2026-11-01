@@ -610,6 +610,18 @@ def main() -> None:
     assert baseline["status"] == "PASS"
     assert baseline["canonical_branch"] == "proposals"
     assert baseline["retained_compatibility_branch"] == "main"
+    # Only an unactivated Versa Tunnel identity is admitted at this stage;
+    # private/public routes, exposed tokens and new provider files are RED.
+    versa = "providers/dev-versa-cloudflare/main.tf"
+    expect_red(replace_text(versa, 'name       = "versa-private-ssh"',
+                            'name       = "g6i3-ssh"'))
+    expect_red(replace_text(versa, '  sensitive = true\n', '  sensitive = false\n'))
+    expect_red(replace_text(versa, '  backend "http" {}', '  backend "local" {}'))
+    expect_red(replace_text(versa, '    state { enforced = true }', '    state { enforced = false }'))
+    expect_red(replace_text(versa, 'output "tunnel_token" {',
+                            'resource "cloudflare_dns_record" "versadns" {}\noutput "tunnel_token" {'))
+    expect_red(lambda root: (root / "providers/dev-versa-cloudflare/terraform.tfstate").write_text("{}"))
+
     pi_diagnostic_fixtures()
     pi_runtime_fixtures()
     pi_native_versions_fixtures()
