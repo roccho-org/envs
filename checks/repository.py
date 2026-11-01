@@ -401,29 +401,29 @@ def check_rent_config(source: str) -> None:
 def check_versa_config(source: str) -> None:
     # Stage 1 must be an inert remote-managed connector, never a routable/public service.
     # This check complements (does not replace) native OpenTofu validation in CI.
-    text = re.sub(r"(?m)[ \\t]*(#|//).*$", "", re.sub(r"(?s)/\\*.*?\\*/", "", source))
-    require(text.count('backend "') == 1 and '  backend "http" {}\\n' in text,
+    text = re.sub(r"(?m)[ \t]*(#|//).*$", "", re.sub(r"(?s)/\*.*?\*/", "", source))
+    require(text.count('backend "') == 1 and '  backend "http" {}\n' in text,
             "versa root must retain a partial HTTP backend")
-    require("  encryption {\\n    state {\\n      enforced = true\\n    }\\n    plan {\\n      enforced = true\\n    }\\n  }\\n" in text,
+    require("  encryption {\n    state {\n      enforced = true\n    }\n    plan {\n      enforced = true\n    }\n  }\n" in text,
             "versa provider state and plan must be encrypted")
-    require(re.findall(r'(?m)^variable "([^"]+)" \\{', text) == ["account_id"],
+    require(re.findall(r'(?m)^variable "([^"]+)" \{', text) == ["account_id"],
             "versa root has unexpected required inputs")
-    require(re.findall(r'(?m)^resource "([^"]+)" "([^"]+)" \\{', text) == [
+    require(re.findall(r'(?m)^resource "([^"]+)" "([^"]+)" \{', text) == [
         ("cloudflare_zero_trust_tunnel_cloudflared", "versa"),
         ("cloudflare_zero_trust_tunnel_cloudflared_config", "versa")],
             "versa root must not add DNS, private route, Access or Gateway effects before policy admission")
-    require(re.findall(r'(?m)^data "([^"]+)" "([^"]+)" \\{', text) == [
+    require(re.findall(r'(?m)^data "([^"]+)" "([^"]+)" \{', text) == [
         ("cloudflare_zero_trust_tunnel_cloudflared_token", "versa")],
             "versa root may only read the dedicated connector token")
     require('config_src = "cloudflare"' in text and 'name = "versa-private-ssh"' in text,
             "versa needs a separate remotely managed tunnel")
-    require(re.search(r'ingress\\s*=\\s*\\[\\s*\\{\\s*service\\s*=\\s*"http_status:404"\\s*\\},?\\s*\\]', text) is not None
-            and len(re.findall(r'\\bingress\\s*=', text)) == 1 and len(re.findall(r'\\bservice\\s*=', text)) == 1,
+    require(re.search(r'ingress\s*=\s*\[\s*\{\s*service\s*=\s*"http_status:404"\s*\},?\s*\]', text) is not None
+            and len(re.findall(r'\bingress\s*=', text)) == 1 and len(re.findall(r'\bservice\s*=', text)) == 1,
             "versa must have only the not-found ingress, no SSH/public endpoint")
     require("hostname" not in text and "warp_routing" not in text and "ssh://" not in text
             and 'network =' not in text and 'route =' not in text,
             "versa stage 1 must not publish or route any network")
-    require(re.search(r'(?ms)^output "credentials" \\{\\n  sensitive = true\\n', text) is not None
+    require(re.search(r'(?ms)^output "credentials" \{\n  sensitive = true\n', text) is not None
             and "tunnel_token = data.cloudflare_zero_trust_tunnel_cloudflared_token.versa.token" in text,
             "versa must return only a sensitive connector token")
 
