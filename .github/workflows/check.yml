@@ -45,6 +45,9 @@ jobs:
       - name: Test rent tunnel adapter
         run: python3 checks/test_rent_tunnel.py
 
+      - name: Test Versa private Tunnel source-only boundaries
+        run: python3 checks/test_versa_private_tunnel.py
+
       # TEMPORARY: the one-time rent Secret relocation entry's guards, inputs and receipt (retired with it).
       - name: Test rent Secret relocation guards
         run: python3 checks/test_relocate_rent_secrets.py
