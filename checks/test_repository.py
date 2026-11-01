@@ -610,6 +610,18 @@ def main() -> None:
     assert baseline["status"] == "PASS"
     assert baseline["canonical_branch"] == "proposals"
     assert baseline["retained_compatibility_branch"] == "main"
+    # Versa provider root must remain present, encrypted and connector-only until private policy admission.
+    expect_red(lambda root: (root / "providers/dev-versa-cloudflare/main.tf").unlink())
+    expect_red(replace_text("providers/dev-versa-cloudflare/main.tf",
+                            '  sensitive = true', '  sensitive = false'))
+    expect_red(replace_text("providers/dev-versa-cloudflare/main.tf",
+                            '  backend "http" {}', '  backend "local" {}'))
+    expect_red(replace_text("providers/dev-versa-cloudflare/main.tf",
+                            '      { service = "http_status:404" },',
+                            '      { hostname = "versa.roccho.com", service = "ssh://localhost:22" },'))
+    expect_red(replace_text("providers/dev-versa-cloudflare/main.tf",
+                            'resource "cloudflare_zero_trust_tunnel_cloudflared_config" "versa" {',
+                            'resource "cloudflare_zero_trust_tunnel_cloudflared_route" "versa" {'))
     pi_diagnostic_fixtures()
     pi_runtime_fixtures()
     pi_native_versions_fixtures()

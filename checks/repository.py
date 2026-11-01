@@ -50,6 +50,7 @@ REQUIRED_FILES = {
     "flake.lock",
     "flake.nix",
     "providers/dev-rent-cloudflare/main.tf",
+    "providers/dev-versa-cloudflare/main.tf",
 }
 ALLOWED_ROOTS = {
     ".github",
@@ -159,6 +160,7 @@ EFFECT_WORKFLOWS = {
     "probe-dev-mail-routing.yml": "dev.projection",
 }
 RENT_CONFIG = "providers/dev-rent-cloudflare/main.tf"
+VERSA_CONFIG = "providers/dev-versa-cloudflare/main.tf"
 # Host-specific GitHub Environments are retired: rent stage ingress lives in dev-projection. No workflow may select
 # one of these names, and nothing may declare it as a plane's Environment.
 RETIRED_ENVIRONMENTS = ("dev-rent-tunnel", "dev-rent-client", "dev-rent-access-probe")
@@ -224,6 +226,8 @@ PROBE_TOOL_CHECKS = (
     'HTTPS_PROXY=http://127.0.0.1:9 HTTP_PROXY=http://127.0.0.1:9 "$tool/tofu" -chdir="$rent" init -backend=false -input=false'
     ' -no-color',
     '"$tool/tofu" -chdir="$rent" validate -no-color',
+    'cp providers/dev-versa-cloudflare/main.tf "$versa/"',
+    '"$tool/tofu" -chdir="$versa" validate -no-color',
 )
 CIPHERTEXTS = {
     "ciphertexts/dev-mail-state.sops.json",
@@ -363,11 +367,12 @@ def check_shape(root: Path) -> None:
         require(bool(ciphertexts) and set(ciphertexts) <= CIPHERTEXTS, f"unexpected ciphertexts: {ciphertexts}")
 
     providers = sorted(path.relative_to(root).as_posix() for path in (root / "providers").rglob("*") if path.is_file())
-    require(providers == [RENT_CONFIG],
+    require(providers == sorted([RENT_CONFIG, VERSA_CONFIG]),
             f"unexpected provider files (state or lock files are never committed): {providers}")
     for retired in RETIRED_PATHS:
         require(not (root / retired).exists(), f"retired probe/state-proof path survives: {retired}")
     check_rent_config((root / RENT_CONFIG).read_text(encoding="utf-8"))
+    check_versa_config((root / VERSA_CONFIG).read_text(encoding="utf-8"))
 
     handoff_dir = root / "handoffs"
     if handoff_dir.exists():
@@ -393,6 +398,35 @@ def check_rent_config(source: str) -> None:
     require('variable "service_token_duration" {\n  type = string\n}\n' in text
             and durations == ["var.service_token_duration"],
             "the service-token duration must be a required input with no default")
+
+
+
+def check_versa_config(source: str) -> None:
+    # First stage creates only a connector with a 404 catch-all.
+    # Network routing remains out of scope until a separately verified muccho-only policy exists.
+    text = re.sub(r"(?m)[ \t]*(#|//).*$", "", re.sub(r"(?s)/\*.*?\*/", "", source))
+    resources = re.findall(r'(?m)^resource "([^"]+)" "([^"]+)" \{', text)
+    require(resources == [
+        ("cloudflare_zero_trust_tunnel_cloudflared", "versa"),
+        ("cloudflare_zero_trust_tunnel_cloudflared_config", "versa"),
+    ], "versa source must not create routes, DNS, Access, Gateway or extra resources")
+    require(re.findall(r'(?m)^data "([^"]+)" "([^"]+)" \{', text)
+            == [("cloudflare_zero_trust_tunnel_cloudflared_token", "versa")],
+            "versa source may read only its own connector token")
+    require('  backend "http" {}\n' in text and text.count('backend "') == 1,
+            "versa root requires the partial HTTP backend")
+    require("  encryption {\n    state {\n      enforced = true\n    }\n    plan {\n      enforced = true\n    }\n  }\n" in text,
+            "versa root must enforce state and plan encryption")
+    require('version = "5.21.1"' in text and 'config_src = "cloudflare"' in text,
+            "versa root must use the pinned Cloudflare provider and remote-management mode")
+    require('variable "account_id" {\n  type = string\n}' in text,
+            "versa root requires account_id without a default")
+    require('    ingress = [\n      { service = "http_status:404" },\n    ]' in text
+            and 'hostname =' not in text and 'module "' not in text,
+            "versa root must not publish applications or add unmanaged modules")
+    require(re.search(r'(?ms)^output "connector_token" \{\n  sensitive = true\n', text) is not None
+            and 'value     = data.cloudflare_zero_trust_tunnel_cloudflared_token.versa.token' in text,
+            "versa connector credential must be its own sensitive output")
 
 
 def check_text(root: Path) -> None:
