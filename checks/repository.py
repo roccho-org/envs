@@ -50,6 +50,7 @@ REQUIRED_FILES = {
     "flake.lock",
     "flake.nix",
     "providers/dev-rent-cloudflare/main.tf",
+    "providers/dev-versa-cloudflare/main.tf",
 }
 ALLOWED_ROOTS = {
     ".github",
@@ -159,6 +160,7 @@ EFFECT_WORKFLOWS = {
     "probe-dev-mail-routing.yml": "dev.projection",
 }
 RENT_CONFIG = "providers/dev-rent-cloudflare/main.tf"
+VERSA_CONFIG = "providers/dev-versa-cloudflare/main.tf"
 # Host-specific GitHub Environments are retired: rent stage ingress lives in dev-projection. No workflow may select
 # one of these names, and nothing may declare it as a plane's Environment.
 RETIRED_ENVIRONMENTS = ("dev-rent-tunnel", "dev-rent-client", "dev-rent-access-probe")
@@ -224,6 +226,8 @@ PROBE_TOOL_CHECKS = (
     'HTTPS_PROXY=http://127.0.0.1:9 HTTP_PROXY=http://127.0.0.1:9 "$tool/tofu" -chdir="$rent" init -backend=false -input=false'
     ' -no-color',
     '"$tool/tofu" -chdir="$rent" validate -no-color',
+    'cp providers/dev-versa-cloudflare/main.tf "$versa/"',
+    '"$tool/tofu" -chdir="$versa" validate -no-color',
 )
 CIPHERTEXTS = {
     "ciphertexts/dev-mail-state.sops.json",
@@ -363,17 +367,45 @@ def check_shape(root: Path) -> None:
         require(bool(ciphertexts) and set(ciphertexts) <= CIPHERTEXTS, f"unexpected ciphertexts: {ciphertexts}")
 
     providers = sorted(path.relative_to(root).as_posix() for path in (root / "providers").rglob("*") if path.is_file())
-    require(providers == [RENT_CONFIG],
+    require(providers == sorted([RENT_CONFIG, VERSA_CONFIG]),
             f"unexpected provider files (state or lock files are never committed): {providers}")
     for retired in RETIRED_PATHS:
         require(not (root / retired).exists(), f"retired probe/state-proof path survives: {retired}")
     check_rent_config((root / RENT_CONFIG).read_text(encoding="utf-8"))
+    check_versa_config((root / VERSA_CONFIG).read_text(encoding="utf-8"))
 
     handoff_dir = root / "handoffs"
     if handoff_dir.exists():
         handoffs = sorted(path.relative_to(root).as_posix() for path in handoff_dir.rglob("*") if path.is_file())
         require(bool(handoffs) and set(handoffs) <= {"handoffs/dev-jev-api.json", "handoffs/dev-jev-api.github-actions.json", "handoffs/dev-opencode-go.pi-worker.json"},
                 f"unexpected handoffs: {handoffs}")
+
+
+def check_versa_config(source: str) -> None:
+    # Separate provider/state root. Creation-only: no public route, DNS, Access application or private /32
+    # route until the exact muccho device policy and Versa destination have been admitted (#143).
+    text = re.sub(r"(?m)[ \\t]*(#|//).*$", "", re.sub(r"(?s)/\\*.*?\\*/", "", source))
+    require(text.count('backend "') == 1 and '  backend "http" {}\\n' in text,
+            "versa root must use the same partial HTTP backend")
+    require("  encryption {\\n    state {\\n      enforced = true\\n    }\\n    plan {\\n      enforced = true\\n    }\\n  }\\n" in text,
+            "versa root must enforce state and plan encryption")
+    require('version = "5.21.1"' in text and 'config_src = "cloudflare"' in text,
+            "versa tunnel must use the fixed Cloudflare provider and remote config")
+    resources = re.findall(r'(?m)^resource "([^"]+)" "([^"]+)" \\{', text)
+    require(resources == [
+        ("cloudflare_zero_trust_tunnel_cloudflared", "versa"),
+        ("cloudflare_zero_trust_tunnel_cloudflared_config", "versa"),
+    ], "versa root must create the tunnel and a deny-only config, with no route or access resource")
+    require(re.search(r'config\\s*=\\s*\\{\\s*ingress\\s*=\\s*\\[\\s*\\{\\s*service\\s*=\\s*"http_status:404"\\s*\\}\\s*\\]\\s*\\}', text) is not None,
+            "versa ingress must remain deny-only")
+    require(not re.search(r'(?m)^\\s*(?:hostname|network|domain|origin_service|virtual_network_id)\\s*=', text),
+            "versa source must not publish a hostname or permit a network route")
+    require(re.search(r'(?ms)^output "connector_token" \\{\\n  sensitive = true\\n', text) is not None
+            and 'data.cloudflare_zero_trust_tunnel_cloudflared_token.versa.token' in text,
+            "versa connector token must be sensitive and use the dedicated tunnel data source")
+    require(re.findall(r'(?m)^data "([^"]+)" "([^"]+)" \\{', text)
+            == [("cloudflare_zero_trust_tunnel_cloudflared_token", "versa")],
+            "versa root must not read another tunnel token")
 
 
 def check_rent_config(source: str) -> None:
