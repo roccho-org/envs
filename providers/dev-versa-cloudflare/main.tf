@@ -9,12 +9,18 @@ terraform {
   }
   backend "http" {}
   encryption {
-    state { enforced = true }
-    plan  { enforced = true }
+    state {
+      enforced = true
+    }
+    plan {
+      enforced = true
+    }
   }
 }
 
-variable "account_id" { type = string }
+variable "account_id" {
+  type = string
+}
 variable "versa_private_cidr" {
   type = string
   validation {
