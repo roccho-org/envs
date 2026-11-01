@@ -404,27 +404,27 @@ def check_rent_config(source: str) -> None:
 def check_versa_config(source: str) -> None:
     # Source-only until private routing and identity authorization are independently proven.
     # No additional provider effect (even a private route) is authorized by this PR.
-    text = re.sub(r"(?m)[ \\t]*(#|//).*$", "", re.sub(r"(?s)/\\*.*?\\*/", "", source))
-    declared_resources = re.findall(r'(?m)^resource "([^"]+)" "([^"]+)" \\{', text)
-    declared_data = re.findall(r'(?m)^data "([^"]+)" "([^"]+)" \\{', text)
+    text = re.sub(r"(?m)[ \t]*(#|//).*$", "", re.sub(r"(?s)/\*.*?\*/", "", source))
+    declared_resources = re.findall(r'(?m)^resource "([^"]+)" "([^"]+)" \{', text)
+    declared_data = re.findall(r'(?m)^data "([^"]+)" "([^"]+)" \{', text)
     require(declared_resources == [("cloudflare_zero_trust_tunnel_cloudflared", "versa")],
             "Versa root may only declare its own Tunnel (not a route, DNS or Access policy)")
     require(declared_data == [("cloudflare_zero_trust_tunnel_cloudflared_token", "versa")],
             "Versa root may only read its own Tunnel token")
-    require(not re.search(r'(?m)^(module|import|moved|removed|provisioner|check|locals|provider)\\s', text),
+    require(not re.search(r'(?m)^(module|import|moved|removed|provisioner|check|locals|provider)\s', text),
             "Versa root has an unapproved effect or extra block")
     require('backend "http" {}' in text and text.count('backend "') == 1,
             "Versa provider must use the partial HTTP backend")
-    require(re.search(r'encryption\\s*\\{\\s*state\\s*\\{\\s*enforced\\s*=\\s*true\\s*\\}\\s*plan\\s*\\{\\s*enforced\\s*=\\s*true\\s*\\}', text) is not None,
+    require(re.search(r'encryption\s*\{\s*state\s*\{\s*enforced\s*=\s*true\s*\}\s*plan\s*\{\s*enforced\s*=\s*true\s*\}', text) is not None,
             "Versa provider must enforce state and plan encryption")
     require('version = "5.21.1"' in text and 'source  = "cloudflare/cloudflare"' in text,
             "Versa provider pin differs from current envs Cloudflare owner")
-    require(re.search(r'(?m)^variable "account_id" \\{\\s*type = string\\s*\\}', text) is not None,
+    require(re.search(r'(?m)^variable "account_id" \{\s*type = string\s*\}', text) is not None,
             "Versa account ID must be required and unbound")
     require('name       = "versa-private-ssh"' in text and
             'config_src = "cloudflare"' in text,
             "Versa Tunnel identity differs")
-    require(re.search(r'(?ms)^output "tunnel_token" \\{\\s*sensitive = true\\s*value\\s*= data\\.cloudflare_zero_trust_tunnel_cloudflared_token\\.versa\\.token\\s*\\}', text) is not None,
+    require(re.search(r'(?ms)^output "tunnel_token" \{\s*sensitive = true\s*value\s*= data\.cloudflare_zero_trust_tunnel_cloudflared_token\.versa\.token\s*\}', text) is not None,
             "Versa token must remain a sensitive output of its own Tunnel")
 
 def check_text(root: Path) -> None:
