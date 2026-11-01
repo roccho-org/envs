@@ -22,8 +22,12 @@ variable "account_id" { type = string }
 variable "versa_ipv4_cidr" {
   type = string
   validation {
-    condition     = can(cidrhost(var.versa_ipv4_cidr, 0)) && endswith(var.versa_ipv4_cidr, "/32")
-    error_message = "versa_ipv4_cidr must be one IPv4 /32 host route."
+    condition = (
+      can(cidrhost(var.versa_ipv4_cidr, 0)) &&
+      endswith(var.versa_ipv4_cidr, "/32") &&
+      can(regex("^(10[.]|192[.]168[.]|172[.](1[6-9]|2[0-9]|3[0-1])[.])", var.versa_ipv4_cidr))
+    )
+    error_message = "versa_ipv4_cidr must be one RFC1918 IPv4 /32 host route."
   }
 }
 
