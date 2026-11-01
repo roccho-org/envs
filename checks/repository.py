@@ -384,26 +384,26 @@ def check_shape(root: Path) -> None:
 def check_versa_config(source: str) -> None:
     # Separate provider/state root. Creation-only: no public route, DNS, Access application or private /32
     # route until the exact muccho device policy and Versa destination have been admitted (#143).
-    text = re.sub(r"(?m)[ \\t]*(#|//).*$", "", re.sub(r"(?s)/\\*.*?\\*/", "", source))
-    require(text.count('backend "') == 1 and '  backend "http" {}\\n' in text,
+    text = re.sub(r"(?m)[ \t]*(#|//).*$", "", re.sub(r"(?s)/\*.*?\*/", "", source))
+    require(text.count('backend "') == 1 and '  backend "http" {}\n' in text,
             "versa root must use the same partial HTTP backend")
-    require("  encryption {\\n    state {\\n      enforced = true\\n    }\\n    plan {\\n      enforced = true\\n    }\\n  }\\n" in text,
+    require("  encryption {\n    state {\n      enforced = true\n    }\n    plan {\n      enforced = true\n    }\n  }\n" in text,
             "versa root must enforce state and plan encryption")
     require('version = "5.21.1"' in text and 'config_src = "cloudflare"' in text,
             "versa tunnel must use the fixed Cloudflare provider and remote config")
-    resources = re.findall(r'(?m)^resource "([^"]+)" "([^"]+)" \\{', text)
+    resources = re.findall(r'(?m)^resource "([^"]+)" "([^"]+)" \{', text)
     require(resources == [
         ("cloudflare_zero_trust_tunnel_cloudflared", "versa"),
         ("cloudflare_zero_trust_tunnel_cloudflared_config", "versa"),
     ], "versa root must create the tunnel and a deny-only config, with no route or access resource")
-    require(re.search(r'config\\s*=\\s*\\{\\s*ingress\\s*=\\s*\\[\\s*\\{\\s*service\\s*=\\s*"http_status:404"\\s*\\}\\s*\\]\\s*\\}', text) is not None,
+    require(re.search(r'config\s*=\s*\{\s*ingress\s*=\s*\[\s*\{\s*service\s*=\s*"http_status:404"\s*\}\s*\]\s*\}', text) is not None,
             "versa ingress must remain deny-only")
-    require(not re.search(r'(?m)^\\s*(?:hostname|network|domain|origin_service|virtual_network_id)\\s*=', text),
+    require(not re.search(r'(?m)^\s*(?:hostname|network|domain|origin_service|virtual_network_id)\s*=', text),
             "versa source must not publish a hostname or permit a network route")
-    require(re.search(r'(?ms)^output "connector_token" \\{\\n  sensitive = true\\n', text) is not None
+    require(re.search(r'(?ms)^output "connector_token" \{\n  sensitive = true\n', text) is not None
             and 'data.cloudflare_zero_trust_tunnel_cloudflared_token.versa.token' in text,
             "versa connector token must be sensitive and use the dedicated tunnel data source")
-    require(re.findall(r'(?m)^data "([^"]+)" "([^"]+)" \\{', text)
+    require(re.findall(r'(?m)^data "([^"]+)" "([^"]+)" \{', text)
             == [("cloudflare_zero_trust_tunnel_cloudflared_token", "versa")],
             "versa root must not read another tunnel token")
 
