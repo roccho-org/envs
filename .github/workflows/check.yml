@@ -816,6 +816,12 @@ jobs:
           cp providers/dev-rent-cloudflare/main.tf "$rent/"
           HTTPS_PROXY=http://127.0.0.1:9 HTTP_PROXY=http://127.0.0.1:9 "$tool/tofu" -chdir="$rent" init -backend=false -input=false -no-color
           "$tool/tofu" -chdir="$rent" validate -no-color
+          # Use the already pinned Cloudflare provider; do not call a live API or choose a backend.
+          versa="$RUNNER_TEMP/versa-cloudflare"
+          mkdir "$versa"
+          cp providers/dev-versa-cloudflare/main.tf "$versa/"
+          HTTPS_PROXY=http://127.0.0.1:9 HTTP_PROXY=http://127.0.0.1:9 "$tool/tofu" -chdir="$versa" init -backend=false -input=false -no-color
+          "$tool/tofu" -chdir="$versa" validate -no-color
           "$tool/ssh" -V
           "$tool/curl" --version
 
