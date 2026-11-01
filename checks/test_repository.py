@@ -1234,7 +1234,7 @@ def main() -> None:
     versa = "providers/dev-versa-cloudflare/main.tf"
     expect_red(lambda root: (root / versa).unlink())
     expect_red(replace_text(versa, 'service = "http_status:404"', 'service = "ssh://localhost:22"'))
-    expect_red(replace_text(versa, '  sensitive = true\\n', '  sensitive = false\\n'))
+    expect_red(replace_text(versa, '  sensitive = true\n', '  sensitive = false\n'))
     expect_red(lambda root: (root / "providers/dev-versa-cloudflare/.terraform.lock.hcl").write_text("state"))
     expect_red(replace_text(versa, 'config_src = "cloudflare"', 'config_src = "local"'))
     expect_red(replace_text(versa, '  backend "http" {}', '  backend "local" {}'))
