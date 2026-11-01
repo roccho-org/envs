@@ -50,6 +50,7 @@ REQUIRED_FILES = {
     "flake.lock",
     "flake.nix",
     "providers/dev-rent-cloudflare/main.tf",
+    "providers/dev-versa-cloudflare/main.tf",
 }
 ALLOWED_ROOTS = {
     ".github",
@@ -159,6 +160,7 @@ EFFECT_WORKFLOWS = {
     "probe-dev-mail-routing.yml": "dev.projection",
 }
 RENT_CONFIG = "providers/dev-rent-cloudflare/main.tf"
+VERSA_CONFIG = "providers/dev-versa-cloudflare/main.tf"
 # Host-specific GitHub Environments are retired: rent stage ingress lives in dev-projection. No workflow may select
 # one of these names, and nothing may declare it as a plane's Environment.
 RETIRED_ENVIRONMENTS = ("dev-rent-tunnel", "dev-rent-client", "dev-rent-access-probe")
@@ -363,7 +365,7 @@ def check_shape(root: Path) -> None:
         require(bool(ciphertexts) and set(ciphertexts) <= CIPHERTEXTS, f"unexpected ciphertexts: {ciphertexts}")
 
     providers = sorted(path.relative_to(root).as_posix() for path in (root / "providers").rglob("*") if path.is_file())
-    require(providers == [RENT_CONFIG],
+    require(providers == sorted((RENT_CONFIG, VERSA_CONFIG)),
             f"unexpected provider files (state or lock files are never committed): {providers}")
     for retired in RETIRED_PATHS:
         require(not (root / retired).exists(), f"retired probe/state-proof path survives: {retired}")
