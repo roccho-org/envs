@@ -813,6 +813,12 @@ jobs:
           cp providers/dev-rent-cloudflare/main.tf "$rent/"
           HTTPS_PROXY=http://127.0.0.1:9 HTTP_PROXY=http://127.0.0.1:9 "$tool/tofu" -chdir="$rent" init -backend=false -input=false -no-color
           "$tool/tofu" -chdir="$rent" validate -no-color
+          # Independent private-hostname root: schema only, no provider API or apply.
+          versa="$RUNNER_TEMP/versa-cloudflare"
+          mkdir "$versa"
+          cp providers/dev-versa-cloudflare/main.tf "$versa/"
+          HTTPS_PROXY=http://127.0.0.1:9 HTTP_PROXY=http://127.0.0.1:9 "$tool/tofu" -chdir="$versa" init -backend=false -input=false -no-color
+          "$tool/tofu" -chdir="$versa" validate -no-color
           "$tool/ssh" -V
           "$tool/curl" --version
 
