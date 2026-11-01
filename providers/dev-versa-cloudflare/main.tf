@@ -53,7 +53,8 @@ resource "cloudflare_zero_trust_gateway_policy" "versa_deny" {
   action     = "block"
   enabled    = true
   filters    = ["l4"]
-  precedence = 1
+  # Reserve precedence 1 for a separately reviewed muccho-only SSH allow policy.
+  precedence = 2
   traffic    = "any(net.dst.ip[*] in {${var.versa_private_cidr}})"
 }
 
