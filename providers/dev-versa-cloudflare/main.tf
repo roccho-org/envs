@@ -60,7 +60,7 @@ resource "cloudflare_zero_trust_gateway_policy" "versa_allow" {
   enabled        = true
   action         = "allow"
   precedence     = var.allow_precedence
-  traffic        = "net.dst.ip in {${var.versa_ipv4_cidr}} and net.dst.port == 22"
+  traffic        = "net.dst.ip in {${var.versa_ipv4_cidr}} and net.dst.port == 22 and net.protocol == \"tcp\""
   identity       = "identity.email == ${jsonencode(var.muccho_email)}"
   device_posture = "any(device_posture.checks.passed[*] in {${jsonencode(var.muccho_posture_check_id)}})"
 }
