@@ -25,7 +25,7 @@ variable "versa_private_cidr" {
   type = string
   validation {
     condition     = can(cidrnetmask(var.versa_private_cidr)) && can(regex("^((10\\.[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3})|(192\\.168\\.[0-9]{1,3}\\.[0-9]{1,3})|(172\\.(1[6-9]|2[0-9]|3[01])\\.[0-9]{1,3}\\.[0-9]{1,3}))/32$", var.versa_private_cidr))
-    error_message = "Require one observed RFC1918 IPv4 host /32; never route an entire LAN."
+    error_message = "Require one RFC1918 IPv4 host /32; never route an entire LAN."
   }
 }
 
@@ -48,11 +48,18 @@ resource "cloudflare_zero_trust_tunnel_cloudflared_route" "versa" {
   account_id = var.account_id
   tunnel_id  = cloudflare_zero_trust_tunnel_cloudflared.versa.id
   network    = var.versa_private_cidr
-  comment    = "Only the observed Versa host /32; SSH admission is separately controlled"
+  comment    = "Only the Versa host /32; SSH admission is separately controlled"
+
+  # The deny exists first, so no apply leaves the route open to other enrolled clients. If the deny fails, for example
+  # on a precedence already in use, the route is not created.
+  depends_on = [cloudflare_zero_trust_gateway_policy.versa_deny]
 }
 
 # Block by default. Adding the single muccho-specific allow rule requires independent
 # existing-policy precedence and device-identity readback before any apply.
+# This only acts while the account's "Allow Secure Web Gateway to proxy traffic" is on, so that setting is read back
+# before any apply too. A block ends the connection after Gateway's first TCP SYN to the origin, so a denial test
+# checks that no bytes pass.
 resource "cloudflare_zero_trust_gateway_policy" "versa_deny" {
   account_id = var.account_id
   name       = "versa-muccho-private-default-deny"
@@ -61,7 +68,7 @@ resource "cloudflare_zero_trust_gateway_policy" "versa_deny" {
   filters    = ["l4"]
   # Reserve precedence 1 for a separately reviewed muccho-only SSH allow policy.
   precedence = 2
-  traffic    = "any(net.dst.ip[*] in {${var.versa_private_cidr}})"
+  traffic    = "net.dst.ip in {${var.versa_private_cidr}}"
 }
 
 data "cloudflare_zero_trust_tunnel_cloudflared_token" "versa" {
