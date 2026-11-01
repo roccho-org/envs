@@ -817,7 +817,7 @@ jobs:
           versa="$RUNNER_TEMP/versa-cloudflare"
           mkdir "$versa"
           cp providers/dev-versa-cloudflare/main.tf "$versa/"
-          "$tool/tofu" -chdir="$versa" fmt -check -no-color
+          "$tool/tofu" -chdir="$versa" fmt -diff -check -no-color
           HTTPS_PROXY=http://127.0.0.1:9 HTTP_PROXY=http://127.0.0.1:9 "$tool/tofu" -chdir="$versa" init -backend=false -input=false -no-color
           "$tool/tofu" -chdir="$versa" validate -no-color
           "$tool/ssh" -V
