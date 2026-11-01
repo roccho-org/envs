@@ -24,7 +24,7 @@ variable "account_id" {
 variable "versa_private_cidr" {
   type = string
   validation {
-    condition = can(cidrnetmask(var.versa_private_cidr)) && can(regex("^((10\\.[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3})|(192\\.168\\.[0-9]{1,3}\\.[0-9]{1,3})|(172\\.(1[6-9]|2[0-9]|3[01])\\.[0-9]{1,3}\\.[0-9]{1,3}))/32$", var.versa_private_cidr))
+    condition     = can(cidrnetmask(var.versa_private_cidr)) && can(regex("^((10\\.[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3})|(192\\.168\\.[0-9]{1,3}\\.[0-9]{1,3})|(172\\.(1[6-9]|2[0-9]|3[01])\\.[0-9]{1,3}\\.[0-9]{1,3}))/32$", var.versa_private_cidr))
     error_message = "Require one observed RFC1918 IPv4 host /32; never route an entire LAN."
   }
 }
