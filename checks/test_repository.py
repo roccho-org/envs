@@ -1196,6 +1196,15 @@ def main() -> None:
     expect_red(replace_text(".github/workflows/check.yml", "run: python3 checks/test_rent_tunnel.py\n",
                             "run: python3 checks/test_rent_tunnel.py\n\n      - name: Retired\n"
                             "        run: python3 checks/test_rent_state_proof.py\n"))
+    # Versa's first phase has no private/public route. Source changes cannot activate one silently.
+    versa = "providers/dev-versa-cloudflare/main.tf"
+    expect_red(replace_text(versa, '  backend "http" {}\\n', '  backend "local" {}\\n'))
+    expect_red(replace_text(versa, 'service = "http_status:404"', 'service = "ssh://localhost:22"'))
+    expect_red(replace_text(versa, '  config_src = "cloudflare"\\n',
+                            '  config_src = "cloudflare"\\n  hostname = "unsafe.example"\\n'))
+    expect_red(replace_text(versa, '  name       = local.name\\n',
+                            '  name       = local.name\\n  network = "192.168.0.0/24"\\n'))
+
     # The persistent root: native validate accepts each of these, so the oracle must refuse them.
     rent = "providers/dev-rent-cloudflare/main.tf"
     expect_red(replace_text(rent, '  backend "http" {}\n', '  backend "local" {}\n'))
