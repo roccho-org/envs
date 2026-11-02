@@ -15,6 +15,7 @@ on:
           - opencode-go.versapro-own-oci
           - typellm-api.oci-dev
           - typellm-api.versapro-own-oci
+          - command-code-api.versapro-own-oci
           - opencode-go.pi-worker
 
 permissions:
@@ -126,6 +127,13 @@ jobs:
           TYPELLM_API_KEY: ${{ secrets.TYPELLM_API_KEY }}
           VERSAPRO_OWN_OCI_AGE_RECIPIENT: ${{ vars.VERSAPRO_OWN_OCI_AGE_RECIPIENT }}
         run: '"$ENVS_EFFECT_BIN/envs-effect" --root "$GITHUB_WORKSPACE" author --target typellm-api.versapro-own-oci'
+
+      - name: Author Command Code VersaPro own OCI ciphertext
+        if: inputs.target == 'command-code-api.versapro-own-oci'
+        env:
+          COMMAND_CODE_API_KEY: ${{ secrets.COMMAND_CODE_API_KEY }}
+          VERSAPRO_OWN_OCI_AGE_RECIPIENT: ${{ vars.VERSAPRO_OWN_OCI_AGE_RECIPIENT }}
+        run: '"$ENVS_EFFECT_BIN/envs-effect" --root "$GITHUB_WORKSPACE" author --target command-code-api.versapro-own-oci'
 
       - name: Author OpenCode Go Worker ciphertext
         if: inputs.target == 'opencode-go.pi-worker'

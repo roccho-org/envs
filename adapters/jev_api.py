@@ -181,8 +181,16 @@ TYPELLM_CIPHERTEXTS = {TYPELLM_BINDING: TYPELLM_CIPHERTEXT, OWN_TYPELLM_BINDING:
 OWN_JEV_BINDING = "jev-api.versapro-own-oci"
 OWN_JEV_CIPHERTEXT = Path("ciphertexts/dev-jev-api.versapro-own-oci.sops.yaml")
 OWN_JEV_RECIPIENT = OWN_GO_RECIPIENT
+# Command Code for the VersaPro own OCI Pi target: its own source plane on dev-authoring, one ciphertext and the
+# own public recipient. The OCI dev recipient is never a fallback, and there is no OCI dev Command Code target.
+COMMAND_CODE_PLANE = "dev.command-code-authoring"
+COMMAND_CODE_BINDING = "command-code-api.versapro-own-oci"
+COMMAND_CODE_CIPHERTEXT = Path("ciphertexts/dev-command-code-api.versapro-own-oci.sops.yaml")
+COMMAND_CODE_KEY = "COMMAND_CODE_API_KEY"
+COMMAND_CODE_RECIPIENT = OWN_GO_RECIPIENT
+COMMAND_CODE_CIPHERTEXTS = {COMMAND_CODE_BINDING: COMMAND_CODE_CIPHERTEXT}
 JEV_CIPHERTEXTS = {OCI_BINDING: OCI_CIPHERTEXT, OWN_JEV_BINDING: OWN_JEV_CIPHERTEXT}
-OCI_CIPHERTEXTS = {**JEV_CIPHERTEXTS, **GO_CIPHERTEXTS, **TYPELLM_CIPHERTEXTS}
+OCI_CIPHERTEXTS = {**JEV_CIPHERTEXTS, **GO_CIPHERTEXTS, **TYPELLM_CIPHERTEXTS, **COMMAND_CODE_CIPHERTEXTS}
 # Every binding `author --target` can select; a dispatch names exactly one of them.
 AUTHOR_TARGETS = ("jev-api", *OCI_CIPHERTEXTS, "opencode-go.pi-worker")
 ORG_BINDING = "jev-api.github-actions"
@@ -409,6 +417,16 @@ def expected_bindings(jev_target: dict[str, Any] | None = None) -> dict[str, dic
             "required_variables": [{"name": OWN_TYPELLM_RECIPIENT, "type": "age_recipient", "lifecycle": "persistent"}],
             "target": {"repository": "roccho-dev/resources", "host": "versapro-own-oci", "kind": "process_env", "secret_name": TYPELLM_KEY},
         },
+        COMMAND_CODE_BINDING: {
+            "id": COMMAND_CODE_BINDING,
+            "kind": "envs.authCapability.v1",
+            "capability": "command-code-api",
+            "ciphertext": COMMAND_CODE_CIPHERTEXT.as_posix(),
+            "source_key": COMMAND_CODE_KEY,
+            "github_environment": "dev-authoring",
+            "required_variables": [{"name": COMMAND_CODE_RECIPIENT, "type": "age_recipient", "lifecycle": "persistent"}],
+            "target": {"repository": "roccho-dev/resources", "host": "versapro-own-oci", "kind": "pi_auth_command"},
+        },
         ORG_BINDING: {
             "id": ORG_BINDING, "kind": "envs.authCapability.v1", "capability": "jev-api",
             "ciphertext": OCI_CIPHERTEXT.as_posix(), "source_key": "JEV_API_KEY",
@@ -563,6 +581,11 @@ def expected_own_typellm_boundary() -> dict[str, Any]:
             "binding": OWN_TYPELLM_BINDING}
 
 
+def expected_command_code_boundary() -> dict[str, Any]:
+    return {**expected_go_boundary(), "id": "dev.command-code-api-versapro-own-oci.provider",
+            "capability": "command-code-api", "binding": COMMAND_CODE_BINDING}
+
+
 def expected_inputs() -> dict[str, dict[str, list[dict[str, str]]]]:
     def entries(*values: tuple[str, str, str]) -> list[dict[str, str]]:
         return [{"name": name, "type": kind, "lifecycle": lifecycle} for name, kind, lifecycle in values]
@@ -590,6 +613,10 @@ def expected_inputs() -> dict[str, dict[str, list[dict[str, str]]]]:
             "required_secrets": entries((TYPELLM_KEY, "opaque", "one_shot_ingress")),
             "required_variables": entries((OCI_RECIPIENT, "age_recipient", "persistent"),
                                           (OWN_TYPELLM_RECIPIENT, "age_recipient", "persistent")),
+        },
+        COMMAND_CODE_PLANE: {
+            "required_secrets": entries((COMMAND_CODE_KEY, "opaque", "one_shot_ingress")),
+            "required_variables": entries((COMMAND_CODE_RECIPIENT, "age_recipient", "persistent")),
         },
         WORKER_GO_PLANE: {
             "required_secrets": entries(("SOPS_AGE_KEY", "age_identity", "persistent"),
@@ -670,13 +697,13 @@ def validate_contracts(root: Path = ROOT) -> dict[str, dict[str, dict[str, Any]]
     boundary = index(root / BOUNDARY)
 
     require(set(envs) == {
-        "dev.authoring", GO_PLANE, TYPELLM_PLANE, WORKER_GO_PLANE, "dev.projection", "dev.runtime", RENT_PLANE, CLIENT_PLANE, ROOT_PLANE, LINODE_READ_PLANE,
+        "dev.authoring", GO_PLANE, TYPELLM_PLANE, COMMAND_CODE_PLANE, WORKER_GO_PLANE, "dev.projection", "dev.runtime", RENT_PLANE, CLIENT_PLANE, ROOT_PLANE, LINODE_READ_PLANE,
         "stg.projection", "stg.runtime", "prd.projection", "prd.runtime",
         "voice-ui.dev", "voice-ui.stg", "voice-ui.prd",
     }, "environment set differs")
 
     require(envs["dev.authoring"]["github_environment"] == "dev-authoring", "dev authoring Environment differs")
-    for plane_id in (GO_PLANE, TYPELLM_PLANE):
+    for plane_id in (GO_PLANE, TYPELLM_PLANE, COMMAND_CODE_PLANE):
         plane = envs[plane_id]
         require(plane["github_environment"] == "dev-authoring" and plane["owner"] == "envs"
                 and plane["source_kind"] == "ephemeral_ingress" and plane["target_kind"] == "public_sops"
@@ -795,6 +822,9 @@ def validate_contracts(root: Path = ROOT) -> dict[str, dict[str, dict[str, Any]]
     for path in TYPELLM_CIPHERTEXTS.values():
         if (root / path).is_file():
             validate_oci_ciphertext((root / path).read_bytes(), None, None, key=TYPELLM_KEY)
+    for path in COMMAND_CODE_CIPHERTEXTS.values():
+        if (root / path).is_file():
+            validate_oci_ciphertext((root / path).read_bytes(), None, None, key=COMMAND_CODE_KEY)
 
     jev_target = validate_jev_target(bindings.get("jev-api", {}).get("target"))
     require(bindings == expected_bindings(jev_target), "binding set differs")
@@ -804,7 +834,7 @@ def validate_contracts(root: Path = ROOT) -> dict[str, dict[str, dict[str, Any]]
         "normal.consumer.path", "dev.rent-client.provider", "dev.rent-root.provider", WINDOWS_CONSUMER,
         "dev.opencode-go-oci-dev.provider", "dev.opencode-go-versapro-own-oci.provider",
         "dev.typellm-api-oci-dev.provider", "dev.typellm-api-versapro-own-oci.provider",
-        "dev.jev-api-versapro-own-oci.provider",
+        "dev.jev-api-versapro-own-oci.provider", "dev.command-code-api-versapro-own-oci.provider",
     } | set(expected_org_boundaries()), "provider-consumer boundary set differs")
     for identity, expected in expected_org_boundaries().items():
         require(boundary[identity] == expected, "Org provider-consumer boundary differs")
@@ -838,6 +868,8 @@ def validate_contracts(root: Path = ROOT) -> dict[str, dict[str, dict[str, Any]]
             "TypeLLM OCI provider boundary differs")
     require(boundary["dev.typellm-api-versapro-own-oci.provider"] == expected_own_typellm_boundary(),
             "TypeLLM own OCI provider boundary differs")
+    require(boundary["dev.command-code-api-versapro-own-oci.provider"] == expected_command_code_boundary(),
+            "Command Code own OCI provider boundary differs")
     require(boundary["repository.branch-policy"] == {
         "id": "repository.branch-policy", "kind": "envs.branchPolicy.v1",
         "canonical_branch": "proposals", "default_branch": "proposals",
@@ -902,7 +934,7 @@ def validate_client_ciphertext(data: bytes, values: Sequence[bytes] | None, reci
 
 def validate_oci_ciphertext(data: bytes, secret: bytes | None, recipient: str | None,
                             key: str = "JEV_API_KEY") -> None:
-    require(key in {"JEV_API_KEY", GO_KEY, TYPELLM_KEY}, "OCI dev ciphertext key unsupported")
+    require(key in {"JEV_API_KEY", GO_KEY, TYPELLM_KEY, COMMAND_CODE_KEY}, "OCI dev ciphertext key unsupported")
     validate_ciphertext(data, secret, None if recipient is None else [recipient], key=key)
     text = data.decode("utf-8", errors="strict")
     require(len(RECIPIENT_METADATA.findall(text)) == 1, "OCI dev ciphertext must have exactly one recipient")
@@ -1198,7 +1230,7 @@ def authoring_inputs(contracts: dict[str, dict[str, dict[str, Any]]], target: st
     # A selected author target reads only its own source plane and recipient. The GitHub Environment
     # can be shared without leaking one source key into another target's process environment.
     require(target in AUTHOR_TARGETS, f"unknown author target: {target}")
-    plane_id = TYPELLM_PLANE if target in TYPELLM_CIPHERTEXTS else GO_PLANE if target in GO_CIPHERTEXTS or target == WORKER_GO_BINDING else "dev.authoring"
+    plane_id = COMMAND_CODE_PLANE if target in COMMAND_CODE_CIPHERTEXTS else TYPELLM_PLANE if target in TYPELLM_CIPHERTEXTS else GO_PLANE if target in GO_CIPHERTEXTS or target == WORKER_GO_BINDING else "dev.authoring"
     plane = contracts["environments"][plane_id]
     if target == "jev-api":
         return plane["required_secrets"] + plane["required_variables"]
@@ -1212,7 +1244,7 @@ def authoring_inputs(contracts: dict[str, dict[str, dict[str, Any]]], target: st
 def encrypt_oci_key(source: str, recipient: str, tools: Mapping[str, str], runner: Runner = default_runner,
                     key: str = "JEV_API_KEY") -> bytes:
     # The selected key reaches SOPS on stdin only; the ciphertext must name exactly one recipient and source field.
-    require(key in {"JEV_API_KEY", GO_KEY, TYPELLM_KEY}, "OCI dev source field unsupported")
+    require(key in {"JEV_API_KEY", GO_KEY, TYPELLM_KEY, COMMAND_CODE_KEY}, "OCI dev source field unsupported")
     require(AGE_RECIPIENT.fullmatch(recipient) is not None, "OCI dev target needs exactly one age recipient")
     require(source != "", "OCI dev source key is empty")
     payload = json.dumps({key: source}, separators=(",", ":")).encode() + b"\n"

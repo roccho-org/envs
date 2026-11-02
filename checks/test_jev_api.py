@@ -147,6 +147,8 @@ def copy_root() -> Path:
         (target / path).unlink(missing_ok=True)
     for path in jev.TYPELLM_CIPHERTEXTS.values():
         (target / path).unlink(missing_ok=True)
+    for path in jev.COMMAND_CODE_CIPHERTEXTS.values():
+        (target / path).unlink(missing_ok=True)
     # A configured production receipt is source data, not a synthetic test's input.
     # Reset only this declared Worker target; preserve every other source plane.
     for path in (jev.WORKER_GO_CIPHER, jev.WORKER_GO_HANDOFF):
@@ -177,7 +179,7 @@ def go_fixture_clear(root: Path) -> None:
     baseline = [p for p in ROOT.rglob("*") if included(p.relative_to(ROOT))]
     known_files = {p.relative_to(ROOT) for p in baseline if p.is_file()}
     known_dirs = {p.relative_to(ROOT) for p in baseline if p.is_dir()}
-    for path in (*jev.GO_CIPHERTEXTS.values(), *jev.TYPELLM_CIPHERTEXTS.values(), jev.WORKER_GO_CIPHER, jev.WORKER_GO_HANDOFF):
+    for path in (*jev.GO_CIPHERTEXTS.values(), *jev.TYPELLM_CIPHERTEXTS.values(), *jev.COMMAND_CODE_CIPHERTEXTS.values(), jev.WORKER_GO_CIPHER, jev.WORKER_GO_HANDOFF):
         known_files.add(path)
         known_dirs.add(path.parent)
     observed = list(root.rglob("*"))
@@ -521,6 +523,7 @@ def test_targets_are_separate() -> None:
         jev.OWN_GO_BINDING: [jev.GO_KEY, jev.OWN_GO_RECIPIENT],
         jev.TYPELLM_BINDING: [jev.TYPELLM_KEY, jev.OCI_RECIPIENT],
         jev.OWN_TYPELLM_BINDING: [jev.TYPELLM_KEY, jev.OWN_TYPELLM_RECIPIENT],
+        jev.COMMAND_CODE_BINDING: [jev.COMMAND_CODE_KEY, jev.COMMAND_CODE_RECIPIENT],
     }
     try:
         jev.authoring_inputs(contracts, "rent-tunnel")
@@ -720,6 +723,36 @@ def test_own_typellm_binding_red() -> None:
                 pass
             else:
                 raise AssertionError("retargeted own TypeLLM binding accepted")
+        finally:
+            go_fixture_clear(root)
+
+
+def test_command_code_binding_red() -> None:
+    # The Command Code capability is closed to its own Pi receiver and recipient.
+    mutations = [
+        lambda row: row["target"].update({"host": "oci-dev"}),
+        lambda row: row["target"].update({"repository": "roccho-dev/windows"}),
+        lambda row: row["target"].update({"kind": "process_env"}),
+        lambda row: row.update({"capability": "opencode-go"}),
+        lambda row: row.update({"source_key": jev.GO_KEY}),
+        lambda row: row.update({"ciphertext": jev.OWN_GO_CIPHERTEXT.as_posix()}),
+        lambda row: row["required_variables"][0].update({"name": jev.OCI_RECIPIENT}),
+    ]
+    for change in mutations:
+        root = copy_root()
+        try:
+            path = root / jev.BINDINGS
+            rows = [json.loads(line) for line in path.read_text().splitlines() if line]
+            selected = [row for row in rows if row["id"] == jev.COMMAND_CODE_BINDING]
+            assert len(selected) == 1
+            change(selected[0])
+            path.write_text("".join(json.dumps(row, separators=(",", ":")) + "\n" for row in rows))
+            try:
+                jev.validate_contracts(root)
+            except jev.EnvsError:
+                pass
+            else:
+                raise AssertionError("retargeted Command Code binding accepted")
         finally:
             go_fixture_clear(root)
 
@@ -1862,6 +1895,7 @@ def main() -> None:
         test_author_typellm()
         test_author_own_typellm()
         test_own_typellm_binding_red()
+        test_command_code_binding_red()
         test_go_fixture_cleanup_refuses_foreign()
         test_targets_are_separate()
         test_worker_go_authoring_isolated_and_rotation()
