@@ -182,6 +182,7 @@ THIRD_PARTY_NOTICES.md
 | `dev-authoring/JEV_API_KEY` | secret | opaque | one_shot_ingress |
 | `dev-authoring/OPENCODE_API_KEY` | secret | opaque | one_shot_ingress |
 | `dev-authoring/TYPELLM_API_KEY` | secret | opaque | one_shot_ingress |
+| `dev-authoring/COMMAND_CODE_API_KEY` | secret | opaque | one_shot_ingress |
 | `dev-authoring/SOPS_AGE_RECIPIENTS` | variable | age_recipient_list | persistent |
 | `dev-authoring/OCI_DEV_AGE_RECIPIENT` | variable | age_recipient | persistent |
 | `dev-authoring/VERSAPRO_OWN_OCI_AGE_RECIPIENT` | variable | age_recipient | persistent |
@@ -396,6 +397,24 @@ an exact envs revision and the target-owned resources receiver are separate
 steps. The existing own public recipient may be reused only after matching it
 to the existing target identity; neither the identity nor a plaintext key is
 copied off the target. Existing OCI dev TypeLLM and own Go bindings are retained.
+
+## Command Code VersaPro own OCI authoring
+
+`command-code-api.versapro-own-oci` selects its own source plane and the VersaPro
+own OCI's existing public recipient. It has no OCI dev target.
+
+```text
+dev-authoring/COMMAND_CODE_API_KEY + dev-authoring/VERSAPRO_OWN_OCI_AGE_RECIPIENT
+→ author-dev-jev-api, `author --target command-code-api.versapro-own-oci`
+→ ciphertexts/dev-command-code-api.versapro-own-oci.sops.yaml
+→ ciphertext-only PR → accepted exact proposals revision
+```
+
+The selected literal workflow step receives only those two inputs. The envelope
+contains exactly `COMMAND_CODE_API_KEY` plus SOPS metadata for one recipient. The
+closed consumer target is
+`{"repository":"roccho-dev/resources","host":"versapro-own-oci","kind":"pi_auth_command"}`.
+Authoring records target application and application runtime as `NOT_RUN`.
 
 ## Jev VersaPro own OCI authoring
 
