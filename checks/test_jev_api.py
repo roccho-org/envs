@@ -895,10 +895,12 @@ def test_author_own_go_red() -> None:
         root = copy_root()
         try:
             path = root / jev.BINDINGS
-            text = path.read_text()
-            own = '"repository":"roccho-dev/resources","host":"versapro-own-oci","kind":"pi_auth_command"'
-            assert text.count(own) == 1
-            path.write_text(text.replace(own, f'"repository":"roccho-dev/resources","host":"{host}","kind":"pi_auth_command"'))
+            # Only the own Go row: another binding (Command Code) shares the same own Pi target.
+            rows = [json.loads(line) for line in path.read_text().splitlines() if line]
+            selected = [row for row in rows if row["id"] == jev.OWN_GO_BINDING]
+            assert len(selected) == 1 and selected[0]["target"]["host"] == "versapro-own-oci"
+            selected[0]["target"]["host"] = host
+            path.write_text("".join(json.dumps(row, separators=(",", ":")) + "\n" for row in rows))
             try:
                 jev.validate_contracts(root)
             except jev.EnvsError:
