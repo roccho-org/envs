@@ -57,9 +57,9 @@ resource "cloudflare_zero_trust_tunnel_cloudflared_route" "versa" {
 
 # Block by default. Adding the single muccho-specific allow rule requires independent
 # existing-policy precedence and device-identity readback before any apply.
-# This only acts while the account's "Allow Secure Web Gateway to proxy traffic" is on, so that setting is read back
-# before any apply too. A block ends the connection after Gateway's first TCP SYN to the origin, so a denial test
-# checks that no bytes pass.
+# This only acts while the account's "Allow Secure Web Gateway to proxy traffic" is on. This root does not own that
+# account-wide singleton: adoption turns TCP on after this policy exists and reads it back. A block ends the connection
+# after Gateway's first TCP SYN to the origin, so a denial test checks that no bytes pass.
 resource "cloudflare_zero_trust_gateway_policy" "versa_deny" {
   account_id = var.account_id
   name       = "versa-muccho-private-default-deny"
