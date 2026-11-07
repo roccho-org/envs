@@ -13,6 +13,7 @@ on:
           - jev-api.versapro-own-oci
           - opencode-go.oci-dev
           - opencode-go.versapro-own-oci
+          - opencode-go.rent
           - typellm-api.oci-dev
           - typellm-api.versapro-own-oci
           - command-code-api.versapro-own-oci
@@ -113,6 +114,13 @@ jobs:
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
           VERSAPRO_OWN_OCI_AGE_RECIPIENT: ${{ vars.VERSAPRO_OWN_OCI_AGE_RECIPIENT }}
         run: '"$ENVS_EFFECT_BIN/envs-effect" --root "$GITHUB_WORKSPACE" author --target opencode-go.versapro-own-oci'
+
+      - name: Author OpenCode Go rent ciphertext
+        if: inputs.target == 'opencode-go.rent'
+        env:
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          RENT_HOST_AGENTS_AGE_RECIPIENT: ${{ vars.RENT_HOST_AGENTS_AGE_RECIPIENT }}
+        run: '"$ENVS_EFFECT_BIN/envs-effect" --root "$GITHUB_WORKSPACE" author --target opencode-go.rent'
 
       - name: Author TypeLLM OCI dev ciphertext
         if: inputs.target == 'typellm-api.oci-dev'

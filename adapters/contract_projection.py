@@ -70,7 +70,8 @@ def public_target(value):
         # Source metadata only. This is not parent-process secret injection or an executable projection port.
         closed(value, ("repository", "host", "kind"))
         if value not in ({"repository": "roccho-dev/windows", "host": "oci-dev", "kind": "pi_auth_command"},
-                         {"repository": "roccho-dev/resources", "host": "versapro-own-oci", "kind": "pi_auth_command"}):
+                         {"repository": "roccho-dev/resources", "host": "versapro-own-oci", "kind": "pi_auth_command"},
+                         {"repository": "roccho-dev/resources", "host": "rent", "kind": "pi_auth_command"}):
             raise ValueError("Pi target identity differs")
     elif value.get("kind") == "process_env":
         closed(value, ("repository", "host", "kind", "secret_name"))
