@@ -877,16 +877,12 @@ jobs:
           tool="$RUNNER_TEMP/envs-effect/bin"
           "$tool/python3" -I checks/test_jev_api.py --sops "$tool/sops" --age-keygen "$RUNNER_TEMP/check-age/bin/age-keygen"
 
-      # agent-opencode-go-source-composition: the existing Pi resolver is now fetched from the fixed resources tree.
-      # The fixture's windows_* names and logical auth target stay unchanged; they are not the physical Git provider.
-      # It consumes this exact commit's contracts/bindings.jsonl with a throwaway local identity and dummy key.
-      # No real ciphertext, credential, provider or OCI target is read; the fixture never enters the provided artifact.
-      # Missing, stale, different, uncomposed and mismatched source object inputs must still be refused in this run.
       # NOT CHECKED HERE (since resources became private): the composition of the pinned resources Pi resolver with this
       # commit's Go binding (agent-opencode-go-source-composition: missing/stale/stale-binding/different/uncomposed/OID
       # refused). It fetched roccho-dev/resources without a credential, which a private repository refuses, and this
       # public repository holds no token for it. A green check does not include it. Its return, with the Windows
       # rent-agents-key.ps1 x rent composition beside the Linux resolver x oci-dev one, is roccho-dev/resources#189.
+
       # Throwaway identities for the placement gate only, made by the check-only age; the gate's envelopes are
       # encrypted to them. They never enter the effect toolchain or the placement distribution.
       - name: Synthetic placement identities from the check-only age
