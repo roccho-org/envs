@@ -187,6 +187,7 @@ THIRD_PARTY_NOTICES.md
 | `dev-authoring/OCI_DEV_AGE_RECIPIENT` | variable | age_recipient | persistent |
 | `dev-authoring/VERSAPRO_OWN_OCI_AGE_RECIPIENT` | variable | age_recipient | persistent |
 | `dev-authoring/RENT_HOST_AGENTS_AGE_RECIPIENT` | variable | age_recipient | persistent |
+| `dev-authoring/RENT_OCI_AGENTS_AGE_RECIPIENT` | variable | age_recipient | persistent |
 | `dev-projection/SOPS_AGE_KEY` | secret | age_identity | persistent |
 | `dev-projection/CLOUDFLARE_API_TOKEN` | secret | opaque | persistent |
 | `dev-projection/CLOUDFLARE_ACCOUNT_ID` | variable | cloudflare_account_id | persistent |
@@ -393,6 +394,29 @@ dev-authoring/OPENCODE_API_KEY + dev-authoring/RENT_HOST_AGENTS_AGE_RECIPIENT
   token's recipient, another key), and no other recipient is a fallback for this target.
 - Declared is not usable: this binding has no ciphertext until it is authored and accepted at an
   exact envs revision, and the host's resolver then checks that ciphertext, its one recipient and
+  this exact target before any key is released.
+
+## Dev OpenCode Go rent.oci authoring (roccho-dev/resources#201)
+
+`opencode-go.rent-oci` is the same Go source capability for the agents on rent.oci (W and R, whose key
+resolver is in resources' rent.oci declaration, which names the target `rent-oci`). It reads the same Go
+source plane but its own single recipient:
+
+```text
+dev-authoring/OPENCODE_API_KEY + dev-authoring/RENT_OCI_AGENTS_AGE_RECIPIENT
+→ author-dev-jev-api, `author --target opencode-go.rent-oci` (manual dispatch on proposals only)
+→ ciphertexts/dev-opencode-go.rent-oci.sops.yaml (exactly OPENCODE_API_KEY + SOPS metadata; one recipient)
+→ ciphertext-only source PR → accepted canonical proposals revision
+```
+
+- The target is exactly `{"repository":"roccho-dev/resources","host":"rent-oci","kind":"pi_auth_command"}`,
+  the one rent.oci's resolver compares as a whole value.
+- The recipient is the public key of rent.oci's own age identity; no private identity leaves rent.oci.
+  It is not `dev-authoring/RENT_HOST_AGENTS_AGE_RECIPIENT` (rent's host place) and not
+  `dev-projection/RENT_AGE_RECIPIENT` (the rent tunnel token's recipient); no other recipient is a
+  fallback for this target.
+- Declared is not usable: this binding has no ciphertext until it is authored and accepted at an
+  exact envs revision, and rent.oci's resolver then checks that ciphertext, its one recipient and
   this exact target before any key is released.
 
 ## TypeLLM VersaPro own OCI authoring
