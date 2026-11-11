@@ -1,0 +1,9 @@
+{
+  "host_id": null,
+  "account_id": null,
+  "zone_id": null,
+  "hostname": null,
+  "origin_service": null,
+  "allowed_emails": null,
+  "session_duration": null
+}
