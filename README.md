@@ -188,6 +188,8 @@ THIRD_PARTY_NOTICES.md
 | `dev-authoring/VERSAPRO_OWN_OCI_AGE_RECIPIENT` | variable | age_recipient | persistent |
 | `dev-authoring/RENT_HOST_AGENTS_AGE_RECIPIENT` | variable | age_recipient | persistent |
 | `dev-authoring/RENT_OCI_AGENTS_AGE_RECIPIENT` | variable | age_recipient | persistent |
+| `dev-authoring/VERSA_PI_W_AGE_RECIPIENT` | variable | age_recipient | persistent |
+| `dev-authoring/VERSA_PI_R_AGE_RECIPIENT` | variable | age_recipient | persistent |
 | `dev-projection/SOPS_AGE_KEY` | secret | age_identity | persistent |
 | `dev-projection/CLOUDFLARE_API_TOKEN` | secret | opaque | persistent |
 | `dev-projection/CLOUDFLARE_ACCOUNT_ID` | variable | cloudflare_account_id | persistent |
@@ -342,6 +344,34 @@ dev-authoring/OPENCODE_API_KEY + dev-authoring/RENT_OCI_AGENTS_AGE_RECIPIENT
 - Declared is not usable: this binding has no ciphertext until it is authored and accepted at an
   exact envs revision, and rent.oci's resolver then checks that ciphertext, its one recipient and
   this exact target before any key is released.
+
+## Dev OpenCode Go pi pair authoring
+
+`opencode-go.versa-pi-w` and `opencode-go.versa-pi-r` are the same Go source capability for a pi pair's two
+roles, each run as its own uid. They read the same Go source plane; each binding has its own single recipient:
+
+```text
+dev-authoring/OPENCODE_API_KEY + dev-authoring/VERSA_PI_W_AGE_RECIPIENT
+→ author-dev-jev-api, `author --target opencode-go.versa-pi-w` (manual dispatch on proposals only)
+→ ciphertexts/dev-opencode-go.versa-pi-w.sops.yaml (exactly OPENCODE_API_KEY + SOPS metadata; one recipient)
+→ ciphertext-only source PR → accepted canonical proposals revision
+
+dev-authoring/OPENCODE_API_KEY + dev-authoring/VERSA_PI_R_AGE_RECIPIENT
+→ author-dev-jev-api, `author --target opencode-go.versa-pi-r` (manual dispatch on proposals only)
+→ ciphertexts/dev-opencode-go.versa-pi-r.sops.yaml (exactly OPENCODE_API_KEY + SOPS metadata; one recipient)
+→ ciphertext-only source PR → accepted canonical proposals revision
+```
+
+- The targets are exactly `{"repository":"roccho-dev/resources","host":"versa-pi-w","kind":"pi_auth_command"}`
+  and `{"repository":"roccho-dev/resources","host":"versa-pi-r","kind":"pi_auth_command"}`, each compared as a
+  whole value by its role's resolver.
+- Two bindings, two recipients: each role's uid makes its own age identity and keeps it, so no private identity
+  is carried between the two uids. Both ciphertexts wrap the same Go key; the split is not a boundary between
+  the key values.
+- Neither recipient is a fallback for the other, and no other recipient is a fallback for these targets.
+- Declared is not usable: these bindings have no ciphertext until each is authored and accepted at an exact
+  envs revision, and the role's resolver then checks that ciphertext, its one recipient and its exact target
+  before any key is released.
 
 ## TypeLLM VersaPro own OCI authoring
 

@@ -516,6 +516,8 @@ def test_targets_are_separate() -> None:
         jev.OWN_GO_BINDING: [jev.GO_KEY, jev.OWN_GO_RECIPIENT],
         jev.RENT_GO_BINDING: [jev.GO_KEY, jev.RENT_GO_RECIPIENT],
         jev.RENT_OCI_GO_BINDING: [jev.GO_KEY, jev.RENT_OCI_GO_RECIPIENT],
+        jev.PI_W_GO_BINDING: [jev.GO_KEY, jev.PI_W_GO_RECIPIENT],
+        jev.PI_R_GO_BINDING: [jev.GO_KEY, jev.PI_R_GO_RECIPIENT],
         jev.OWN_TYPELLM_BINDING: [jev.TYPELLM_KEY, jev.OWN_TYPELLM_RECIPIENT],
         jev.COMMAND_CODE_BINDING: [jev.COMMAND_CODE_KEY, jev.COMMAND_CODE_RECIPIENT],
     }
