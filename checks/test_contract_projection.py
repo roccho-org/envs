@@ -58,8 +58,8 @@ class ProjectionTests(unittest.TestCase):
         original = run(b, c, selection)
         go = next(row for row in (json.loads(line) for line in
                   (ROOT / "contracts/bindings.jsonl").read_text().splitlines() if line)
-                  if row["id"] == "opencode-go.oci-dev")
-        expected_target = {"repository": "roccho-dev/windows", "host": "oci-dev", "kind": "pi_auth_command"}
+                  if row["id"] == "opencode-go.versapro-own-oci")
+        expected_target = {"repository": "roccho-dev/resources", "host": "versapro-own-oci", "kind": "pi_auth_command"}
         self.assertEqual(go["target"], expected_target)
         b.append(go)
         unselected = run(b, c, selection)
@@ -73,7 +73,7 @@ class ProjectionTests(unittest.TestCase):
 
         # Knowing a public target kind does not authorize executing or projecting its secret.
         selected = copy.deepcopy(selection)
-        selected["obligations"][0]["binding"] = "opencode-go.oci-dev"
+        selected["obligations"][0]["binding"] = "opencode-go.versapro-own-oci"
         consumer = copy.deepcopy(c)
         consumer[0]["capability"] = "opencode-go"
         with self.assertRaisesRegex(ValueError, "target projection unsupported"):

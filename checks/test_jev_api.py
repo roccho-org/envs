@@ -79,12 +79,6 @@ GO_KEY = "go-" + secrets.token_urlsafe(24)
 TYPELLM_KEY = "tl-" + secrets.token_urlsafe(24)
 
 
-def go_env(**overrides: str) -> dict[str, str]:
-    values = {jev.GO_KEY: GO_KEY, jev.OCI_RECIPIENT: OCI_RECIPIENT, "ENVS_EFFECT_TOOLCHAIN": MANIFEST}
-    values.update(overrides)
-    return values
-
-
 def oci_env(**overrides: str) -> dict[str, str]:
     values = {"JEV_API_KEY": OCI_KEY, jev.OCI_RECIPIENT: OCI_RECIPIENT, "ENVS_EFFECT_TOOLCHAIN": MANIFEST}
     values.update(overrides)
@@ -519,11 +513,9 @@ def test_targets_are_separate() -> None:
         jev.WORKER_GO_BINDING: [jev.GO_KEY, "SOPS_AGE_RECIPIENTS"],
         jev.OCI_BINDING: ["JEV_API_KEY", jev.OCI_RECIPIENT],
         jev.OWN_JEV_BINDING: ["JEV_API_KEY", jev.OWN_JEV_RECIPIENT],
-        jev.GO_BINDING: [jev.GO_KEY, jev.OCI_RECIPIENT],
         jev.OWN_GO_BINDING: [jev.GO_KEY, jev.OWN_GO_RECIPIENT],
         jev.RENT_GO_BINDING: [jev.GO_KEY, jev.RENT_GO_RECIPIENT],
         jev.RENT_OCI_GO_BINDING: [jev.GO_KEY, jev.RENT_OCI_GO_RECIPIENT],
-        jev.TYPELLM_BINDING: [jev.TYPELLM_KEY, jev.OCI_RECIPIENT],
         jev.OWN_TYPELLM_BINDING: [jev.TYPELLM_KEY, jev.OWN_TYPELLM_RECIPIENT],
         jev.COMMAND_CODE_BINDING: [jev.COMMAND_CODE_KEY, jev.COMMAND_CODE_RECIPIENT],
     }
@@ -574,44 +566,6 @@ def expect_oci_red(values: dict[str, str], *, mutate=None, output: bytes | None 
         assert snapshot(root) == before, "a RED OCI authoring changed the repository"
     finally:
         shutil.rmtree(root.parent, ignore_errors=True)
-
-
-def test_author_go() -> None:
-    # Sharing the GitHub Environment does not permit either Jev secret or list-recipient to enter this Go invocation.
-    root = copy_root()
-    calls: list[tuple[list[str], bytes | None, dict[str, str]]] = []
-    try:
-        before = snapshot(root)
-
-        def runner(argv, input_data, env):
-            calls.append((list(argv), input_data, dict(env)))
-            return subprocess.CompletedProcess(argv, 0, stdout=oci_ciphertext(key=jev.GO_KEY), stderr=b"")
-
-        with environment(go_env(JEV_API_KEY="not-go-input", SOPS_AGE_RECIPIENTS="wrong-list")):
-            result = jev.author_oci(root, runner, target=jev.GO_BINDING)
-        assert result == {
-            "kind": "envs.targetAuthoringResult.v1", "status": "PASS", "binding": jev.GO_BINDING,
-            "ciphertext": jev.GO_CIPHERTEXT.as_posix(), "recipient_count": 1,
-            "target_apply": "NOT_RUN", "application_runtime": "NOT_RUN",
-        }
-        assert len(calls) == 1
-        argv, stdin, env = calls[0]
-        assert argv == [TOOLS["sops"], "--encrypt", "--input-type", "json", "--output-type", "yaml", "/dev/stdin"]
-        assert json.loads(stdin) == {jev.GO_KEY: GO_KEY}
-        assert env["SOPS_AGE_RECIPIENTS"] == OCI_RECIPIENT
-        for secret in (jev.GO_KEY, "JEV_API_KEY", jev.OCI_RECIPIENT):
-            assert secret not in env, "a source secret or target recipient leaked into the tool environment"
-        assert GO_KEY not in json.dumps(result)
-        assert not any(GO_KEY in item for item in [*argv, *env.values()])
-        after = snapshot(root)
-        assert set(after) - set(before) == {jev.GO_CIPHERTEXT.as_posix()}
-        assert all(after[name] == data for name, data in before.items())
-        assert not (root / jev.OCI_CIPHERTEXT).exists() and not (root / jev.CIPHERTEXT).exists()
-        contracts = jev.validate_contracts(root)
-        for plane in ("dev.authoring", jev.GO_PLANE, "dev.projection"):
-            assert contracts["environments"][plane]["migration_state"] == "NOT_CONFIGURED"
-    finally:
-        go_fixture_clear(root)
 
 
 def check_author_typellm_target(target: str, ciphertext_path: Path, recipient_name: str, recipient: str) -> None:
@@ -689,10 +643,6 @@ def check_author_typellm_target(target: str, ciphertext_path: Path, recipient_na
             go_fixture_clear(root)
 
 
-def test_author_typellm() -> None:
-    check_author_typellm_target(jev.TYPELLM_BINDING, jev.TYPELLM_CIPHERTEXT, jev.OCI_RECIPIENT, OCI_RECIPIENT)
-
-
 def test_author_own_typellm() -> None:
     check_author_typellm_target(jev.OWN_TYPELLM_BINDING, jev.OWN_TYPELLM_CIPHERTEXT,
                                jev.OWN_TYPELLM_RECIPIENT, OWN_RECIPIENT)
@@ -707,7 +657,7 @@ def test_own_typellm_binding_red() -> None:
         lambda row: row["target"].update({"kind": "pi_auth_command"}),
         lambda row: row["target"].update({"secret_name": "JEV_API_KEY"}),
         lambda row: row.update({"source_key": "JEV_API_KEY"}),
-        lambda row: row.update({"ciphertext": jev.TYPELLM_CIPHERTEXT.as_posix()}),
+        lambda row: row.update({"ciphertext": jev.OWN_GO_CIPHERTEXT.as_posix()}),
         lambda row: row["required_variables"][0].update({"name": jev.OCI_RECIPIENT}),
     ]
     for change in mutations:
@@ -771,11 +721,12 @@ def expect_go_red(values: dict[str, str], *, mutate=None, output: bytes | None =
         def runner(argv, input_data, env):
             calls.append(list(argv))
             return subprocess.CompletedProcess(
-                argv, returncode, stdout=output if output is not None else oci_ciphertext(key=jev.GO_KEY), stderr=b"")
+                argv, returncode,
+                stdout=output if output is not None else oci_ciphertext((OWN_RECIPIENT,), key=jev.GO_KEY), stderr=b"")
 
         with environment(values):
             try:
-                jev.author_oci(root, runner, target=jev.GO_BINDING)
+                jev.author_oci(root, runner, target=jev.OWN_GO_BINDING)
             except jev.EnvsError as error:
                 message = str(error)
             else:
@@ -808,7 +759,8 @@ def test_author_own_go() -> None:
             return subprocess.CompletedProcess(argv, 0, stdout=oci_ciphertext((OWN_RECIPIENT,), key=jev.GO_KEY),
                                                stderr=b"")
 
-        with environment(own_go_env(**{jev.OCI_RECIPIENT: OCI_RECIPIENT, "JEV_API_KEY": "not-go-input"})):
+        with environment(own_go_env(**{jev.OCI_RECIPIENT: OCI_RECIPIENT, "JEV_API_KEY": "not-go-input",
+                                       "SOPS_AGE_RECIPIENTS": "wrong-list"})):
             result = jev.author_oci(root, runner, target=jev.OWN_GO_BINDING)
         assert result == {
             "kind": "envs.targetAuthoringResult.v1", "status": "PASS", "binding": jev.OWN_GO_BINDING,
@@ -817,14 +769,21 @@ def test_author_own_go() -> None:
         }
         assert len(calls) == 1
         argv, stdin, env = calls[0]
+        assert argv == [TOOLS["sops"], "--encrypt", "--input-type", "json", "--output-type", "yaml", "/dev/stdin"]
         assert json.loads(stdin) == {jev.GO_KEY: GO_KEY}
         assert env["SOPS_AGE_RECIPIENTS"] == OWN_RECIPIENT, "own target encrypted to another recipient"
         for secret in (jev.GO_KEY, "JEV_API_KEY", jev.OCI_RECIPIENT, jev.OWN_GO_RECIPIENT):
-            assert secret not in env
+            assert secret not in env, "a source secret or target recipient leaked into the tool environment"
+        assert GO_KEY not in json.dumps(result)
+        assert not any(GO_KEY in item for item in [*argv, *env.values()])
         after = snapshot(root)
         assert set(after) - set(before) == {jev.OWN_GO_CIPHERTEXT.as_posix()}
-        assert not (root / jev.GO_CIPHERTEXT).exists() and not (root / jev.OCI_CIPHERTEXT).exists()
-        binding = jev.validate_contracts(root)["bindings"][jev.OWN_GO_BINDING]
+        assert all(after[name] == data for name, data in before.items())
+        assert not (root / jev.OCI_CIPHERTEXT).exists() and not (root / jev.CIPHERTEXT).exists()
+        contracts = jev.validate_contracts(root)
+        for plane in ("dev.authoring", jev.GO_PLANE, "dev.projection"):
+            assert contracts["environments"][plane]["migration_state"] == "NOT_CONFIGURED"
+        binding = contracts["bindings"][jev.OWN_GO_BINDING]
         assert binding["target"] == {"repository": "roccho-dev/resources", "host": "versapro-own-oci",
                                      "kind": "pi_auth_command"}
         assert binding["required_variables"] == [
@@ -876,8 +835,6 @@ def test_author_own_go_red() -> None:
         oci_ciphertext((OWN_RECIPIENT,), key=jev.GO_KEY, extra="note: plain\n"),
     ):
         expect_own_go_red(own_go_env(), output=output)
-    # A selected oci-dev Go dispatch never reads the own recipient.
-    expect_go_red(go_env(**{jev.OCI_RECIPIENT: "", jev.OWN_GO_RECIPIENT: OWN_RECIPIENT}))
     # Malformed committed own ciphertext is RED even when unselected.
     for data in (b"OPENCODE_API_KEY: plain\n", oci_ciphertext((OWN_RECIPIENT, OCI_RECIPIENT), key=jev.GO_KEY)):
         root = copy_root()
@@ -914,35 +871,35 @@ def test_author_own_go_red() -> None:
 
 
 def test_author_go_red() -> None:
-    for name in (jev.GO_KEY, jev.OCI_RECIPIENT):
-        expect_go_red(go_env(**{name: ""}))
-    for value in (f"{OCI_RECIPIENT},{OCI_OTHER}", f"{OCI_RECIPIENT},{OCI_RECIPIENT}",
-                  OCI_RECIPIENT.upper(), f" {OCI_RECIPIENT}", "not-an-age-recipient"):
-        expect_go_red(go_env(**{jev.OCI_RECIPIENT: value}))
+    for name in (jev.GO_KEY, jev.OWN_GO_RECIPIENT):
+        expect_go_red(own_go_env(**{name: ""}))
+    for value in (f"{OWN_RECIPIENT},{OCI_OTHER}", f"{OWN_RECIPIENT},{OWN_RECIPIENT}",
+                  OWN_RECIPIENT.upper(), f" {OWN_RECIPIENT}", "not-an-age-recipient"):
+        expect_go_red(own_go_env(**{jev.OWN_GO_RECIPIENT: value}))
     # A source secret never falls back to Jev's distinct secret or recipient list.
-    expect_go_red(go_env(**{jev.GO_KEY: "", "JEV_API_KEY": "shadow-jev"}))
-    expect_go_red(go_env(**{jev.OCI_RECIPIENT: "", "SOPS_AGE_RECIPIENTS": OCI_RECIPIENT}))
-    expect_go_red(go_env(), mutate=lambda root: append(root / "README.md", f"\n{OCI_RECIPIENT}\n"))
-    expect_go_red(go_env(), mutate=lambda root: append(root / "README.md", f"\n{GO_KEY}\n"))
+    expect_go_red(own_go_env(**{jev.GO_KEY: "", "JEV_API_KEY": "shadow-jev"}))
+    expect_go_red(own_go_env(**{jev.OWN_GO_RECIPIENT: "", "SOPS_AGE_RECIPIENTS": OWN_RECIPIENT}))
+    expect_go_red(own_go_env(), mutate=lambda root: append(root / "README.md", f"\n{OWN_RECIPIENT}\n"))
+    expect_go_red(own_go_env(), mutate=lambda root: append(root / "README.md", f"\n{GO_KEY}\n"))
     for output, code in (
-        (oci_ciphertext(), 0),
-        (oci_ciphertext(key=jev.RENT_KEY), 0),
+        (oci_ciphertext((OWN_RECIPIENT,)), 0),
+        (oci_ciphertext((OWN_RECIPIENT,), key=jev.RENT_KEY), 0),
         (oci_ciphertext(key=jev.GO_KEY, recipients=(OCI_OTHER,)), 0),
-        (oci_ciphertext(key=jev.GO_KEY, recipients=(OCI_RECIPIENT, OCI_OTHER)), 0),
+        (oci_ciphertext(key=jev.GO_KEY, recipients=(OWN_RECIPIENT, OCI_OTHER)), 0),
         (oci_ciphertext(key=jev.GO_KEY, recipients=()), 0),
-        (oci_ciphertext(key=jev.GO_KEY, extra="note: plain\n"), 0),
-        (oci_ciphertext(key=jev.GO_KEY, extra=f"note: {GO_KEY}\n"), 0),
-        (oci_ciphertext(key=jev.GO_KEY), 1),
+        (oci_ciphertext((OWN_RECIPIENT,), key=jev.GO_KEY, extra="note: plain\n"), 0),
+        (oci_ciphertext((OWN_RECIPIENT,), key=jev.GO_KEY, extra=f"note: {GO_KEY}\n"), 0),
+        (oci_ciphertext((OWN_RECIPIENT,), key=jev.GO_KEY), 1),
     ):
-        expect_go_red(go_env(), output=output, returncode=code)
+        expect_go_red(own_go_env(), output=output, returncode=code)
     # Malformed committed Go SOPS is RED even when this Go target is unselected.
-    for data in (b"OPENCODE_API_KEY: plain\n", oci_ciphertext(),
-                 oci_ciphertext(key=jev.GO_KEY, recipients=(OCI_RECIPIENT, OCI_OTHER)),
-                 oci_ciphertext(key=jev.GO_KEY, extra="note: unexpected\n")):
+    for data in (b"OPENCODE_API_KEY: plain\n", oci_ciphertext((OWN_RECIPIENT,)),
+                 oci_ciphertext(key=jev.GO_KEY, recipients=(OWN_RECIPIENT, OCI_OTHER)),
+                 oci_ciphertext((OWN_RECIPIENT,), key=jev.GO_KEY, extra="note: unexpected\n")):
         root = copy_root()
         try:
-            (root / jev.GO_CIPHERTEXT).parent.mkdir(exist_ok=True)
-            (root / jev.GO_CIPHERTEXT).write_bytes(data)
+            (root / jev.OWN_GO_CIPHERTEXT).parent.mkdir(exist_ok=True)
+            (root / jev.OWN_GO_CIPHERTEXT).write_bytes(data)
             try:
                 jev.validate_contracts(root)
             except jev.EnvsError:
@@ -1102,7 +1059,7 @@ def real_oci_roundtrip(sops_bin: str, keygen_bin: str) -> None:
         go_data = jev.encrypt_oci_key(GO_KEY, recipient, tools, runner, key=jev.GO_KEY)
         assert GO_KEY.encode() not in go_data and OCI_KEY.encode() not in go_data
         jev.validate_oci_ciphertext(go_data, GO_KEY.encode(), recipient, key=jev.GO_KEY)
-        go_cipher = work / "dev-opencode-go.oci-dev.sops.yaml"
+        go_cipher = work / "dev-opencode-go.sops.yaml"
         go_cipher.write_bytes(go_data)
         go_open = decrypt(go_cipher, key)
         assert go_open.returncode == 0 and json.loads(go_open.stdout) == {jev.GO_KEY: GO_KEY}
@@ -1124,7 +1081,7 @@ def real_oci_roundtrip(sops_bin: str, keygen_bin: str) -> None:
             raise AssertionError("Go ciphertext was accepted for a different recipient")
         type_data = jev.encrypt_oci_key(TYPELLM_KEY, recipient, tools, runner, key=jev.TYPELLM_KEY)
         jev.validate_oci_ciphertext(type_data, TYPELLM_KEY.encode(), recipient, key=jev.TYPELLM_KEY)
-        type_cipher = work / "dev-typellm-api.oci-dev.sops.yaml"
+        type_cipher = work / "dev-typellm-api.sops.yaml"
         type_cipher.write_bytes(type_data)
         type_open = decrypt(type_cipher, key)
         assert type_open.returncode == 0 and json.loads(type_open.stdout) == {jev.TYPELLM_KEY: TYPELLM_KEY}
@@ -1895,8 +1852,6 @@ def main() -> None:
         test_author_red_inputs()
         test_author_oci()
         test_author_own_oci()
-        test_author_go()
-        test_author_typellm()
         test_author_own_typellm()
         test_own_typellm_binding_red()
         test_command_code_binding_red()

@@ -265,96 +265,11 @@ dev-authoring/JEV_API_KEY + dev-authoring/OCI_DEV_AGE_RECIPIENT
 
 Not proven here, and not owned by envs: the target's identity, applying the ciphertext on the target, the launcher, application runtime acceptance, and any deployment. Source and CI PASS is not a real authoring PASS.
 
-## Dev TypeLLM OCI authoring (apps #94)
-
-`typellm-api.oci-dev` reuses the existing target-selected authoring entry and the
-OCI dev target's existing recipient. The owner enters the API key directly as
-`dev-authoring/TYPELLM_API_KEY`; no plaintext value goes into Git, a command,
-chat, a PR or a local `.env` file.
-
-```text
-dev-authoring/TYPELLM_API_KEY + dev-authoring/OCI_DEV_AGE_RECIPIENT
-→ author-dev-jev-api, `author --target typellm-api.oci-dev`
-→ ciphertexts/dev-typellm-api.oci-dev.sops.yaml
-→ ciphertext-only PR → accepted exact proposals revision
-```
-
-After the source and its own canonical `check` artifact are available, dispatch
-the existing workflow once on `proposals`, selecting only this target:
-
-```sh
-gh workflow run author-dev-jev-api.yml --repo roccho-org/envs --ref proposals \
-  -f target=typellm-api.oci-dev
-```
-
-The literal TypeLLM step receives only `TYPELLM_API_KEY` and the one
-`OCI_DEV_AGE_RECIPIENT`; it never reads Jev, Go or Cloudflare credentials.
-The locked SOPS child receives the source on stdin and returns an envelope
-containing exactly `TYPELLM_API_KEY` and SOPS metadata, encrypted to that one
-recipient. Missing input, a wrong recipient, another source field or plaintext
-in the repository refuses authoring. The result records target application and
-application runtime as `NOT_RUN`; the source plane stays `NOT_CONFIGURED`, as
-with Go. Ciphertext availability is checked at an exact Git revision.
-
-### Local use and the remaining consumer connection
-
-The existing local pattern is documented in
-[windows #22](https://github.com/roccho-dev/windows/issues/22) and implemented by
-[oci/dev/nix.nix](https://github.com/roccho-dev/resources/blob/3f929b9d96ed276171d294db828b519cbf001917/oci/dev/nix.nix):
-resolve/build the exact app before decryption, use the target's own
-`/work/repos/.auth/roccho-dev/age/oci-dev.key`, decrypt in memory and pass the key
-only to the foreground application child. The private identity stays on the
-target. The application uses target-native auth and never starts or waits for
-an envs authoring workflow.
-
-`voice-ui-jev-dev` currently accepts only the Jev ciphertext and `JEV_API_KEY`.
-TypeLLM authoring does not make that launcher or voice-ui consume the new key.
-The target-owned launcher must explicitly accept this binding and deliver
-`TYPELLM_API_KEY` to the server; the app/provider owner must connect it to
-[TypeLLM's hosted API](https://typellm.ai/docs/api). Browser code receives no key.
-No new identity or GPU server is needed for that hosted API connection.
-
-The consumer outcome to verify is: determine whether existing parts suffice;
-when they do, select and draw them with the required quality; when they do not,
-prepare the missing candidate data through TypeLLM, validate it and return it to
-the same drawing loop. Unknown executable operations still require real
-implementation. Key presence, an authored envelope or an HTTP response alone
-does not establish that outcome. [apps #94](https://github.com/roccho-dev/apps/issues/94)
-owns the comparison and app integration.
-
-## Dev OpenCode Go OCI authoring (ADRS #530)
-
-`opencode-go.oci-dev` is a separate source capability for the already accepted Windows Pi v1.0.4
-`pi_auth_command` resolver. Its authoring selects only its own secret and the one OCI-dev age
-recipient, under the existing `dev-authoring` GitHub Environment:
-
-```text
-dev-authoring/OPENCODE_API_KEY + dev-authoring/OCI_DEV_AGE_RECIPIENT
-→ author-dev-jev-api, `author --target opencode-go.oci-dev` (manual dispatch on proposals only)
-→ ciphertexts/dev-opencode-go.oci-dev.sops.yaml (exactly OPENCODE_API_KEY + SOPS metadata; one recipient)
-→ ciphertext-only source PR → accepted canonical proposals revision
-```
-
-- `dev.opencode-go-authoring` declares the Go source separately from `dev.authoring` (Jev).
-  The workflow's literal target steps never pass `OPENCODE_API_KEY` to a
-  Jev step or `JEV_API_KEY` to the Go step. Cloudflare's `SOPS_AGE_RECIPIENTS` list
-  is not an OCI-dev author input. Sharing the target age recipient does not share the source key.
-- The Windows target is exactly `{"repository":"roccho-dev/windows","host":"oci-dev","kind":"pi_auth_command"}`;
-  public contract projection validates this *source shape* even when unselected, but it cannot
-  execute or project the selected Go secret as a `process_env` value.
-- The selected Go source is encrypted to precisely one age recipient by the locked SOPS tool
-  using stdin, not argv or process environment. Input leaks into tracked Git, wrong recipients,
-  added fields, non-SOPS plaintext or missing inputs are RED before an accepted handoff.
-- The existing `checks/test_jev_api.py` fixture tests Go/Jev input isolation, encrypted dummy
-  source roundtrip with check-only target/wrong age identities, tampering and rejection cases.
-  No real `OPENCODE_API_KEY` value, production ciphertext, provider call, target key or runtime
-  adoption is part of this source stage. The committed Go plane is `NOT_CONFIGURED`; only
-  later real canonical ciphertext/provisioning can move the live acceptance gate.
-
 ## Dev OpenCode Go VersaPro own OCI authoring (roccho-dev/resources#10)
 
-`opencode-go.versapro-own-oci` is the same Go source capability for the VersaPro own OCI's
-target-bound Pi resolver. It reads the same Go source plane but its own single recipient:
+`opencode-go.versapro-own-oci` is the Go source capability for the VersaPro own OCI's
+target-bound Pi resolver. Its authoring selects only its own secret and its own single age
+recipient, under the existing `dev-authoring` GitHub Environment:
 
 ```text
 dev-authoring/OPENCODE_API_KEY + dev-authoring/VERSAPRO_OWN_OCI_AGE_RECIPIENT
@@ -364,9 +279,18 @@ dev-authoring/OPENCODE_API_KEY + dev-authoring/VERSAPRO_OWN_OCI_AGE_RECIPIENT
 ```
 
 - The target is exactly `{"repository":"roccho-dev/resources","host":"versapro-own-oci","kind":"pi_auth_command"}`,
-  the one the resolver built for that OCI compares as a whole value; host `versapro` or `oci-dev` is RED.
+  the one the resolver built for that OCI compares as a whole value; host `versapro` is RED.
+- `dev.opencode-go-authoring` declares the Go source separately from `dev.authoring` (Jev).
+  The workflow's literal target steps never pass `OPENCODE_API_KEY` to a
+  Jev step or `JEV_API_KEY` to a Go step. Cloudflare's `SOPS_AGE_RECIPIENTS` list
+  is not a Go author input.
 - Each target reads only its own declared recipient: `OCI_DEV_AGE_RECIPIENT` is never a fallback for
-  this target, and `VERSAPRO_OWN_OCI_AGE_RECIPIENT` never reaches the `opencode-go.oci-dev` step.
+  this target, and `VERSAPRO_OWN_OCI_AGE_RECIPIENT` never reaches another target's step.
+- The selected Go source is encrypted to precisely one age recipient by the locked SOPS tool
+  using stdin, not argv or process environment. Input leaks into tracked Git, wrong recipients,
+  added fields, non-SOPS plaintext or missing inputs are RED before an accepted handoff.
+- The existing `checks/test_jev_api.py` fixture tests Go/Jev input isolation, encrypted dummy
+  source roundtrip with check-only target/wrong age identities, tampering and rejection cases.
 - The recipient is the public key the target creates in place with its own bounded `jev-age-init`;
   no private identity leaves the target.
 - Declared is not usable: this binding has no ciphertext until it is authored and accepted at an
@@ -444,7 +368,7 @@ records target application and application runtime as `NOT_RUN`. Acceptance at
 an exact envs revision and the target-owned resources receiver are separate
 steps. The existing own public recipient may be reused only after matching it
 to the existing target identity; neither the identity nor a plaintext key is
-copied off the target. Existing OCI dev TypeLLM and own Go bindings are retained.
+copied off the target. The own Go binding is retained.
 
 ## Command Code VersaPro own OCI authoring
 
