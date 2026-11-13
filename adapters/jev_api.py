@@ -154,11 +154,9 @@ STATE_TRANSIENT = re.compile(rb"(?<![-\w])timeout|timed out|connection (?:refuse
 OCI_BINDING = "jev-api.oci-dev"
 OCI_CIPHERTEXT = Path("ciphertexts/dev-jev-api.oci-dev.sops.yaml")
 OCI_RECIPIENT = "OCI_DEV_AGE_RECIPIENT"
-# Go uses a distinct source plane on the existing dev-authoring Environment. Only the named recipient is shared;
+# Go uses a distinct source plane on the existing dev-authoring Environment.
 # Jev and Go secrets never cross selected author steps, tool environments, ciphertexts, or target kinds.
 GO_PLANE = "dev.opencode-go-authoring"
-GO_BINDING = "opencode-go.oci-dev"
-GO_CIPHERTEXT = Path("ciphertexts/dev-opencode-go.oci-dev.sops.yaml")
 GO_KEY = "OPENCODE_API_KEY"
 # The VersaPro own OCI Pi target (roccho-dev/resources#10): the same Go source plane with its own single recipient,
 # ciphertext and exact target. Declaring it never makes it usable; only a validated ciphertext at an exact commit does.
@@ -178,17 +176,15 @@ RENT_OCI_GO_BINDING = "opencode-go.rent-oci"
 RENT_OCI_GO_CIPHERTEXT = Path("ciphertexts/dev-opencode-go.rent-oci.sops.yaml")
 RENT_OCI_GO_RECIPIENT = "RENT_OCI_AGENTS_AGE_RECIPIENT"
 # Go binding -> its one ciphertext; each reads the Go plane's OPENCODE_API_KEY and nothing else.
-GO_CIPHERTEXTS = {GO_BINDING: GO_CIPHERTEXT, OWN_GO_BINDING: OWN_GO_CIPHERTEXT, RENT_GO_BINDING: RENT_GO_CIPHERTEXT,
+GO_CIPHERTEXTS = {OWN_GO_BINDING: OWN_GO_CIPHERTEXT, RENT_GO_BINDING: RENT_GO_CIPHERTEXT,
                   RENT_OCI_GO_BINDING: RENT_OCI_GO_CIPHERTEXT}
 TYPELLM_PLANE = "dev.typellm-authoring"
-TYPELLM_BINDING = "typellm-api.oci-dev"
-TYPELLM_CIPHERTEXT = Path("ciphertexts/dev-typellm-api.oci-dev.sops.yaml")
 TYPELLM_KEY = "TYPELLM_API_KEY"
-# The same TypeLLM source plane, but a distinct own target and one existing public recipient.
+# The TypeLLM source plane's one target: the own target and one existing public recipient.
 OWN_TYPELLM_BINDING = "typellm-api.versapro-own-oci"
 OWN_TYPELLM_CIPHERTEXT = Path("ciphertexts/dev-typellm-api.versapro-own-oci.sops.yaml")
 OWN_TYPELLM_RECIPIENT = OWN_GO_RECIPIENT
-TYPELLM_CIPHERTEXTS = {TYPELLM_BINDING: TYPELLM_CIPHERTEXT, OWN_TYPELLM_BINDING: OWN_TYPELLM_CIPHERTEXT}
+TYPELLM_CIPHERTEXTS = {OWN_TYPELLM_BINDING: OWN_TYPELLM_CIPHERTEXT}
 # The VersaPro own OCI target for the same one-shot Jev source: its own ciphertext and the existing own public
 # recipient that the Go and TypeLLM own targets already use. The OCI dev recipient is never a fallback.
 OWN_JEV_BINDING = "jev-api.versapro-own-oci"
@@ -390,16 +386,6 @@ def expected_bindings(jev_target: dict[str, Any] | None = None) -> dict[str, dic
             "required_variables": [{"name": OWN_JEV_RECIPIENT, "type": "age_recipient", "lifecycle": "persistent"}],
             "target": {"repository": "roccho-dev/resources", "host": "versapro-own-oci", "kind": "process_env", "secret_name": "JEV_API_KEY"},
         },
-        GO_BINDING: {
-            "id": GO_BINDING,
-            "kind": "envs.authCapability.v1",
-            "capability": "opencode-go",
-            "ciphertext": GO_CIPHERTEXT.as_posix(),
-            "source_key": GO_KEY,
-            "github_environment": "dev-authoring",
-            "required_variables": [{"name": OCI_RECIPIENT, "type": "age_recipient", "lifecycle": "persistent"}],
-            "target": {"repository": "roccho-dev/windows", "host": "oci-dev", "kind": "pi_auth_command"},
-        },
         OWN_GO_BINDING: {
             "id": OWN_GO_BINDING,
             "kind": "envs.authCapability.v1",
@@ -429,16 +415,6 @@ def expected_bindings(jev_target: dict[str, Any] | None = None) -> dict[str, dic
             "github_environment": "dev-authoring",
             "required_variables": [{"name": RENT_OCI_GO_RECIPIENT, "type": "age_recipient", "lifecycle": "persistent"}],
             "target": {"repository": "roccho-dev/resources", "host": "rent-oci", "kind": "pi_auth_command"},
-        },
-        TYPELLM_BINDING: {
-            "id": TYPELLM_BINDING,
-            "kind": "envs.authCapability.v1",
-            "capability": "typellm-api",
-            "ciphertext": TYPELLM_CIPHERTEXT.as_posix(),
-            "source_key": TYPELLM_KEY,
-            "github_environment": "dev-authoring",
-            "required_variables": [{"name": OCI_RECIPIENT, "type": "age_recipient", "lifecycle": "persistent"}],
-            "target": {"repository": "roccho-dev/windows", "host": "oci-dev", "kind": "process_env", "secret_name": TYPELLM_KEY},
         },
         OWN_TYPELLM_BINDING: {
             "id": OWN_TYPELLM_BINDING,
@@ -583,15 +559,15 @@ def expected_own_jev_boundary() -> dict[str, Any]:
     return {**expected_oci_boundary(), "id": "dev.jev-api-versapro-own-oci.provider", "binding": OWN_JEV_BINDING}
 
 
-def expected_go_boundary() -> dict[str, Any]:
+def expected_own_go_boundary() -> dict[str, Any]:
     return {
-        "id": "dev.opencode-go-oci-dev.provider",
+        "id": "dev.opencode-go-versapro-own-oci.provider",
         "kind": "envs.providerConsumerBoundary.v1",
         "role": "provider",
         "repository": "roccho-org/envs",
         "stage": "dev",
         "capability": "opencode-go",
-        "binding": GO_BINDING,
+        "binding": OWN_GO_BINDING,
         "source_kind": "ephemeral_ingress",
         "target_kind": "public_sops",
         "owns": ["contract", "target_selected_authoring", "single_recipient_encryption", "ciphertext_handoff_pr"],
@@ -600,30 +576,21 @@ def expected_go_boundary() -> dict[str, Any]:
     }
 
 
-def expected_own_go_boundary() -> dict[str, Any]:
-    return {**expected_go_boundary(), "id": "dev.opencode-go-versapro-own-oci.provider", "binding": OWN_GO_BINDING}
-
-
 def expected_rent_go_boundary() -> dict[str, Any]:
-    return {**expected_go_boundary(), "id": "dev.opencode-go-rent.provider", "binding": RENT_GO_BINDING}
+    return {**expected_own_go_boundary(), "id": "dev.opencode-go-rent.provider", "binding": RENT_GO_BINDING}
 
 
 def expected_rent_oci_go_boundary() -> dict[str, Any]:
-    return {**expected_go_boundary(), "id": "dev.opencode-go-rent-oci.provider", "binding": RENT_OCI_GO_BINDING}
-
-
-def expected_typellm_boundary() -> dict[str, Any]:
-    return {**expected_go_boundary(), "id": "dev.typellm-api-oci-dev.provider",
-            "capability": "typellm-api", "binding": TYPELLM_BINDING}
+    return {**expected_own_go_boundary(), "id": "dev.opencode-go-rent-oci.provider", "binding": RENT_OCI_GO_BINDING}
 
 
 def expected_own_typellm_boundary() -> dict[str, Any]:
-    return {**expected_typellm_boundary(), "id": "dev.typellm-api-versapro-own-oci.provider",
-            "binding": OWN_TYPELLM_BINDING}
+    return {**expected_own_go_boundary(), "id": "dev.typellm-api-versapro-own-oci.provider",
+            "capability": "typellm-api", "binding": OWN_TYPELLM_BINDING}
 
 
 def expected_command_code_boundary() -> dict[str, Any]:
-    return {**expected_go_boundary(), "id": "dev.command-code-api-versapro-own-oci.provider",
+    return {**expected_own_go_boundary(), "id": "dev.command-code-api-versapro-own-oci.provider",
             "capability": "command-code-api", "binding": COMMAND_CODE_BINDING}
 
 
@@ -647,15 +614,13 @@ def expected_inputs() -> dict[str, dict[str, list[dict[str, str]]]]:
         },
         GO_PLANE: {
             "required_secrets": entries((GO_KEY, "opaque", "one_shot_ingress")),
-            "required_variables": entries((OCI_RECIPIENT, "age_recipient", "persistent"),
-                                          (OWN_GO_RECIPIENT, "age_recipient", "persistent"),
+            "required_variables": entries((OWN_GO_RECIPIENT, "age_recipient", "persistent"),
                                           (RENT_GO_RECIPIENT, "age_recipient", "persistent"),
                                           (RENT_OCI_GO_RECIPIENT, "age_recipient", "persistent")),
         },
         TYPELLM_PLANE: {
             "required_secrets": entries((TYPELLM_KEY, "opaque", "one_shot_ingress")),
-            "required_variables": entries((OCI_RECIPIENT, "age_recipient", "persistent"),
-                                          (OWN_TYPELLM_RECIPIENT, "age_recipient", "persistent")),
+            "required_variables": entries((OWN_TYPELLM_RECIPIENT, "age_recipient", "persistent")),
         },
         COMMAND_CODE_PLANE: {
             "required_secrets": entries((COMMAND_CODE_KEY, "opaque", "one_shot_ingress")),
@@ -875,9 +840,8 @@ def validate_contracts(root: Path = ROOT) -> dict[str, dict[str, dict[str, Any]]
         WORKER_GO_BOUNDARY, "repository.branch-policy", "dev.jev-api.provider", "dev.rent-tunnel.provider",
         "dev.jev-api-oci-dev.provider", "apps.voice-ui.consumer", "ops.voice-ui.consumer",
         "normal.consumer.path", "dev.rent-client.provider", "dev.rent-root.provider", WINDOWS_CONSUMER,
-        "dev.opencode-go-oci-dev.provider", "dev.opencode-go-versapro-own-oci.provider", "dev.opencode-go-rent.provider",
-        "dev.opencode-go-rent-oci.provider",
-        "dev.typellm-api-oci-dev.provider", "dev.typellm-api-versapro-own-oci.provider",
+        "dev.opencode-go-versapro-own-oci.provider", "dev.opencode-go-rent.provider",
+        "dev.opencode-go-rent-oci.provider", "dev.typellm-api-versapro-own-oci.provider",
         "dev.jev-api-versapro-own-oci.provider", "dev.command-code-api-versapro-own-oci.provider",
     } | set(expected_org_boundaries()), "provider-consumer boundary set differs")
     for identity, expected in expected_org_boundaries().items():
@@ -904,16 +868,12 @@ def validate_contracts(root: Path = ROOT) -> dict[str, dict[str, dict[str, Any]]
     require(boundary["dev.jev-api-oci-dev.provider"] == expected_oci_boundary(), "OCI dev provider boundary differs")
     require(boundary["dev.jev-api-versapro-own-oci.provider"] == expected_own_jev_boundary(),
             "Jev own OCI provider boundary differs")
-    require(boundary["dev.opencode-go-oci-dev.provider"] == expected_go_boundary(),
-            "OpenCode Go provider boundary differs")
     require(boundary["dev.opencode-go-versapro-own-oci.provider"] == expected_own_go_boundary(),
             "OpenCode Go own OCI provider boundary differs")
     require(boundary["dev.opencode-go-rent.provider"] == expected_rent_go_boundary(),
             "OpenCode Go rent provider boundary differs")
     require(boundary["dev.opencode-go-rent-oci.provider"] == expected_rent_oci_go_boundary(),
             "OpenCode Go rent.oci provider boundary differs")
-    require(boundary["dev.typellm-api-oci-dev.provider"] == expected_typellm_boundary(),
-            "TypeLLM OCI provider boundary differs")
     require(boundary["dev.typellm-api-versapro-own-oci.provider"] == expected_own_typellm_boundary(),
             "TypeLLM own OCI provider boundary differs")
     require(boundary["dev.command-code-api-versapro-own-oci.provider"] == expected_command_code_boundary(),

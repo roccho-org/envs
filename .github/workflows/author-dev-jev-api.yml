@@ -11,11 +11,9 @@ on:
           - jev-api
           - jev-api.oci-dev
           - jev-api.versapro-own-oci
-          - opencode-go.oci-dev
           - opencode-go.versapro-own-oci
           - opencode-go.rent
           - opencode-go.rent-oci
-          - typellm-api.oci-dev
           - typellm-api.versapro-own-oci
           - command-code-api.versapro-own-oci
           - opencode-go.pi-worker
@@ -102,13 +100,6 @@ jobs:
           VERSAPRO_OWN_OCI_AGE_RECIPIENT: ${{ vars.VERSAPRO_OWN_OCI_AGE_RECIPIENT }}
         run: '"$ENVS_EFFECT_BIN/envs-effect" --root "$GITHUB_WORKSPACE" author --target jev-api.versapro-own-oci'
 
-      - name: Author OpenCode Go OCI dev ciphertext
-        if: inputs.target == 'opencode-go.oci-dev'
-        env:
-          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
-          OCI_DEV_AGE_RECIPIENT: ${{ vars.OCI_DEV_AGE_RECIPIENT }}
-        run: '"$ENVS_EFFECT_BIN/envs-effect" --root "$GITHUB_WORKSPACE" author --target opencode-go.oci-dev'
-
       - name: Author OpenCode Go VersaPro own OCI ciphertext
         if: inputs.target == 'opencode-go.versapro-own-oci'
         env:
@@ -129,13 +120,6 @@ jobs:
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
           RENT_OCI_AGENTS_AGE_RECIPIENT: ${{ vars.RENT_OCI_AGENTS_AGE_RECIPIENT }}
         run: '"$ENVS_EFFECT_BIN/envs-effect" --root "$GITHUB_WORKSPACE" author --target opencode-go.rent-oci'
-
-      - name: Author TypeLLM OCI dev ciphertext
-        if: inputs.target == 'typellm-api.oci-dev'
-        env:
-          TYPELLM_API_KEY: ${{ secrets.TYPELLM_API_KEY }}
-          OCI_DEV_AGE_RECIPIENT: ${{ vars.OCI_DEV_AGE_RECIPIENT }}
-        run: '"$ENVS_EFFECT_BIN/envs-effect" --root "$GITHUB_WORKSPACE" author --target typellm-api.oci-dev'
 
       - name: Author TypeLLM VersaPro own OCI ciphertext
         if: inputs.target == 'typellm-api.versapro-own-oci'
