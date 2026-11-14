@@ -14,6 +14,8 @@ on:
           - opencode-go.versapro-own-oci
           - opencode-go.rent
           - opencode-go.rent-oci
+          - opencode-go.versa-pi-w
+          - opencode-go.versa-pi-r
           - typellm-api.versapro-own-oci
           - command-code-api.versapro-own-oci
           - opencode-go.pi-worker
@@ -120,6 +122,20 @@ jobs:
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
           RENT_OCI_AGENTS_AGE_RECIPIENT: ${{ vars.RENT_OCI_AGENTS_AGE_RECIPIENT }}
         run: '"$ENVS_EFFECT_BIN/envs-effect" --root "$GITHUB_WORKSPACE" author --target opencode-go.rent-oci'
+
+      - name: Author OpenCode Go pi pair (w) ciphertext
+        if: inputs.target == 'opencode-go.versa-pi-w'
+        env:
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          VERSA_PI_W_AGE_RECIPIENT: ${{ vars.VERSA_PI_W_AGE_RECIPIENT }}
+        run: '"$ENVS_EFFECT_BIN/envs-effect" --root "$GITHUB_WORKSPACE" author --target opencode-go.versa-pi-w'
+
+      - name: Author OpenCode Go pi pair (r) ciphertext
+        if: inputs.target == 'opencode-go.versa-pi-r'
+        env:
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          VERSA_PI_R_AGE_RECIPIENT: ${{ vars.VERSA_PI_R_AGE_RECIPIENT }}
+        run: '"$ENVS_EFFECT_BIN/envs-effect" --root "$GITHUB_WORKSPACE" author --target opencode-go.versa-pi-r'
 
       - name: Author TypeLLM VersaPro own OCI ciphertext
         if: inputs.target == 'typellm-api.versapro-own-oci'
