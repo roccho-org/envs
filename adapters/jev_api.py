@@ -132,6 +132,24 @@ def root_state_key_ok(key: str) -> bool:
             and all(segment not in ("", ".") for segment in key.split("/")))
 
 
+# The versa root (roccho-dev/mono#495): the declared Cloudflare root applied with standard OpenTofu on its own path of
+# the same GitHub state ref; its sensitive credentials output is sealed in memory into one envelope for one recipient.
+VERSA_PLANE = "dev.versa-root"
+VERSA_CONFIG = Path("providers/dev-versa-cloudflare/main.tf")
+VERSA_CIPHERTEXT = Path("ciphertexts/dev-versa-cloudflare.sops.yaml")
+VERSA_KEYS = ("VERSA_TUNNEL_TOKEN", "MUSE_ACCESS_CLIENT_ID", "MUSE_ACCESS_CLIENT_SECRET")
+VERSA_SECRETS = ("VERSA_CLOUDFLARE_API_TOKEN", "VERSA_STATE_PASSPHRASE", "VERSA_ACCESS_EMAIL")
+VERSA_RECIPIENT = "VERSA_HANDOFF_AGE_RECIPIENT"
+VERSA_STATE_BACKEND = {**ROOT_STATE_BACKEND, "state_path": "state/dev-versa-cloudflare.json",
+                       "lock_ref": "refs/heads/locks/state/dev-versa-cloudflare.json"}
+STATE_GIT_HOST = "https://github.com"
+# Upstream v0.1.12 answers 500 for a missing ref, so a first run creates the ref as one empty orphan commit, named as
+# the handoff commits are.
+STATE_REF_AUTHOR = {f"GIT_{role}_{field}": value for role in ("AUTHOR", "COMMITTER")
+                    for field, value in (("NAME", "roccho"), ("EMAIL", "40359643+roccho-dev@users.noreply.github.com"))}
+EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+
+
 # The windows slot rule (Get-RentAccessProblem) for each line: 1-1024 printable ASCII characters.
 SLOT_LINE = re.compile(r"^[!-~]{1,1024}$")
 WINDOWS_CONSUMER = "windows.rent.consumer"
@@ -694,6 +712,16 @@ def expected_inputs() -> dict[str, dict[str, list[dict[str, str]]]]:
                 (CLIENT_RECIPIENT, "age_recipient", "persistent"),
             ),
         },
+        # The versa root's own distinct slots: the email is a Secret so the public run log masks it.
+        VERSA_PLANE: {
+            "required_secrets": entries(*((name, "opaque", "persistent") for name in VERSA_SECRETS)),
+            "required_variables": entries(
+                ("VERSA_CLOUDFLARE_ACCOUNT_ID", "cloudflare_account_id", "persistent"),
+                ("VERSA_CLOUDFLARE_ZONE_ID", "cloudflare_zone_id", "persistent"),
+                ("VERSA_SERVICE_TOKEN_DURATION", "opaque", "persistent"),
+                (VERSA_RECIPIENT, "age_recipient", "persistent"),
+            ),
+        },
         LINODE_READ_PLANE: {
             "required_secrets": entries(("LINODE_API_TOKEN", "opaque", "persistent")),
             "required_variables": entries(),
@@ -733,7 +761,7 @@ def validate_contracts(root: Path = ROOT) -> dict[str, dict[str, dict[str, Any]]
     boundary = index(root / BOUNDARY)
 
     require(set(envs) == {
-        "dev.authoring", GO_PLANE, TYPELLM_PLANE, COMMAND_CODE_PLANE, WORKER_GO_PLANE, "dev.projection", "dev.runtime", RENT_PLANE, CLIENT_PLANE, ROOT_PLANE, LINODE_READ_PLANE,
+        "dev.authoring", GO_PLANE, TYPELLM_PLANE, COMMAND_CODE_PLANE, WORKER_GO_PLANE, "dev.projection", "dev.runtime", RENT_PLANE, CLIENT_PLANE, ROOT_PLANE, VERSA_PLANE, LINODE_READ_PLANE,
         "stg.projection", "stg.runtime", "prd.projection", "prd.runtime",
         "voice-ui.dev", "voice-ui.stg", "voice-ui.prd",
     }, "environment set differs")
@@ -755,7 +783,7 @@ def validate_contracts(root: Path = ROOT) -> dict[str, dict[str, dict[str, Any]]
         if row["kind"] != "envs.secretPlane.v1":
             continue
         declared = inputs.get(identity, {})
-        extra = {"state_backend"} if identity == ROOT_PLANE else set()
+        extra = {"state_backend"} if identity in (ROOT_PLANE, VERSA_PLANE) else set()
         require(set(row) == SECRET_PLANE_KEYS | set(declared) | extra, f"{identity} fields differ")
         require((row["github_environment"] is not None) == bool(declared), f"{identity} required inputs differ")
         for group, entries in declared.items():
@@ -841,6 +869,18 @@ def validate_contracts(root: Path = ROOT) -> dict[str, dict[str, dict[str, Any]]
         require(not any(name.startswith("R2_PARENT_") for name in names), f"{identity} requires the retired R2 parent token")
         if identity in (RENT_PLANE, ROOT_PLANE):
             require(not names & set(RENT_CLOUDFLARE_INPUTS.values()), f"{identity} reads a Pages/Mail Cloudflare slot")
+
+    # The versa root: its own state path on the same ref, and ACTIVE exactly while its one sealed envelope exists.
+    versa, versa_cipher = envs[VERSA_PLANE], root / VERSA_CIPHERTEXT
+    require(versa["github_environment"] == "dev-projection" and versa["owner"] == "envs"
+            and versa["source_kind"] == "provider_issued" and versa["target_kind"] == "public_sops"
+            and versa["state_backend"] == VERSA_STATE_BACKEND, f"{VERSA_PLANE} plane differs")
+    active = versa_cipher.is_file()
+    require(versa["migration_state"] == ("ACTIVE" if active else "NOT_CONFIGURED")
+            and versa["active_github_environment"] == ("dev-projection" if active else None),
+            f"{VERSA_PLANE} is ACTIVE exactly with its envelope")
+    if active:
+        validate_versa_ciphertext(versa_cipher.read_bytes(), None, None)
 
     linode = envs[LINODE_READ_PLANE]
     require(linode["github_environment"] == "dev-projection" and linode["owner"] == "envs"
@@ -972,6 +1012,14 @@ def validate_client_ciphertext(data: bytes, values: Sequence[bytes] | None, reci
     require(set(re.findall(r"(?m)^([^\s#][^:]*):", text)) == {*CLIENT_KEYS, "sops"}, "rent client ciphertext fields differ")
 
 
+def validate_versa_ciphertext(data: bytes, values: Sequence[bytes] | None, recipient: str | None) -> None:
+    for index, key in enumerate(VERSA_KEYS):
+        validate_ciphertext(data, None if values is None else values[index], None if recipient is None else [recipient], key=key)
+    text = data.decode("utf-8", errors="strict")
+    require(len(RECIPIENT_METADATA.findall(text)) == 1, "versa ciphertext must have exactly one recipient")
+    require(set(re.findall(r"(?m)^([^\s#][^:]*):", text)) == {*VERSA_KEYS, "sops"}, "versa ciphertext fields differ")
+
+
 def validate_oci_ciphertext(data: bytes, secret: bytes | None, recipient: str | None,
                             key: str = "JEV_API_KEY") -> None:
     require(key in {"JEV_API_KEY", GO_KEY, TYPELLM_KEY, COMMAND_CODE_KEY}, "OCI dev ciphertext key unsupported")
@@ -998,7 +1046,7 @@ def reject_live_values(root: Path, name: str, values: list[str],
         relative = path.relative_to(root).as_posix()
         data = path.read_bytes()
         if relative in {WORKER_GO_CIPHER.as_posix(), CIPHERTEXT.as_posix(), RENT_CIPHERTEXT.as_posix(), CLIENT_CIPHERTEXT.as_posix(),
-                        *(path.as_posix() for path in OCI_CIPHERTEXTS.values())}:
+                        VERSA_CIPHERTEXT.as_posix(), *(path.as_posix() for path in OCI_CIPHERTEXTS.values())}:
             data = without_recipient_metadata(data.decode("utf-8", errors="replace")).encode()
         for value in values:
             if value.encode() in data:
@@ -1039,6 +1087,9 @@ def gate(root: Path, contracts: dict[str, dict[str, dict[str, Any]]], plane: str
         if plane == WORKER_GO_PLANE and entry["name"] == "CLOUDFLARE_ACCOUNT_ID":
             require(value == WORKER_GO_TARGET["account_id"], "OpenCode Worker account differs")
             # This fixed public account identifier is allowed only in the declared target, adapter and receipt.
+            allowed_paths = (BINDINGS.as_posix(), WORKER_GO_HANDOFF.as_posix(), "adapters/jev_api.py")
+        if entry["name"] == "VERSA_CLOUDFLARE_ACCOUNT_ID":
+            # The versa account may be that same public Workers account; it is allowed only where that one already is.
             allowed_paths = (BINDINGS.as_posix(), WORKER_GO_HANDOFF.as_posix(), "adapters/jev_api.py")
         reject_live_values(root, entry["name"], live or [], allowed_paths)
     return values
@@ -1779,10 +1830,14 @@ def loopback_port() -> int:
         return probe.getsockname()[1]
 
 
-def root_backend_url(port: int) -> str:
+def state_repository(backend: Mapping[str, Any]) -> str:
+    return f"{STATE_GIT_HOST}/{backend['repository']}.git"
+
+
+def root_backend_url(port: int, backend: Mapping[str, Any] = ROOT_STATE_BACKEND) -> str:
     query = urllib.parse.urlencode({
-        "type": "git", "repository": f"https://github.com/{ROOT_STATE_BACKEND['repository']}.git",
-        "ref": ROOT_STATE_BACKEND["ref"].removeprefix("refs/heads/"), "state": ROOT_STATE_BACKEND["state_path"],
+        "type": "git", "repository": state_repository(backend),
+        "ref": backend["ref"].removeprefix("refs/heads/"), "state": backend["state_path"],
     })
     return f"http://127.0.0.1:{port}/?{query}"
 
@@ -1802,11 +1857,12 @@ def root_ref_principal(root: Path) -> str:
 
 
 def start_root_backend(tools: Mapping[str, str], home: Path, token: str, spawn: Spawn, local_get: LocalGet,
-                       sleep: Callable[[float], None]) -> tuple[Any, str, str]:
+                       sleep: Callable[[float], None],
+                       backend: Mapping[str, Any] = ROOT_STATE_BACKEND) -> tuple[Any, str, str]:
     # One transient upstream child on loopback for this one operation; only it receives the ref principal. Its GET is
     # the standard HTTP backend read: 200 with a body is PRESENT, 204 or 404 ABSENT, anything else UNKNOWN.
     port = loopback_port()
-    url = root_backend_url(port)
+    url = root_backend_url(port, backend)
     process = spawn([tools["terraform_backend_git"], "--address", f"127.0.0.1:{port}"],
                     clean_env(tools, {"HOME": str(home), "GIT_USERNAME": ROOT_STATE_GIT_USERNAME,
                                       ROOT_STATE_GIT_TOKEN: token}))
@@ -1915,6 +1971,91 @@ def rent_root_plan(root: Path = ROOT, *, runner: Runner = default_runner, spawn:
     require(result.returncode == 0, "rent-root backend-only plan is not empty or failed; no apply")
     progress["stage"] = "complete"
     return {"kind": "envs.rentRootPlan.v1", "status": "EMPTY_PLAN", "apply": "NOT_RUN", "saved_plan": "NONE"}
+
+
+def ensure_state_ref(root: Path, tools: Mapping[str, str], runner: Runner, home: Path,
+                     backend: Mapping[str, Any]) -> str:
+    # An existing ref is never touched. A missing one becomes one empty orphan commit through a create-only push (an
+    # empty lease), so a concurrent creator wins and this run refuses. Git uses the checkout's workflow credential.
+    url, ref = state_repository(backend), backend["ref"]
+    env = clean_env(tools, {"HOME": str(home), **STATE_REF_AUTHOR})
+    git = [tools["git"], "-C", str(root)]
+    probe = runner([*git, "ls-remote", "--exit-code", url, ref], None, env)
+    if probe.returncode == 0:
+        return "PRESENT"
+    require(probe.returncode == 2, "state ref is UNKNOWN")
+    commit = run_checked([*git, "commit-tree", EMPTY_TREE, "-m", "tofu-state"], env=env, runner=runner,
+                         label="state ref commit").stdout.decode().strip()
+    require(SHA40.fullmatch(commit) is not None, "state ref commit is UNKNOWN")
+    run_checked([*git, "push", f"--force-with-lease={ref}:", url, f"{commit}:{ref}"], env=env, runner=runner,
+                label="state ref push")
+    return "CREATED"
+
+
+def seal_versa_output(root: Path, tools: Mapping[str, str], value: Any, recipient: str, home: str, runner: Runner,
+                      progress: dict[str, str]) -> dict[str, Any]:
+    # The applied root's credentials stay in this process and reach sops on stdin only, for exactly one recipient;
+    # nothing is written before the envelope is sealed and validated.
+    client_id, secret = client_pair(value, root)
+    token = value["tunnel_token"]
+    require(isinstance(token, str) and TUNNEL_TOKEN.fullmatch(token) is not None, "root output has no valid tunnel token")
+    reject_live_values(root, "versa tunnel token", [token])
+    values = (token, client_id, secret)
+    payload = json.dumps(dict(zip(VERSA_KEYS, values)), separators=(",", ":")).encode() + b"\n"
+    data = run_checked([tools["sops"], "--encrypt", "--input-type", "json", "--output-type", "yaml", "/dev/stdin"],
+                       input_data=payload, env=clean_env(tools, {"SOPS_AGE_RECIPIENTS": recipient, "HOME": home}),
+                       runner=runner, label="SOPS encryption").stdout
+    validate_versa_ciphertext(data, [item.encode() for item in values], recipient)
+    progress["stage"] = "write"
+    (root / VERSA_CIPHERTEXT).parent.mkdir(parents=True, exist_ok=True)
+    (root / VERSA_CIPHERTEXT).write_bytes(data)
+    set_dev_active(root, True, (VERSA_PLANE,))
+    validate_contracts(root)
+    return {"kind": "envs.versaRootResult.v1", "status": "PASS", "ciphertext": VERSA_CIPHERTEXT.as_posix(),
+            "recipient_count": 1, "target_apply": "NOT_RUN", "client_access": "UNPROVED"}
+
+
+def versa_root(root: Path = ROOT, *, runner: Runner = default_runner, spawn: Spawn = default_spawn,
+               local_get: LocalGet = default_local_get, sleep: Callable[[float], None] = time.sleep,
+               progress: dict[str, str] | None = None) -> dict[str, Any]:
+    # Standard OpenTofu applies the versa root on its encrypted, locked GitHub-ref state and seals the credentials
+    # output for the one handoff recipient. A rerun converges on the same state and reseals; no destroy, import,
+    # unlock or retry. progress["stage"] names how far it got, for a closed failure line.
+    progress = {} if progress is None else progress
+    progress["stage"] = "gate"
+    contracts = validate_contracts(root)
+    tools = toolchain(root)
+    inputs = gate(root, contracts, VERSA_PLANE)
+    require(ROOT_PASSPHRASE.fullmatch(inputs["VERSA_STATE_PASSPHRASE"]) is not None,
+            f"{VERSA_PLANE}: VERSA_STATE_PASSPHRASE is not 64 lowercase hex")
+    for name in VERSA_SECRETS:
+        reject_live_values(root, name, [inputs[name]])
+    token = root_ref_principal(root)
+    home, work = root_scratch("envs-versa-root-")
+    (work / "main.tf").write_bytes((root / VERSA_CONFIG).read_bytes())
+    env = clean_env(tools, {
+        "CLOUDFLARE_API_TOKEN": inputs["VERSA_CLOUDFLARE_API_TOKEN"],
+        "TF_ENCRYPTION": encryption_config(ROOT_KEY_NAME, inputs["VERSA_STATE_PASSPHRASE"]),
+        "TF_VAR_account_id": inputs["VERSA_CLOUDFLARE_ACCOUNT_ID"], "TF_VAR_zone_id": inputs["VERSA_CLOUDFLARE_ZONE_ID"],
+        "TF_VAR_access_email": inputs["VERSA_ACCESS_EMAIL"],
+        "TF_VAR_service_token_duration": inputs["VERSA_SERVICE_TOKEN_DURATION"],
+        "TF_IN_AUTOMATION": "1", "TF_INPUT": "0", "HOME": str(home),
+    })
+    progress["stage"] = "state_ref"
+    ensure_state_ref(root, tools, runner, home, VERSA_STATE_BACKEND)
+    progress["stage"] = "backend"
+    process, url, _ = start_root_backend(tools, home, token, spawn, local_get, sleep, VERSA_STATE_BACKEND)
+    try:
+        progress["stage"] = "init"
+        tofu(tools, work, env, runner, "init", "-input=false", "-no-color", "-lock=true", *root_backend_config(url))
+        progress["stage"] = "apply"
+        tofu(tools, work, env, runner, "apply", "-input=false", "-auto-approve", "-no-color", "-lock=true")
+        progress["stage"] = "output"
+        value = output(tools, work, env, runner, "credentials", PROBE_CREDENTIALS)
+    finally:
+        stop(process)
+    progress["stage"] = "seal"
+    return seal_versa_output(root, tools, value, inputs[VERSA_RECIPIENT], str(home), runner, progress)
 
 
 # One bounded Cloudflare inventory page holds at most this many items; the route asks for exactly this page size.
@@ -2581,6 +2722,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     # S2 source composes the backend-only migration and empty-plan proof onto the GitHub ref; neither is activated.
     sub.add_parser("rent-root-migrate")
     sub.add_parser("rent-root-plan")
+    # Applies the versa root on its GitHub-ref state and seals its envelope; inputs only from the declared environment.
+    sub.add_parser("versa-root")
     sub.add_parser("linode-read-probe")
     project_parser = sub.add_parser("project")
     project_parser.add_argument("--target", choices=("jev-api", WORKER_GO_BINDING), default="jev-api")
@@ -2658,6 +2801,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(f"{label}=RED: {kind} at {progress.get('stage', 'source_guard')}", file=sys.stderr)
                 return 1
             print(json.dumps(result, sort_keys=True))
+        elif args.command == "versa-root":
+            # Only a closed kind and stage leave on failure: never a message, child output or value.
+            progress = {}
+            try:
+                result = versa_root(root, progress=progress)
+            except Exception as exc:
+                kind = failure_class(exc) if isinstance(exc, STATE_FAILURES) else "other"
+                print(f"VERSA_ROOT=RED: {kind} at {progress.get('stage', 'gate')}", file=sys.stderr)
+                return 1
+            print(json.dumps(result, indent=2, sort_keys=True))
         elif args.command == "linode-read-probe":
             print(json.dumps(linode_read_probe(root), indent=2, sort_keys=True))
             return 0
