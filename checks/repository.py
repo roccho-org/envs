@@ -19,6 +19,7 @@ REQUIRED_FILES = {
     ".github/workflows/author-dev-jev-api.yml",
     ".github/workflows/project-dev-jev-api.yml",
     ".github/workflows/project-dev-rent-tunnel.yml",
+    ".github/workflows/project-dev-versa-tunnel.yml",
     ".github/workflows/probe-dev-linode-read.yml",
     ".github/workflows/probe-dev-mail-routing.yml",
     ".github/workflows/operate-dev-mail-routing.yml",
@@ -43,6 +44,7 @@ REQUIRED_FILES = {
     "checks/test_mail_routing_root.py",
     "checks/test_rent_tunnel.py",
     "checks/test_repository.py",
+    "checks/test_versa_root.py",
     "contracts/bindings.jsonl",
     "contracts/environments.jsonl",
     "contracts/provider-consumer.jsonl",
@@ -50,6 +52,7 @@ REQUIRED_FILES = {
     "flake.lock",
     "flake.nix",
     "providers/dev-rent-cloudflare/main.tf",
+    "providers/dev-versa-cloudflare/main.tf",
 }
 ALLOWED_ROOTS = {
     ".github",
@@ -155,10 +158,12 @@ EFFECT_WORKFLOWS = {
     "project-dev-jev-api.yml": "dev.projection",
     # The rent workflow applies the persistent root; the standalone rent-tunnel GET stays an entry without a workflow.
     "project-dev-rent-tunnel.yml": "dev.rent-root",
+    "project-dev-versa-tunnel.yml": "dev.versa-root",
     "probe-dev-linode-read.yml": "dev.linode-read-probe",
     "probe-dev-mail-routing.yml": "dev.projection",
 }
 RENT_CONFIG = "providers/dev-rent-cloudflare/main.tf"
+VERSA_CONFIG = "providers/dev-versa-cloudflare/main.tf"
 # Host-specific GitHub Environments are retired: rent stage ingress lives in dev-projection. No workflow may select
 # one of these names, and nothing may declare it as a plane's Environment.
 RETIRED_ENVIRONMENTS = ("dev-rent-tunnel", "dev-rent-client", "dev-rent-access-probe")
@@ -224,11 +229,19 @@ PROBE_TOOL_CHECKS = (
     'HTTPS_PROXY=http://127.0.0.1:9 HTTP_PROXY=http://127.0.0.1:9 "$tool/tofu" -chdir="$rent" init -backend=false -input=false'
     ' -no-color',
     '"$tool/tofu" -chdir="$rent" validate -no-color',
+    'cp providers/dev-versa-cloudflare/main.tf "$versa/"',
+    'HTTPS_PROXY=http://127.0.0.1:9 HTTP_PROXY=http://127.0.0.1:9 "$tool/tofu" -chdir="$versa" init -backend=false'
+    ' -input=false -no-color',
+    '"$tool/tofu" -chdir="$versa" validate -no-color',
 )
+# The real versa roundtrip: the closure git, upstream state backend, tofu and sops on a loopback Git server.
+VERSA_ROUNDTRIP = ('"$tool/python3" -I checks/test_versa_root.py --tools "$tool"'
+                   ' --age-keygen "$RUNNER_TEMP/check-age/bin/age-keygen"')
 CIPHERTEXTS = {
     "ciphertexts/dev-mail-state.sops.json",
     "ciphertexts/dev-jev-api.sops.yaml", "ciphertexts/dev-rent-tunnel.sops.yaml", "ciphertexts/dev-jev-api.oci-dev.sops.yaml",
     "ciphertexts/dev-rent-client.sops.yaml",
+    "ciphertexts/dev-versa-cloudflare.sops.yaml",
     "ciphertexts/dev-opencode-go.versapro-own-oci.sops.yaml",
     "ciphertexts/dev-opencode-go.rent.sops.yaml",
     "ciphertexts/dev-opencode-go.rent-oci.sops.yaml",
@@ -282,7 +295,7 @@ CONSUMER_BINDING = (
     'test "$(tar -xOf "$art/content/envs-effect.tar" SOURCE)" = "$ENVS_SOURCE_SHA"',
 )
 EFFECT_ENV = re.compile(r"(?m)^ {10}([A-Za-z_][A-Za-z0-9_-]*):")
-EFFECT_STEP_KEYS = {"ref", "fetch-depth", "persist-credentials", "GH_TOKEN", "ENVS_SOURCE_SHA"}
+EFFECT_STEP_KEYS = {"ref", "fetch-depth", "persist-credentials", "GH_TOKEN", "GITHUB_TOKEN", "ENVS_SOURCE_SHA"}
 TOOLCHAIN_BIN = '"$RUNNER_TEMP/envs-effect/bin/'
 # The one step that obtains the provided artifact; check's clean-start job holds the canonical text.
 CONSUMER_STEP = "- name: Obtain provided effect artifact\n"
@@ -367,11 +380,12 @@ def check_shape(root: Path) -> None:
         require(bool(ciphertexts) and set(ciphertexts) <= CIPHERTEXTS, f"unexpected ciphertexts: {ciphertexts}")
 
     providers = sorted(path.relative_to(root).as_posix() for path in (root / "providers").rglob("*") if path.is_file())
-    require(providers == [RENT_CONFIG],
+    require(providers == [RENT_CONFIG, VERSA_CONFIG],
             f"unexpected provider files (state or lock files are never committed): {providers}")
     for retired in RETIRED_PATHS:
         require(not (root / retired).exists(), f"retired probe/state-proof path survives: {retired}")
-    check_rent_config((root / RENT_CONFIG).read_text(encoding="utf-8"))
+    for config in (RENT_CONFIG, VERSA_CONFIG):
+        check_root_config((root / config).read_text(encoding="utf-8"))
 
     handoff_dir = root / "handoffs"
     if handoff_dir.exists():
@@ -380,7 +394,7 @@ def check_shape(root: Path) -> None:
                 f"unexpected handoffs: {handoffs}")
 
 
-def check_rent_config(source: str) -> None:
+def check_root_config(source: str) -> None:
     # Only what native validate accepts and must not: a plaintext local backend, unenforced encryption, a credentials
     # output printed in clear, and a service-token lifetime fixed in source rather than bound at deployment. Comments
     # never count: /* */ blocks and #, // line comments are dropped first (this root has no # or // inside a string).
@@ -703,6 +717,7 @@ def check_workflows(root: Path, environments: dict[str, dict[str, Any]],
     require("checks/test_repository.py" in check, "check workflow must test repository oracle")
     require("checks/test_jev_api.py" in check, "check workflow must test Jev adapter")
     require("run: python3 checks/test_rent_tunnel.py\n" in check, "check workflow must test the rent tunnel adapter")
+    require("run: python3 checks/test_versa_root.py\n" in check, "check workflow must test the versa root entry")
     require("test_rent_access_probe" not in check and "test_rent_state_proof" not in check
             and "dev-rent-access-probe" not in check and "dev-rent-state-proof" not in check,
             "check workflow must not run the retired probe/state-proof roots or tests")
@@ -749,6 +764,7 @@ def check_workflows(root: Path, environments: dict[str, dict[str, Any]],
         CHECK_AGE_BUILD,
         REAL_ROUNDTRIP,
         OCI_ROUNDTRIP,
+        VERSA_ROUNDTRIP,
         'grep -qxF "$sops" "$RUNNER_TEMP/provided.list"',
         'grep -qxF "$curl" "$RUNNER_TEMP/provided.list"',
         'if grep -qxF "$age" "$RUNNER_TEMP/provided.list"; then',
@@ -867,9 +883,11 @@ def check_workflows(root: Path, environments: dict[str, dict[str, Any]],
         require("workflow_dispatch:" in text, f"{name}: manual dispatch missing")
         require("\n  push:" not in text and "\n  pull_request:" not in text, f"{name}: automatic effect trigger")
         require(f"environment: {row['github_environment']}" in text, f"{name}: static Environment differs")
-        expected_repo = "roccho-org/envs" if name in {"author-dev-jev-api.yml", "probe-dev-mail-routing.yml", "project-dev-rent-tunnel.yml"} else "roccho-dev/envs"
+        expected_repo = "roccho-org/envs" if name in {"author-dev-jev-api.yml", "probe-dev-mail-routing.yml", "project-dev-rent-tunnel.yml",
+                                                      "project-dev-versa-tunnel.yml"} else "roccho-dev/envs"
         require(f"github.repository == '{expected_repo}'" in text, f"{name}: repository guard missing")
-        require("github.ref_name == 'proposals'" in text, f"{name}: canonical ref guard missing")
+        require("github.ref_name == 'proposals'" in text or "github.ref == 'refs/heads/proposals'" in text,
+                f"{name}: canonical ref guard missing")
         require("ref: ${{ github.sha }}" in text, f"{name}: exact checkout missing")
         if name == "probe-dev-mail-routing.yml":
             # 'domain' contains the spelling 'main'; verify the actual branch.
@@ -940,6 +958,19 @@ def check_workflows(root: Path, environments: dict[str, dict[str, Any]],
                     for namespace, name in (("secrets", "RENT_CLOUDFLARE_API_TOKEN"), ("vars", "RENT_CLOUDFLARE_ACCOUNT_ID"),
                                             ("vars", "RENT_CLOUDFLARE_ZONE_ID"))),
             "rent must map only its distinct RENT_CLOUDFLARE_* slots, never the Pages/Mail Cloudflare slots")
+    # The versa job is active from the start: the rent inspect's native caller gate precedes its Environment, its only
+    # entry is versa-root, only that step gets the workflow token, and the handoff stages only its envelope and plane.
+    versa = texts["project-dev-versa-tunnel.yml"]
+    require(re.findall(r"(?m)^  ([A-Za-z0-9_-]+):$", versa[versa.find("\njobs:\n"):]) == ["project"]
+            and versa.count(RENT_INSPECT_GATE) == 1
+            and versa.find(RENT_INSPECT_GATE) < versa.find("    runs-on:") < versa.find("    environment: dev-projection\n")
+            and set(re.findall(r"(?<![).\w])inputs\.([A-Za-z0-9_]+)", versa)) == {"expected_source_sha"}
+            and versa.count(f"{EFFECT_ENTRY} ") == 2 and versa.count(f"run: '{EFFECT_ENTRY} versa-root'\n") == 1
+            and versa.count("GITHUB_TOKEN") == 1 and "          GITHUB_TOKEN: ${{ github.token }}\n" in versa
+            and versa.find("GITHUB_TOKEN") < versa.find(f"{EFFECT_ENTRY} versa-root")
+            and '"$tool/git" add ciphertexts/dev-versa-cloudflare.sops.yaml contracts/environments.jsonl\n' in versa
+            and versa.count('"$tool/git" add ') == 1,
+            "versa workflow must gate the native caller before its Environment, run only versa-root and hand off its envelope")
     linode = texts["probe-dev-linode-read.yml"]
     require(f"run: '{EFFECT_ENTRY} linode-read-probe'" in linode and linode.count(" linode-read-probe'") == 1,
             "Linode read workflow entry call missing")

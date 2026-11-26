@@ -207,6 +207,13 @@ THIRD_PARTY_NOTICES.md
 | `dev-projection/RENT_STATE_BUCKET` | variable | opaque | persistent |
 | `dev-projection/RENT_STATE_KEY` | variable | opaque | persistent |
 | `dev-projection/RENT_CLIENT_AGE_RECIPIENT` | variable | age_recipient | persistent |
+| `dev-projection/VERSA_CLOUDFLARE_API_TOKEN` | secret | opaque | persistent |
+| `dev-projection/VERSA_STATE_PASSPHRASE` | secret | opaque | persistent |
+| `dev-projection/VERSA_ACCESS_EMAIL` | secret | opaque | persistent |
+| `dev-projection/VERSA_CLOUDFLARE_ACCOUNT_ID` | variable | cloudflare_account_id | persistent |
+| `dev-projection/VERSA_CLOUDFLARE_ZONE_ID` | variable | cloudflare_zone_id | persistent |
+| `dev-projection/VERSA_SERVICE_TOKEN_DURATION` | variable | opaque | persistent |
+| `dev-projection/VERSA_HANDOFF_AGE_RECIPIENT` | variable | age_recipient | persistent |
 | `dev-projection/LINODE_API_TOKEN` | secret | opaque | persistent |
 | `stg-projection/JEV_API_KEY` | secret | opaque | persistent |
 | `stg-projection/CLOUDFLARE_API_TOKEN` | secret | opaque | persistent |
@@ -524,6 +531,50 @@ The disposable R2 state proof (`dev.rent-state-proof`, its manual workflow, buck
 
 - History: the parent token ID was once registered as a variable, and as a variable its value was printed in the public step log (run 36797154456); that exposure remains part of the record. A 2026-10-15 audit observed it registered in `dev-rent-access-probe` as a Secret, not a Variable. That observation is not evidence of rotation, revocation or cleanup, and no rent or projection plane reads it.
 
+## Dev versa Cloudflare root (roccho-dev/mono#495)
+
+`providers/dev-versa-cloudflare/main.tf` declares versa's public paths: one named Tunnel (`config_src = "cloudflare"`)
+with ingress `versa-ssh.roccho.com` → `ssh://127.0.0.1:22` and `versa.roccho.com` → `http://127.0.0.1:7824` (whose
+`origin_request.access` requires the `roccho` team's JWT for that application's `aud`) and a 404 catch-all; a proxied
+CNAME for each name; a self-hosted Access application for each; a Service Auth (`non_identity`) policy for exactly the
+one `muse` service token on `versa-ssh`; and an `allow` policy for exactly one email on `versa`. Names, origins and the
+team are source literals; the account, zone, email and token lifetime are inputs. The root pins the same provider
+(5.21.1) and is checked like the rent root: partial `backend "http" {}`, enforced state and plan encryption, a
+sensitive `credentials` output and a token lifetime that is an input.
+
+```text
+dev-projection/VERSA_CLOUDFLARE_API_TOKEN, VERSA_STATE_PASSPHRASE, VERSA_ACCESS_EMAIL, VERSA_CLOUDFLARE_ACCOUNT_ID,
+  VERSA_CLOUDFLARE_ZONE_ID, VERSA_SERVICE_TOKEN_DURATION, VERSA_HANDOFF_AGE_RECIPIENT + the job's GITHUB_TOKEN
+→ project-dev-versa-tunnel (manual; one dispatch by roccho-dev on the accepted proposals SHA) → envs-effect versa-root
+→ refs/heads/tofu-state created once if missing (one empty orphan commit, create-only push)
+→ loopback terraform-backend-git (only it gets GITHUB_TOKEN) → tofu init -lock=true → tofu apply
+   state/dev-versa-cloudflare.json on that ref, encrypted by TF_ENCRYPTION from VERSA_STATE_PASSPHRASE (k0);
+   lock ref refs/heads/locks/state/dev-versa-cloudflare.json while an operation holds it
+→ tofu output -json credentials, in memory → VERSA_TUNNEL_TOKEN, MUSE_ACCESS_CLIENT_ID, MUSE_ACCESS_CLIENT_SECRET
+   sealed to VERSA_HANDOFF_AGE_RECIPIENT → ciphertexts/dev-versa-cloudflare.sops.yaml + dev.versa-root ACTIVE
+→ ciphertext handoff PR
+```
+
+- Upstream v0.1.12 answers a missing ref with 500 (`reference not found`) and an existing ref without the state with
+  204, so the entry creates the ref only when `git ls-remote --exit-code` says it is absent, with
+  `--force-with-lease=refs/heads/tofu-state:`; an existing ref is never moved. That push and the handoff use the
+  checkout's workflow credential, which needs `contents: write`.
+- The email is a Secret, not a Variable: the public run log prints every step's Variables. Every Variable value is
+  RED before any child if it appears in a tracked file; the account may equal the Workers target account already in
+  source.
+- Failure prints `VERSA_ROOT=RED: <kind> at <stage>` only (`gate`, `state_ref`, `backend`, `init`, `apply`, `output`,
+  `seal`, `write`). Before `write` no file changes. A held lock refuses at `apply`; nothing is unlocked, destroyed,
+  imported or retried. A rerun converges on the same state and reseals the envelope.
+- The owner opens the envelope with the identity of `VERSA_HANDOFF_AGE_RECIPIENT` (`sops --decrypt --extract
+  '["VERSA_TUNNEL_TOKEN"]'`, and the two `MUSE_ACCESS_*` keys) and places each value out of band.
+- `checks/test_versa_root.py` proves the order, scoped environments, refusals and closed output with fakes; in `check`
+  it runs the closure git, terraform-backend-git, tofu and sops against a loopback Git server: the missing ref created
+  once, only `encrypted_data` anywhere in its history, the lock ref released, and the envelope opened only by its own
+  throwaway identity.
+
+Not proven here: a real Cloudflare apply, the token's scope, any dispatch, the handoff PR's checks, and placement or
+use on versa or muse.
+
 ## Effect toolchain
 
 ### Mail plan lifecycle
@@ -643,6 +694,7 @@ python3 checks/repository.py
 python3 checks/test_repository.py
 python3 checks/test_jev_api.py                                        # --sops/--age-keygen in check: real OCI roundtrip
 python3 checks/test_rent_tunnel.py
+python3 checks/test_versa_root.py                                      # --tools/--age-keygen in check: real ref roundtrip
 nix build .#effect-toolchain .#effect-artifact --no-update-lock-file   # check workflow, toolchain job
 nix build .#check-age --no-update-lock-file                             # check-only, real SOPS roundtrip
 ```

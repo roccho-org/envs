@@ -1237,7 +1237,7 @@ def main() -> None:
                  + declared.replace("  duration   = var.service_token_duration\n",
                                     '  /*\n  duration = "1h"\n  */\n  duration   = var.service_token_duration # bound at deployment\n'))
     assert '  /*\n  duration = "1h"\n  */\n' in commented, "rent fixture anchor missing"
-    repository.check_rent_config(commented)
+    repository.check_root_config(commented)
     expect_red(restore("providers/dev-rent-access-probe/.terraform.lock.hcl", "\n"))
     expect_red(replace_text("flake.nix", 'pkgs.cloudflared.version == "2026.6.1"', 'pkgs.cloudflared.version != ""'))
     expect_red(replace_text("flake.nix", "[ p.cloudflare_cloudflare ]", "[ p.cloudflare_cloudflare p.hashicorp_random ]"))
@@ -1315,6 +1315,35 @@ def main() -> None:
         (root / "ciphertexts/dev-rent-client.sops.yaml").write_text("RENT_ACCESS_CLIENT_ID: plain\n")
 
     expect_red(invalid_client_ciphertext)
+    # The versa root and its active workflow: gate before Environment, one entry, its own slots, its envelope only.
+    versa = ".github/workflows/project-dev-versa-tunnel.yml"
+    versa_entry = f"{repository.EFFECT_ENTRY} versa-root"
+    expect_red(replace_text(versa, "    if: ${{ github.repository == 'roccho-org/envs'", "    if: ${{ true || github.repository == 'roccho-org/envs'"))
+    expect_red(replace_text(versa, " && github.actor == 'roccho-dev'", ""))
+    expect_red(replace_text(versa, "environment: dev-projection", "environment: dev-authoring"))
+    expect_red(replace_text(versa, "on:\n  workflow_dispatch:\n", "on:\n  workflow_dispatch:\n  push:\n"))
+    expect_red(replace_text(versa, versa_entry, f"{repository.EFFECT_ENTRY} rent-root"))
+    expect_red(replace_text(versa, "${{ secrets.VERSA_ACCESS_EMAIL }}", "${{ vars.VERSA_ACCESS_EMAIL }}"))
+    expect_red(replace_text(versa, "${{ secrets.VERSA_CLOUDFLARE_API_TOKEN }}", "${{ secrets.RENT_CLOUDFLARE_API_TOKEN }}"))
+    expect_red(replace_text(versa, "          GITHUB_TOKEN: ${{ github.token }}\n", ""))
+    expect_red(replace_text(versa, "          GH_TOKEN: ${{ github.token }}\n", "          GH_TOKEN: ${{ github.token }}\n"
+                            "          GITHUB_TOKEN: ${{ github.token }}\n"))
+    expect_red(replace_text(versa, " contracts/environments.jsonl\n", " contracts/environments.jsonl README.md\n"))
+    versa_root = "providers/dev-versa-cloudflare/main.tf"
+    expect_red(replace_text(versa_root, '  backend "http" {}\n', '  backend "local" {}\n'))
+    expect_red(replace_text(versa_root, "    state {\n      enforced = true\n    }\n", ""))
+    expect_red(replace_text(versa_root, 'output "credentials" {\n  sensitive = true\n', 'output "credentials" {\n'))
+    expect_red(replace_text(versa_root, "  duration   = var.service_token_duration\n", '  duration   = "1h"\n'))
+    expect_red(replace_text(".github/workflows/check.yml", '"$tool/tofu" -chdir="$versa" validate -no-color\n', ""))
+    expect_red(replace_text(".github/workflows/check.yml", "run: python3 checks/test_versa_root.py\n", "run: 'true'\n"))
+    expect_red(replace_text(".github/workflows/check.yml", ' checks/test_versa_root.py --tools "$tool"', ' checks/test_versa_root.py'))
+    expect_red(mutate_plane("dev.versa-root", lambda row: row["state_backend"].update(
+        {"state_path": "state/dev-rent-cloudflare.json", "lock_ref": "refs/heads/locks/state/dev-rent-cloudflare.json"})))
+    expect_red(mutate_plane("dev.versa-root", lambda row: row.update(
+        {"migration_state": "ACTIVE", "active_github_environment": "dev-projection"})))
+    expect_red(mutate_plane("dev.versa-root", lambda row: row["required_secrets"].pop()))
+    expect_red(lambda root: (root / "ciphertexts/dev-versa-cloudflare.sops.yaml").write_text("VERSA_TUNNEL_TOKEN: plain\n"))
+    expect_red(lambda root: (root / "providers/dev-versa-cloudflare/terraform.tfstate").write_text("{}\n"))
     print("repository checker self-test: PASS")
 
 
