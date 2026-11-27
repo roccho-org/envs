@@ -138,7 +138,16 @@ VERSA_PLANE = "dev.versa-root"
 VERSA_CONFIG = Path("providers/dev-versa-cloudflare/main.tf")
 VERSA_CIPHERTEXT = Path("ciphertexts/dev-versa-cloudflare.sops.yaml")
 VERSA_KEYS = ("VERSA_TUNNEL_TOKEN", "MUSE_ACCESS_CLIENT_ID", "MUSE_ACCESS_CLIENT_SECRET")
-VERSA_SECRETS = ("VERSA_CLOUDFLARE_API_TOKEN", "VERSA_STATE_PASSPHRASE", "VERSA_ACCESS_EMAIL")
+VERSA_SECRETS = ("VERSA_CLOUDFLARE_API_TOKEN", "VERSA_STATE_PASSPHRASE", "VERSA_ACCESS_EMAILS")
+# The emails the versa HTTP application admits (the owner and whoever they invite): one Secret holding one email or
+# several separated by commas or newlines (LF or CRLF). Each entry is trimmed and must be one plain ASCII address: a
+# local part of atext and dots, exactly one "@", and a domain of two or more letter/digit/hyphen labels. An empty entry
+# (a stray separator, a blank line or a trailing newline), an invalid entry or a case-insensitive duplicate is RED.
+VERSA_EMAILS = "VERSA_ACCESS_EMAILS"
+VERSA_EMAIL_SEPARATOR = re.compile(r"\r\n|[,\n]")
+VERSA_EMAIL = re.compile(r"(?=[^@]{1,64}@)[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+)*"
+                         r"@(?=.{4,253}\Z)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+"
+                         r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?")
 VERSA_RECIPIENT = "VERSA_HANDOFF_AGE_RECIPIENT"
 VERSA_STATE_BACKEND = {**ROOT_STATE_BACKEND, "state_path": "state/dev-versa-cloudflare.json",
                        "lock_ref": "refs/heads/locks/state/dev-versa-cloudflare.json"}
@@ -1992,6 +2001,17 @@ def ensure_state_ref(root: Path, tools: Mapping[str, str], runner: Runner, home:
     return "CREATED"
 
 
+def versa_access_emails(raw: str) -> list[str]:
+    # Fail closed on the whole list; no message names an entry or its position.
+    emails = [item.strip() for item in VERSA_EMAIL_SEPARATOR.split(raw)]
+    require(bool(emails) and all(emails), f"{VERSA_PLANE}: {VERSA_EMAILS} has an empty entry")
+    require(all(VERSA_EMAIL.fullmatch(item) is not None for item in emails),
+            f"{VERSA_PLANE}: {VERSA_EMAILS} has an invalid email")
+    require(len({item.casefold() for item in emails}) == len(emails),
+            f"{VERSA_PLANE}: {VERSA_EMAILS} has a duplicate email")
+    return emails
+
+
 def seal_versa_output(root: Path, tools: Mapping[str, str], value: Any, recipient: str, home: str, runner: Runner,
                       progress: dict[str, str]) -> dict[str, Any]:
     # The applied root's credentials stay in this process and reach sops on stdin only, for exactly one recipient;
@@ -2028,8 +2048,10 @@ def versa_root(root: Path = ROOT, *, runner: Runner = default_runner, spawn: Spa
     inputs = gate(root, contracts, VERSA_PLANE)
     require(ROOT_PASSPHRASE.fullmatch(inputs["VERSA_STATE_PASSPHRASE"]) is not None,
             f"{VERSA_PLANE}: VERSA_STATE_PASSPHRASE is not 64 lowercase hex")
+    emails = versa_access_emails(inputs[VERSA_EMAILS])
     for name in VERSA_SECRETS:
-        reject_live_values(root, name, [inputs[name]])
+        # Each email is refused on its own as well, so one invited address in a tracked file is RED too.
+        reject_live_values(root, name, [inputs[name], *emails] if name == VERSA_EMAILS else [inputs[name]])
     token = root_ref_principal(root)
     home, work = root_scratch("envs-versa-root-")
     (work / "main.tf").write_bytes((root / VERSA_CONFIG).read_bytes())
@@ -2037,7 +2059,7 @@ def versa_root(root: Path = ROOT, *, runner: Runner = default_runner, spawn: Spa
         "CLOUDFLARE_API_TOKEN": inputs["VERSA_CLOUDFLARE_API_TOKEN"],
         "TF_ENCRYPTION": encryption_config(ROOT_KEY_NAME, inputs["VERSA_STATE_PASSPHRASE"]),
         "TF_VAR_account_id": inputs["VERSA_CLOUDFLARE_ACCOUNT_ID"], "TF_VAR_zone_id": inputs["VERSA_CLOUDFLARE_ZONE_ID"],
-        "TF_VAR_access_email": inputs["VERSA_ACCESS_EMAIL"],
+        "TF_VAR_access_emails": json.dumps(emails),
         "TF_VAR_service_token_duration": inputs["VERSA_SERVICE_TOKEN_DURATION"],
         "TF_IN_AUTOMATION": "1", "TF_INPUT": "0", "HOME": str(home),
     })

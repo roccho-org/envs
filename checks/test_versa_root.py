@@ -28,11 +28,27 @@ TOOLS = fixtures.TOOLS
 # Every live value is generated per run, so its bytes never appear in tracked source.
 RECIPIENT = fixtures.RECIPIENT
 REF_TOKEN = "ref-token-" + secrets.token_urlsafe(24)
+
+
+def email(role: str) -> str:
+    return f"{role}-{secrets.token_hex(6)}@versa.invalid"
+
+
+# The owner alone, and the owner with two invited people (comma, LF and CRLF lists, with blanks around entries).
+OWNER = email("owner")
+INVITED = [OWNER, email("guest"), email("peer")]
+LISTS = {
+    "single": (OWNER, [OWNER]),
+    "comma": (",".join(INVITED), INVITED),
+    "comma-spaced": (" " + " , ".join(INVITED) + "\t", INVITED),
+    "lf": ("\n".join(INVITED), INVITED),
+    "crlf": ("\r\n".join(INVITED), INVITED),
+}
 VALUES = {
     "ENVS_EFFECT_TOOLCHAIN": fixtures.MANIFEST,
     "VERSA_CLOUDFLARE_API_TOKEN": "cf-" + secrets.token_urlsafe(24),
     "VERSA_STATE_PASSPHRASE": secrets.token_hex(32),
-    "VERSA_ACCESS_EMAIL": f"owner-{secrets.token_hex(6)}@versa.invalid",
+    "VERSA_ACCESS_EMAILS": OWNER,
     "VERSA_CLOUDFLARE_ACCOUNT_ID": fixtures.ACCOUNT_ID,
     "VERSA_CLOUDFLARE_ZONE_ID": secrets.token_hex(16),
     "VERSA_SERVICE_TOKEN_DURATION": f"{secrets.randbelow(90000) + 10000}h",
@@ -42,7 +58,7 @@ VALUES = {
 TOKEN = secrets.token_urlsafe(180)
 CLIENT_ID = secrets.token_hex(16) + ".access"
 CLIENT_SECRET = secrets.token_hex(32)
-PRIVATE = [*(VALUES[name] for name in jev.VERSA_SECRETS), REF_TOKEN, TOKEN, CLIENT_ID, CLIENT_SECRET]
+PRIVATE = [*(VALUES[name] for name in jev.VERSA_SECRETS), *INVITED, REF_TOKEN, TOKEN, CLIENT_ID, CLIENT_SECRET]
 COMMIT = secrets.token_hex(20)
 
 
@@ -180,9 +196,9 @@ def test_apply() -> None:
         for _, stdin, env in tofu:
             assert stdin is None and set(env) - {"TMPDIR", "LANG", "LC_ALL", "CI"} == {
                 "PATH", "HOME", "CLOUDFLARE_API_TOKEN", "TF_ENCRYPTION", "TF_VAR_account_id", "TF_VAR_zone_id",
-                "TF_VAR_access_email", "TF_VAR_service_token_duration", "TF_IN_AUTOMATION", "TF_INPUT"}, sorted(env)
+                "TF_VAR_access_emails", "TF_VAR_service_token_duration", "TF_IN_AUTOMATION", "TF_INPUT"}, sorted(env)
             assert env["TF_ENCRYPTION"] == jev.encryption_config("k0", VALUES["VERSA_STATE_PASSPHRASE"])
-            assert env["TF_VAR_access_email"] == VALUES["VERSA_ACCESS_EMAIL"]
+            assert env["TF_VAR_access_emails"] == json.dumps([OWNER])
         (_, stdin, env), = [call for call in children.calls if call[0][0] == TOOLS["sops"]]
         assert set(env) <= {"HOME", "TMPDIR", "LANG", "LC_ALL", "CI", "PATH", "SOPS_AGE_RECIPIENTS"}
         assert env["SOPS_AGE_RECIPIENTS"] == RECIPIENT
@@ -194,10 +210,56 @@ def test_apply() -> None:
         assert not any(value in json.dumps(result) for value in PRIVATE)
 
 
+def test_emails() -> None:
+    # One email or several (comma, LF or CRLF separated, blanks trimmed) reach OpenTofu as one JSON list, in order.
+    for label, (raw, expected) in LISTS.items():
+        root, children, backend = fresh_root(), Children(ref=0), Backend()
+        result, stage = operate(root, children, backend, {**VALUES, "VERSA_ACCESS_EMAILS": raw})
+        assert result is not None and result["status"] == "PASS" and stage == "write", (label, stage)
+        tofu = [env for argv, _, env in children.calls if argv[0] == TOOLS["tofu"]]
+        assert len(tofu) == 3 and all(env["TF_VAR_access_emails"] == json.dumps(expected) for env in tofu), label
+        assert json.loads(tofu[0]["TF_VAR_access_emails"]) == expected, label
+        assert not any(value.encode() in data for value in [raw, *expected] for data in snapshot(root).values()), label
+    # Empty lists, empty entries (a stray comma, a blank line, a trailing newline), invalid addresses and duplicates
+    # (case-insensitive) are RED at gate before any child, and the message names no entry.
+    guest = INVITED[1]
+    for raw in ("", " ", ",", "\n", f"{OWNER},", f",{OWNER}", f"{OWNER},,{guest}", f"{OWNER}\n", f"{OWNER}\n\n{guest}",
+                f"{OWNER}, ,{guest}", f"{OWNER}\r\n", "owner@versa", "owner versa@x.invalid", "a@b@versa.invalid",
+                "@versa.invalid", "owner@", "owner@.invalid", "owner@versa..invalid", "own\x01er@versa.invalid",
+                f"{OWNER}\r{guest}", f"{OWNER};{guest}", f"{OWNER},{guest},{OWNER}", f"{OWNER},{OWNER.upper()}"):
+        root, children, backend = fresh_root(), Children(), Backend()
+        before = snapshot(root)
+        assert operate(root, children, backend, {**VALUES, "VERSA_ACCESS_EMAILS": raw}) == (None, "gate"), repr(raw)
+        assert not children.calls and not backend.spawned and snapshot(root) == before, repr(raw)
+        try:
+            jev.versa_access_emails(raw)
+        except jev.EnvsError as exc:
+            assert not any(value in str(exc) for value in (OWNER, guest)) and (raw.strip() == "" or raw not in str(exc))
+        else:
+            raise AssertionError(f"accepted {raw!r}")
+    # One invited address of the list in a tracked file is RED at gate, although the whole Secret is nowhere in Git.
+    for leaked in INVITED:
+        for raw in (LISTS["comma"][0], LISTS["lf"][0]):
+            root, children, backend = fresh_root(), Children(), Backend()
+            (root / "contracts/note.txt").write_text(f"invite {leaked}\n")
+            assert raw.encode() not in (root / "contracts/note.txt").read_bytes()
+            assert operate(root, children, backend, {**VALUES, "VERSA_ACCESS_EMAILS": raw}) == (None, "gate")
+            assert not children.calls and not backend.spawned
+            try:
+                jev.reject_live_values(root, jev.VERSA_EMAILS, [raw, *jev.versa_access_emails(raw)])
+            except jev.EnvsError as exc:
+                assert leaked not in str(exc) and "contracts/note.txt" in str(exc)
+            else:
+                raise AssertionError("an invited email stored in Git was accepted")
+
+
 def test_red() -> None:
     # Every refusal names its stage, stops the backend it started and leaves envelope and plane state unchanged.
     cases = (
-        ({"VERSA_ACCESS_EMAIL": ""}, Children(), Backend(), "gate", []),
+        ({"VERSA_ACCESS_EMAILS": ""}, Children(), Backend(), "gate", []),
+        ({"VERSA_ACCESS_EMAILS": f"{OWNER},"}, Children(), Backend(), "gate", []),
+        ({"VERSA_ACCESS_EMAILS": "owner@versa"}, Children(), Backend(), "gate", []),
+        ({"VERSA_ACCESS_EMAILS": f"{OWNER}\n{OWNER}"}, Children(), Backend(), "gate", []),
         ({"VERSA_STATE_PASSPHRASE": "z" * 64}, Children(), Backend(), "gate", []),
         ({"VERSA_HANDOFF_AGE_RECIPIENT": RECIPIENT + "," + RECIPIENT}, Children(), Backend(), "gate", []),
         ({jev.ROOT_STATE_GIT_TOKEN: ""}, Children(), Backend(), "gate", []),
@@ -253,11 +315,12 @@ def test_contract() -> None:
 def test_main() -> None:
     # The entry prints only a closed kind and stage on failure.
     root = fresh_root()
-    out, err = io.StringIO(), io.StringIO()
-    with fixtures.environment({**VALUES, "VERSA_ACCESS_EMAIL": ""}), contextlib.redirect_stdout(out), \
-            contextlib.redirect_stderr(err):
-        code = jev.main(["--root", str(root), "versa-root"])
-    assert (code, out.getvalue(), err.getvalue()) == (1, "", "VERSA_ROOT=RED: envs at gate\n"), (code, err.getvalue())
+    for raw in ("", f"{OWNER},{INVITED[1]},", f"{OWNER}\n{OWNER}"):
+        out, err = io.StringIO(), io.StringIO()
+        with fixtures.environment({**VALUES, "VERSA_ACCESS_EMAILS": raw}), contextlib.redirect_stdout(out), \
+                contextlib.redirect_stderr(err):
+            code = jev.main(["--root", str(root), "versa-root"])
+        assert (code, out.getvalue(), err.getvalue()) == (1, "", "VERSA_ROOT=RED: envs at gate\n"), (code, err.getvalue())
 
 
 class GitServer(http.server.BaseHTTPRequestHandler):
@@ -312,7 +375,61 @@ output "credentials" {
   sensitive = true
   value     = var.credentials
 }
+
+output "access_rules" {
+  sensitive = true
+  value     = [for e in var.access_emails : { email = { email = e } }]
+}
 """
+
+
+def access_variable() -> str:
+    # The exact access_emails declaration of the versa root (type, sensitivity and validation), not a copy.
+    source = (ROOT / jev.VERSA_CONFIG).read_text(encoding="utf-8")
+    start = source.index('variable "access_emails" {\n')
+    return source[start:source.index("\n}\n", start) + 3]
+
+
+def real_versa_root(tools: dict[str, str], work: Path, home: Path) -> None:
+    # The versa root itself under the closure tofu and its bundled cloudflare/cloudflare 5.21.1 with every network route
+    # closed: init and validate as check does, then a refresh-free plan on a local scratch backend (the partial HTTP
+    # backend line dropped) whose saved, encrypted plan shows one email include rule per listed address. Empty lists and
+    # empty entries are refused by the variable's own validation.
+    root = work / "versa-root"
+    root.mkdir()
+    source = (ROOT / jev.VERSA_CONFIG).read_text(encoding="utf-8")
+    assert source.count('  backend "http" {}\n') == 1 and 'version = "5.21.1"' in source
+    (root / "main.tf").write_text(source.replace('  backend "http" {}\n', ""), encoding="utf-8")
+    closed = {"HTTPS_PROXY": "http://127.0.0.1:9", "HTTP_PROXY": "http://127.0.0.1:9", "NO_PROXY": ""}
+    env = jev.clean_env(tools, {
+        **closed, "HOME": str(home), "TF_IN_AUTOMATION": "1", "TF_INPUT": "0",
+        "TF_ENCRYPTION": jev.encryption_config(jev.ROOT_KEY_NAME, secrets.token_hex(32)),
+        "CLOUDFLARE_API_TOKEN": "cf-" + secrets.token_urlsafe(30), "TF_VAR_account_id": secrets.token_hex(16),
+        "TF_VAR_zone_id": secrets.token_hex(16), "TF_VAR_service_token_duration": "8760h"})
+    jev.tofu(tools, root, env, jev.default_runner, "init", "-input=false", "-no-color")
+    jev.tofu(tools, root, env, jev.default_runner, "validate", "-no-color")
+    lock = (root / ".terraform.lock.hcl").read_text(encoding="utf-8")
+    assert 'provider "registry.opentofu.org/cloudflare/cloudflare" {\n  version     = "5.21.1"' in lock, "provider is not 5.21.1"
+    for label, (_, expected) in LISTS.items():
+        plan = root / f"{label}.tfplan"
+        vars_env = {**env, "TF_VAR_access_emails": json.dumps(expected)}
+        jev.tofu(tools, root, vars_env, jev.default_runner, "plan", "-input=false", "-no-color", "-refresh=false",
+                 "-lock=false", f"-out={plan}")
+        shown = json.loads(jev.tofu(tools, root, vars_env, jev.default_runner, "show", "-json", "-no-color", str(plan)))
+        http, = [change["change"] for change in shown["resource_changes"]
+                 if change["address"] == "cloudflare_zero_trust_access_policy.http"]
+        assert http["actions"] == ["create"] and http["after"]["decision"] == "allow", label
+        # The provider schema lists every rule kind and keeps include as a set: exactly the email kind is set, one rule
+        # per listed address (order is the provider's own).
+        include = http["after"]["include"]
+        assert sorted(rule["email"]["email"] for rule in include) == sorted(expected), label
+        assert all(value is None for rule in include for kind, value in rule.items() if kind != "email"), label
+        plan.unlink()
+    for bad in ([], [""], [OWNER, " "]):
+        refused = run([tools["tofu"], f"-chdir={root}", "plan", "-input=false", "-no-color", "-refresh=false",
+                       "-lock=false"], {**env, "TF_VAR_access_emails": json.dumps(bad)})
+        assert refused.returncode != 0 and b"access_emails must hold at least one email" in refused.stderr, bad
+    assert not (root / "terraform.tfstate").exists(), "a plan wrote state"
 
 
 def run(argv: list[str], env: dict[str, str]) -> subprocess.CompletedProcess[bytes]:
@@ -353,11 +470,13 @@ def real_roundtrip(bin_dir: str, keygen_bin: str) -> None:
         created = refs()
         assert set(created) == {"refs/heads/tofu-state"}
         assert jev.ensure_state_ref(root, tools, jev.default_runner, home, backend) == "PRESENT" and refs() == created
+        real_versa_root(tools, work, home)
         fixture = work / "root"
         fixture.mkdir()
-        (fixture / "main.tf").write_text(ROOT_FIXTURE, encoding="utf-8")
+        (fixture / "main.tf").write_text(ROOT_FIXTURE + "\n" + access_variable(), encoding="utf-8")
         env = jev.clean_env(tools, {
             "HOME": str(home), "TF_IN_AUTOMATION": "1", "TF_INPUT": "0", "TF_VAR_credentials": credentials().decode(),
+            "TF_VAR_access_emails": json.dumps(INVITED),
             "TF_ENCRYPTION": jev.encryption_config(jev.ROOT_KEY_NAME, secrets.token_hex(32))})
         states = []
         for _ in range(2):
@@ -370,6 +489,8 @@ def real_roundtrip(bin_dir: str, keygen_bin: str) -> None:
                 jev.tofu(tools, fixture, env, jev.default_runner, "apply", "-input=false", "-auto-approve", "-no-color",
                          "-lock=true")
                 value = jev.output(tools, fixture, env, jev.default_runner, "credentials", jev.PROBE_CREDENTIALS)
+                rules = json.loads(jev.tofu(tools, fixture, env, jev.default_runner, "output", "-json", "access_rules"))
+                assert rules == [{"email": {"email": item}} for item in INVITED], "access rules differ"
             finally:
                 jev.stop(process)
         assert states == ["ABSENT", "PRESENT"], states
@@ -378,7 +499,8 @@ def real_roundtrip(bin_dir: str, keygen_bin: str) -> None:
         stored = run([tools["git"], "--git-dir", str(bare), "show", "tofu-state:" + backend["state_path"]], base)
         history = run([tools["git"], "--git-dir", str(bare), "log", "-p", "--all"], base)
         assert stored.returncode == 0 and "encrypted_data" in json.loads(stored.stdout), "state ref is not encrypted"
-        assert not any(value_.encode() in history.stdout for value_ in (TOKEN, CLIENT_ID, CLIENT_SECRET)), "plaintext state"
+        assert not any(value_.encode() in history.stdout for value_ in (TOKEN, CLIENT_ID, CLIENT_SECRET, *INVITED)), \
+            "plaintext state"
         assert not (fixture / "terraform.tfstate").exists(), "state was kept locally"
         # The production sealer turns the real output into the envelope that only its one identity opens.
         identities = {}
@@ -402,7 +524,8 @@ def real_roundtrip(bin_dir: str, keygen_bin: str) -> None:
             key = work / f"{name}.key"
             if key.is_file() and not key.is_symlink():
                 key.unlink()
-    print(f"real versa state ref and envelope: PASS (git, terraform-backend-git, tofu and sops from {bin_dir})")
+    print("real versa root plan with an email list (cloudflare 5.21.1), state ref and envelope: PASS "
+          f"(git, terraform-backend-git, tofu and sops from {bin_dir})")
 
 
 def main() -> None:
@@ -414,6 +537,7 @@ def main() -> None:
     try:
         jev.validate_contracts(ROOT)
         test_apply()
+        test_emails()
         test_red()
         test_contract()
         test_main()

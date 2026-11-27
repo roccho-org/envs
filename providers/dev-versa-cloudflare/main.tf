@@ -1,6 +1,6 @@
 # The versa Cloudflare root: one named Tunnel for versa with its two public names, their DNS records, a self-hosted
 # Access application and policy for each name, and the one service token for muse. versa-ssh admits only that token
-# (Service Auth); versa admits only the bound identity, and cloudflared also requires that application's Access JWT.
+# (Service Auth); versa admits only the bound email list, and cloudflared also requires that application's Access JWT.
 #
 # Applied only by the effect entry `versa-root` from the manual project-dev-versa-tunnel workflow; CI only validates it.
 # Its state holds the Tunnel token and the service-token secret, encrypted. Nothing here adopts, imports or moves an
@@ -37,10 +37,16 @@ variable "zone_id" {
   type = string
 }
 
-# The one identity the versa HTTP application admits; bound at deployment, never written in source.
-variable "access_email" {
-  type      = string
+# The emails the versa HTTP application admits through SSO for read/write: the owner and the people they invite. Bound
+# at deployment from one Secret, never written in source; at least one, and no empty entry.
+variable "access_emails" {
+  type      = list(string)
   sensitive = true
+
+  validation {
+    condition     = length(var.access_emails) > 0 && alltrue([for e in var.access_emails : trimspace(e) != ""])
+    error_message = "access_emails must hold at least one email and no empty entry."
+  }
 }
 
 # The service token's lifetime is a deployment decision (rotation and delivery are later gates); no default.
@@ -105,12 +111,13 @@ resource "cloudflare_zero_trust_access_policy" "ssh" {
   include    = [{ service_token = { token_id = cloudflare_zero_trust_access_service_token.muse.id } }]
 }
 
-# Exactly the bound identity; no group, domain or everyone rule.
+# Exactly the bound emails, one include rule each (Access ORs include rules: any listed email is admitted); no group,
+# domain or everyone rule.
 resource "cloudflare_zero_trust_access_policy" "http" {
   account_id = var.account_id
   name       = "versa"
   decision   = "allow"
-  include    = [{ email = { email = var.access_email } }]
+  include    = [for e in var.access_emails : { email = { email = e } }]
 }
 
 resource "cloudflare_zero_trust_access_application" "ssh" {
