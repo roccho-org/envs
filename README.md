@@ -542,9 +542,9 @@ team are source literals; the account, zone, email and token lifetime are inputs
 (5.21.1) and is checked like the rent root: partial `backend "http" {}`, enforced state and plan encryption, a
 sensitive `credentials` output and a token lifetime that is an input.
 
-The same Tunnel also carries rent's two SSH paths, with no connector on rent: `versa-rent-oci.roccho.com` →
-`ssh://rent.home.arpa:2224` and `versa-rent-sandbox.roccho.com` → `ssh://rent.home.arpa:2223` (no `origin_request`),
-each with a proxied CNAME and its own self-hosted Access application (`versa-rent-oci`, `versa-rent-sandbox`) that
+The same Tunnel also carries rent's two SSH paths, with no connector on rent: `rent-oci.roccho.com` →
+`ssh://rent.home.arpa:2224` and `rent-sandbox.roccho.com` → `ssh://rent.home.arpa:2223` (no `origin_request`),
+each with a proxied CNAME and its own self-hosted Access application (`rent-oci`, `rent-sandbox`) that
 shares the reusable `ssh` Service Auth policy, so the one `muse` token admits all three SSH names. `rent.home.arpa` is
 declared in `/etc/hosts` by mono's `versapro.nix`, so no LAN address is in this repository. The seven `dev-projection`
 inputs below and the three-key handoff envelope are unchanged.

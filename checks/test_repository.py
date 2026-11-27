@@ -1341,7 +1341,7 @@ def main() -> None:
     expect_red(replace_text(versa_root, '      { service = "http_status:404" },\n',
                             '      { service = "http_status:404" },\n      { hostname = "x.roccho.com", service = "ssh://127.0.0.1:22" },\n'))
     expect_red(replace_text(versa_root, ", values(local.rent)))", "))"))
-    expect_red(replace_text(versa_root, '    sandbox = "versa-rent-sandbox.roccho.com"\n', ""))
+    expect_red(replace_text(versa_root, '    sandbox = "rent-sandbox.roccho.com"\n', ""))
     expect_red(replace_text(versa_root, '  for_each   = local.rent\n', '  for_each   = { oci = local.rent.oci }\n'))
     expect_red(replace_text(versa_root, 'policies   = [{ id = cloudflare_zero_trust_access_policy.ssh.id, precedence = 1 }]\n}\n\nresource "cloudflare_zero_trust_access_application" "http"',
                             'policies   = [{ id = cloudflare_zero_trust_access_policy.http.id, precedence = 1 }]\n}\n\nresource "cloudflare_zero_trust_access_application" "http"'))

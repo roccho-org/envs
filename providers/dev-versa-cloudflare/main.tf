@@ -1,6 +1,6 @@
 # The versa Cloudflare root: one named Tunnel for versa with its four public names, their DNS records, a self-hosted
 # Access application for each name, and the one service token for muse. versa-ssh and the two rent SSH names
-# (versa-rent-oci, versa-rent-sandbox) share one reusable Service Auth policy that admits only that token; versa admits
+# (rent-oci, rent-sandbox) share one reusable Service Auth policy that admits only that token; versa admits
 # only the bound identity, and cloudflared also requires that application's Access JWT. The rent names reach rent's two
 # LAN relays through versa; rent itself runs no connector.
 #
@@ -54,8 +54,8 @@ locals {
   ssh  = "versa-ssh.roccho.com"
   http = "versa.roccho.com"
   rent = {
-    oci     = "versa-rent-oci.roccho.com"
-    sandbox = "versa-rent-sandbox.roccho.com"
+    oci     = "rent-oci.roccho.com"
+    sandbox = "rent-sandbox.roccho.com"
   }
 }
 
@@ -135,7 +135,7 @@ resource "cloudflare_zero_trust_access_application" "ssh" {
 resource "cloudflare_zero_trust_access_application" "rent" {
   for_each   = local.rent
   account_id = var.account_id
-  name       = "versa-rent-${each.key}"
+  name       = "rent-${each.key}"
   domain     = each.value
   type       = "self_hosted"
   policies   = [{ id = cloudflare_zero_trust_access_policy.ssh.id, precedence = 1 }]

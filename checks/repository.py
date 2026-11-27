@@ -418,13 +418,13 @@ def check_root_config(source: str) -> None:
 # a LAN address), then the catch-all.
 VERSA_INGRESS = ["ssh://127.0.0.1:22", "http://127.0.0.1:7824", "ssh://rent.home.arpa:2224",
                  "ssh://rent.home.arpa:2223", "http_status:404"]
-VERSA_RENT_NAMES = ('  rent = {\n    oci     = "versa-rent-oci.roccho.com"\n'
-                    '    sandbox = "versa-rent-sandbox.roccho.com"\n  }\n')
+VERSA_RENT_NAMES = ('  rent = {\n    oci     = "rent-oci.roccho.com"\n'
+                    '    sandbox = "rent-sandbox.roccho.com"\n  }\n')
 VERSA_RENT_ROUTES = ('      { hostname = local.rent.oci, service = "ssh://rent.home.arpa:2224" },\n'
                      '      { hostname = local.rent.sandbox, service = "ssh://rent.home.arpa:2223" },\n'
                      '      { service = "http_status:404" },\n    ]\n')
 VERSA_RENT_APP = ('resource "cloudflare_zero_trust_access_application" "rent" {\n  for_each   = local.rent\n'
-                  '  account_id = var.account_id\n  name       = "versa-rent-${each.key}"\n  domain     = each.value\n'
+                  '  account_id = var.account_id\n  name       = "rent-${each.key}"\n  domain     = each.value\n'
                   '  type       = "self_hosted"\n'
                   '  policies   = [{ id = cloudflare_zero_trust_access_policy.ssh.id, precedence = 1 }]\n}\n')
 
