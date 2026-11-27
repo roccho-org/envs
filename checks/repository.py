@@ -386,6 +386,7 @@ def check_shape(root: Path) -> None:
         require(not (root / retired).exists(), f"retired probe/state-proof path survives: {retired}")
     for config in (RENT_CONFIG, VERSA_CONFIG):
         check_root_config((root / config).read_text(encoding="utf-8"))
+    check_versa_access((root / VERSA_CONFIG).read_text(encoding="utf-8"))
 
     handoff_dir = root / "handoffs"
     if handoff_dir.exists():
@@ -411,6 +412,23 @@ def check_root_config(source: str) -> None:
     require('variable "service_token_duration" {\n  type = string\n}\n' in text
             and durations == ["var.service_token_duration"],
             "the service-token duration must be a required input with no default")
+
+
+# The versa HTTP application admits a deployment-bound email list (VERSA_ACCESS_EMAILS as TF_VAR_access_emails): a
+# sensitive list(string) refused when empty or holding an empty entry, and one email include rule per entry.
+VERSA_ACCESS_VARIABLE = ('variable "access_emails" {\n  type      = list(string)\n  sensitive = true\n\n  validation {\n'
+                         '    condition     = length(var.access_emails) > 0 && alltrue([for e in var.access_emails : '
+                         'trimspace(e) != ""])\n')
+VERSA_ACCESS_INCLUDE = "  include    = [for e in var.access_emails : { email = { email = e } }]\n"
+
+
+def check_versa_access(source: str) -> None:
+    text = re.sub(r"(?m)[ \t]*(#|//).*$", "", re.sub(r"(?s)/\*.*?\*/", "", source))
+    includes = re.findall(r"(?m)^[ \t]*include[ \t]*=.*$", text)
+    require(text.count(VERSA_ACCESS_VARIABLE) == 1 and text.count('variable "access_') == 1
+            and text.count(VERSA_ACCESS_INCLUDE) == 1 and len(includes) == 2
+            and text.count("var.access_emails") == 3 and "@" not in text,
+            "versa root must admit only the sensitive, non-empty access_emails list, one email rule per entry")
 
 
 def check_text(root: Path) -> None:

@@ -209,7 +209,7 @@ THIRD_PARTY_NOTICES.md
 | `dev-projection/RENT_CLIENT_AGE_RECIPIENT` | variable | age_recipient | persistent |
 | `dev-projection/VERSA_CLOUDFLARE_API_TOKEN` | secret | opaque | persistent |
 | `dev-projection/VERSA_STATE_PASSPHRASE` | secret | opaque | persistent |
-| `dev-projection/VERSA_ACCESS_EMAIL` | secret | opaque | persistent |
+| `dev-projection/VERSA_ACCESS_EMAILS` | secret | opaque | persistent |
 | `dev-projection/VERSA_CLOUDFLARE_ACCOUNT_ID` | variable | cloudflare_account_id | persistent |
 | `dev-projection/VERSA_CLOUDFLARE_ZONE_ID` | variable | cloudflare_zone_id | persistent |
 | `dev-projection/VERSA_SERVICE_TOKEN_DURATION` | variable | opaque | persistent |
@@ -537,15 +537,18 @@ The disposable R2 state proof (`dev.rent-state-proof`, its manual workflow, buck
 with ingress `versa-ssh.roccho.com` → `ssh://127.0.0.1:22` and `versa.roccho.com` → `http://127.0.0.1:7824` (whose
 `origin_request.access` requires the `roccho` team's JWT for that application's `aud`) and a 404 catch-all; a proxied
 CNAME for each name; a self-hosted Access application for each; a Service Auth (`non_identity`) policy for exactly the
-one `muse` service token on `versa-ssh`; and an `allow` policy for exactly one email on `versa`. Names, origins and the
-team are source literals; the account, zone, email and token lifetime are inputs. The root pins the same provider
-(5.21.1) and is checked like the rent root: partial `backend "http" {}`, enforced state and plan encryption, a
-sensitive `credentials` output and a token lifetime that is an input.
+one `muse` service token on `versa-ssh`; and an `allow` policy on `versa` with one email include rule per entry of the
+`access_emails` list (the owner and the people they invite, each admitted through SSO for read/write; Access ORs the
+rules). Names, origins and the team are source literals; the account, zone, email list and token lifetime are inputs.
+The root pins the same provider (5.21.1) and is checked like the rent root: partial `backend "http" {}`, enforced state
+and plan encryption, a sensitive `credentials` output and a token lifetime that is an input; `access_emails` is a
+sensitive `list(string)` that refuses an empty list or entry.
 
 ```text
-dev-projection/VERSA_CLOUDFLARE_API_TOKEN, VERSA_STATE_PASSPHRASE, VERSA_ACCESS_EMAIL, VERSA_CLOUDFLARE_ACCOUNT_ID,
+dev-projection/VERSA_CLOUDFLARE_API_TOKEN, VERSA_STATE_PASSPHRASE, VERSA_ACCESS_EMAILS, VERSA_CLOUDFLARE_ACCOUNT_ID,
   VERSA_CLOUDFLARE_ZONE_ID, VERSA_SERVICE_TOKEN_DURATION, VERSA_HANDOFF_AGE_RECIPIENT + the job's GITHUB_TOKEN
 → project-dev-versa-tunnel (manual; one dispatch by roccho-dev on the accepted proposals SHA) → envs-effect versa-root
+→ gate: VERSA_ACCESS_EMAILS (one email, or a comma/newline list) → TF_VAR_access_emails (JSON list, environment only)
 → refs/heads/tofu-state created once if missing (one empty orphan commit, create-only push)
 → loopback terraform-backend-git (only it gets GITHUB_TOKEN) → tofu init -lock=true → tofu apply
    state/dev-versa-cloudflare.json on that ref, encrypted by TF_ENCRYPTION from VERSA_STATE_PASSPHRASE (k0);
@@ -559,18 +562,27 @@ dev-projection/VERSA_CLOUDFLARE_API_TOKEN, VERSA_STATE_PASSPHRASE, VERSA_ACCESS_
   204, so the entry creates the ref only when `git ls-remote --exit-code` says it is absent, with
   `--force-with-lease=refs/heads/tofu-state:`; an existing ref is never moved. That push and the handoff use the
   checkout's workflow credential, which needs `contents: write`.
-- The email is a Secret, not a Variable: the public run log prints every step's Variables. Every Variable value is
-  RED before any child if it appears in a tracked file; the account may equal the Workers target account already in
+- `VERSA_ACCESS_EMAILS` holds one email, or several separated by commas or newlines (LF or CRLF); blanks around an
+  entry are trimmed. At `gate`, before any child, an empty entry (a stray or trailing comma, a blank line, a trailing
+  newline), an entry that is not one plain ASCII address (exactly one `@`, a non-empty local part, a domain of two or
+  more labels, no blank or control character) or a case-insensitive duplicate is RED; the message names no entry. The
+  root's `access_emails` variable is sensitive and its validation refuses an empty list or entry as well.
+- The email list is a Secret, not a Variable: the public run log prints every step's Variables, and no address is
+  written in source. The whole Secret and each of its emails on its own are RED before any child if they appear in a
+  tracked file. Every Variable value is RED likewise; the account may equal the Workers target account already in
   source.
 - Failure prints `VERSA_ROOT=RED: <kind> at <stage>` only (`gate`, `state_ref`, `backend`, `init`, `apply`, `output`,
   `seal`, `write`). Before `write` no file changes. A held lock refuses at `apply`; nothing is unlocked, destroyed,
   imported or retried. A rerun converges on the same state and reseals the envelope.
 - The owner opens the envelope with the identity of `VERSA_HANDOFF_AGE_RECIPIENT` (`sops --decrypt --extract
   '["VERSA_TUNNEL_TOKEN"]'`, and the two `MUSE_ACCESS_*` keys) and places each value out of band.
-- `checks/test_versa_root.py` proves the order, scoped environments, refusals and closed output with fakes; in `check`
-  it runs the closure git, terraform-backend-git, tofu and sops against a loopback Git server: the missing ref created
-  once, only `encrypted_data` anywhere in its history, the lock ref released, and the envelope opened only by its own
-  throwaway identity.
+- `checks/test_versa_root.py` proves the order, scoped environments, refusals and closed output with fakes, and the
+  email list: one email and comma, LF and CRLF lists reach OpenTofu as one JSON list, and every malformed list or one
+  invited email stored in a tracked file is RED at `gate`. In `check` it plans the versa root itself with the closure
+  tofu and cloudflare/cloudflare 5.21.1, network closed, for one and several emails (one email include rule each; an
+  empty list or entry refused by the variable), and runs the closure git, terraform-backend-git, tofu and sops against
+  a loopback Git server: the missing ref created once, only `encrypted_data` anywhere in its history (no email either),
+  the lock ref released, and the envelope opened only by its own throwaway identity.
 
 Not proven here: a real Cloudflare apply, the token's scope, any dispatch, the handoff PR's checks, and placement or
 use on versa or muse.

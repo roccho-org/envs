@@ -1323,7 +1323,10 @@ def main() -> None:
     expect_red(replace_text(versa, "environment: dev-projection", "environment: dev-authoring"))
     expect_red(replace_text(versa, "on:\n  workflow_dispatch:\n", "on:\n  workflow_dispatch:\n  push:\n"))
     expect_red(replace_text(versa, versa_entry, f"{repository.EFFECT_ENTRY} rent-root"))
-    expect_red(replace_text(versa, "${{ secrets.VERSA_ACCESS_EMAIL }}", "${{ vars.VERSA_ACCESS_EMAIL }}"))
+    expect_red(replace_text(versa, "${{ secrets.VERSA_ACCESS_EMAILS }}", "${{ vars.VERSA_ACCESS_EMAILS }}"))
+    expect_red(replace_text(versa, "VERSA_ACCESS_EMAILS: ${{ secrets.VERSA_ACCESS_EMAILS }}",
+                            "VERSA_ACCESS_EMAIL: ${{ secrets.VERSA_ACCESS_EMAIL }}"))
+    expect_red(mutate_plane("dev.versa-root", lambda row: row["required_secrets"][-1].update({"name": "VERSA_ACCESS_EMAIL"})))
     expect_red(replace_text(versa, "${{ secrets.VERSA_CLOUDFLARE_API_TOKEN }}", "${{ secrets.RENT_CLOUDFLARE_API_TOKEN }}"))
     expect_red(replace_text(versa, "          GITHUB_TOKEN: ${{ github.token }}\n", ""))
     expect_red(replace_text(versa, "          GH_TOKEN: ${{ github.token }}\n", "          GH_TOKEN: ${{ github.token }}\n"
@@ -1334,6 +1337,18 @@ def main() -> None:
     expect_red(replace_text(versa_root, "    state {\n      enforced = true\n    }\n", ""))
     expect_red(replace_text(versa_root, 'output "credentials" {\n  sensitive = true\n', 'output "credentials" {\n'))
     expect_red(replace_text(versa_root, "  duration   = var.service_token_duration\n", '  duration   = "1h"\n'))
+    expect_red(replace_text(versa_root, "  type      = list(string)\n  sensitive = true\n", "  type      = list(string)\n"))
+    expect_red(replace_text(versa_root, "  type      = list(string)\n  sensitive = true\n", "  type      = string\n  sensitive = true\n"))
+    expect_red(replace_text(versa_root, "length(var.access_emails) > 0 && ", ""))
+    expect_red(replace_text(versa_root, ' && alltrue([for e in var.access_emails : trimspace(e) != ""])', ""))
+    expect_red(replace_text(versa_root, "[for e in var.access_emails : { email = { email = e } }]",
+                            "[for e in var.access_emails : { email = { email = e } }, { everyone = {} }]"))
+    expect_red(replace_text(versa_root, "[for e in var.access_emails : { email = { email = e } }]",
+                            "[{ email = { email = var.access_emails[0] } }]"))
+    expect_red(replace_text(versa_root, "[for e in var.access_emails : { email = { email = e } }]",
+                            '[{ email_domain = { domain = "roccho.com" } }]'))
+    expect_red(replace_text(versa_root, "[for e in var.access_emails : { email = { email = e } }]",
+                            '[for e in concat(var.access_emails, ["owner@example.invalid"]) : { email = { email = e } }]'))
     expect_red(replace_text(".github/workflows/check.yml", '"$tool/tofu" -chdir="$versa" validate -no-color\n', ""))
     expect_red(replace_text(".github/workflows/check.yml", "run: python3 checks/test_versa_root.py\n", "run: 'true'\n"))
     expect_red(replace_text(".github/workflows/check.yml", ' checks/test_versa_root.py --tools "$tool"', ' checks/test_versa_root.py'))
