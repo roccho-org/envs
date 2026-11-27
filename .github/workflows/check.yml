@@ -45,6 +45,9 @@ jobs:
       - name: Test rent tunnel adapter
         run: python3 checks/test_rent_tunnel.py
 
+      - name: Test versa root entry
+        run: python3 checks/test_versa_root.py
+
       # TEMPORARY: the one-time rent Secret relocation entry's guards, inputs and receipt (retired with it).
       - name: Test rent Secret relocation guards
         run: python3 checks/test_relocate_rent_secrets.py
@@ -819,6 +822,11 @@ jobs:
           cp providers/dev-rent-cloudflare/main.tf "$rent/"
           HTTPS_PROXY=http://127.0.0.1:9 HTTP_PROXY=http://127.0.0.1:9 "$tool/tofu" -chdir="$rent" init -backend=false -input=false -no-color
           "$tool/tofu" -chdir="$rent" validate -no-color
+          versa="$RUNNER_TEMP/versa-cloudflare"
+          mkdir "$versa"
+          cp providers/dev-versa-cloudflare/main.tf "$versa/"
+          HTTPS_PROXY=http://127.0.0.1:9 HTTP_PROXY=http://127.0.0.1:9 "$tool/tofu" -chdir="$versa" init -backend=false -input=false -no-color
+          "$tool/tofu" -chdir="$versa" validate -no-color
           "$tool/ssh" -V
           "$tool/curl" --version
 
@@ -876,6 +884,14 @@ jobs:
           set -euo pipefail
           tool="$RUNNER_TEMP/envs-effect/bin"
           "$tool/python3" -I checks/test_jev_api.py --sops "$tool/sops" --age-keygen "$RUNNER_TEMP/check-age/bin/age-keygen"
+
+      # The closure git, upstream state backend, tofu and sops on a loopback Git server: a missing state ref created
+      # once, only encrypted state on it, its lock released, and the envelope opened only by its one throwaway identity.
+      - name: Real GitHub-ref state and envelope for the versa root
+        run: |
+          set -euo pipefail
+          tool="$RUNNER_TEMP/envs-effect/bin"
+          "$tool/python3" -I checks/test_versa_root.py --tools "$tool" --age-keygen "$RUNNER_TEMP/check-age/bin/age-keygen"
 
       # NOT CHECKED HERE (since resources became private): the composition of the pinned resources Pi resolver with this
       # commit's Go binding (agent-opencode-go-source-composition: missing/stale/stale-binding/different/uncomposed/OID
