@@ -1335,6 +1335,16 @@ def main() -> None:
     expect_red(replace_text(versa_root, 'output "credentials" {\n  sensitive = true\n', 'output "credentials" {\n'))
     expect_red(replace_text(versa_root, "  duration   = var.service_token_duration\n", '  duration   = "1h"\n'))
     expect_red(replace_text(".github/workflows/check.yml", '"$tool/tofu" -chdir="$versa" validate -no-color\n', ""))
+    # The rent routes on the versa Tunnel: relay ports, hosts name, order, DNS, Access application and shared policy.
+    expect_red(replace_text(versa_root, '"ssh://rent.home.arpa:2224"', '"ssh://rent.home.arpa:2223"'))
+    expect_red(replace_text(versa_root, '"ssh://rent.home.arpa:2223"', '"ssh://192.0.2.1:2223"'))
+    expect_red(replace_text(versa_root, '      { service = "http_status:404" },\n',
+                            '      { service = "http_status:404" },\n      { hostname = "x.roccho.com", service = "ssh://127.0.0.1:22" },\n'))
+    expect_red(replace_text(versa_root, ", values(local.rent)))", "))"))
+    expect_red(replace_text(versa_root, '    sandbox = "versa-rent-sandbox.roccho.com"\n', ""))
+    expect_red(replace_text(versa_root, '  for_each   = local.rent\n', '  for_each   = { oci = local.rent.oci }\n'))
+    expect_red(replace_text(versa_root, 'policies   = [{ id = cloudflare_zero_trust_access_policy.ssh.id, precedence = 1 }]\n}\n\nresource "cloudflare_zero_trust_access_application" "http"',
+                            'policies   = [{ id = cloudflare_zero_trust_access_policy.http.id, precedence = 1 }]\n}\n\nresource "cloudflare_zero_trust_access_application" "http"'))
     expect_red(replace_text(".github/workflows/check.yml", "run: python3 checks/test_versa_root.py\n", "run: 'true'\n"))
     expect_red(replace_text(".github/workflows/check.yml", ' checks/test_versa_root.py --tools "$tool"', ' checks/test_versa_root.py'))
     expect_red(mutate_plane("dev.versa-root", lambda row: row["state_backend"].update(

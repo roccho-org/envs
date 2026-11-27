@@ -386,6 +386,7 @@ def check_shape(root: Path) -> None:
         require(not (root / retired).exists(), f"retired probe/state-proof path survives: {retired}")
     for config in (RENT_CONFIG, VERSA_CONFIG):
         check_root_config((root / config).read_text(encoding="utf-8"))
+    check_versa_routes((root / VERSA_CONFIG).read_text(encoding="utf-8"))
 
     handoff_dir = root / "handoffs"
     if handoff_dir.exists():
@@ -411,6 +412,36 @@ def check_root_config(source: str) -> None:
     require('variable "service_token_duration" {\n  type = string\n}\n' in text
             and durations == ["var.service_token_duration"],
             "the service-token duration must be a required input with no default")
+
+
+# The versa Tunnel's ingress, in order: its own two origins, rent's two LAN relays by the versapro.nix hosts name (never
+# a LAN address), then the catch-all.
+VERSA_INGRESS = ["ssh://127.0.0.1:22", "http://127.0.0.1:7824", "ssh://rent.home.arpa:2224",
+                 "ssh://rent.home.arpa:2223", "http_status:404"]
+VERSA_RENT_NAMES = ('  rent = {\n    oci     = "versa-rent-oci.roccho.com"\n'
+                    '    sandbox = "versa-rent-sandbox.roccho.com"\n  }\n')
+VERSA_RENT_ROUTES = ('      { hostname = local.rent.oci, service = "ssh://rent.home.arpa:2224" },\n'
+                     '      { hostname = local.rent.sandbox, service = "ssh://rent.home.arpa:2223" },\n'
+                     '      { service = "http_status:404" },\n    ]\n')
+VERSA_RENT_APP = ('resource "cloudflare_zero_trust_access_application" "rent" {\n  for_each   = local.rent\n'
+                  '  account_id = var.account_id\n  name       = "versa-rent-${each.key}"\n  domain     = each.value\n'
+                  '  type       = "self_hosted"\n'
+                  '  policies   = [{ id = cloudflare_zero_trust_access_policy.ssh.id, precedence = 1 }]\n}\n')
+
+
+def check_versa_routes(source: str) -> None:
+    # Each rent SSH name has its ingress rule (before the catch-all, no origin_request), its proxied CNAME and its own
+    # Access application on the shared muse-only Service Auth policy; nothing else is routed. Only whole-line # comments
+    # are dropped (the origins contain "//"); any other comment form breaks an exact match and so fails closed.
+    text = re.sub(r"(?m)^[ \t]*#.*\n", "", source)
+    require(re.findall(r'(?m)^ +(?:\{ (?:hostname = [^,]+, )?)?service += "([^"]+)"', text) == VERSA_INGRESS
+            and VERSA_RENT_NAMES in text and VERSA_RENT_ROUTES in text and text.count("origin_request") == 1,
+            "versa ingress must be its two origins, then rent's two relays by rent.home.arpa, then the catch-all")
+    require("  for_each = toset(concat([local.ssh, local.http], values(local.rent)))\n" in text,
+            "every versa and rent name must have its DNS record")
+    require(VERSA_RENT_APP in text and text.count("resource \"cloudflare_zero_trust_access_policy\"") == 2
+            and text.count("resource \"cloudflare_zero_trust_access_service_token\"") == 1,
+            "the rent Access applications must share the one muse-only ssh policy")
 
 
 def check_text(root: Path) -> None:

@@ -1,6 +1,8 @@
-# The versa Cloudflare root: one named Tunnel for versa with its two public names, their DNS records, a self-hosted
-# Access application and policy for each name, and the one service token for muse. versa-ssh admits only that token
-# (Service Auth); versa admits only the bound identity, and cloudflared also requires that application's Access JWT.
+# The versa Cloudflare root: one named Tunnel for versa with its four public names, their DNS records, a self-hosted
+# Access application for each name, and the one service token for muse. versa-ssh and the two rent SSH names
+# (versa-rent-oci, versa-rent-sandbox) share one reusable Service Auth policy that admits only that token; versa admits
+# only the bound identity, and cloudflared also requires that application's Access JWT. The rent names reach rent's two
+# LAN relays through versa; rent itself runs no connector.
 #
 # Applied only by the effect entry `versa-root` from the manual project-dev-versa-tunnel workflow; CI only validates it.
 # Its state holds the Tunnel token and the service-token secret, encrypted. Nothing here adopts, imports or moves an
@@ -51,6 +53,10 @@ variable "service_token_duration" {
 locals {
   ssh  = "versa-ssh.roccho.com"
   http = "versa.roccho.com"
+  rent = {
+    oci     = "versa-rent-oci.roccho.com"
+    sandbox = "versa-rent-sandbox.roccho.com"
+  }
 }
 
 resource "cloudflare_zero_trust_tunnel_cloudflared" "versa" {
@@ -76,13 +82,17 @@ resource "cloudflare_zero_trust_tunnel_cloudflared_config" "versa" {
           }
         }
       },
+      # rent.home.arpa is resolved on versa by the /etc/hosts entry declared in mono's versapro.nix, so no LAN address
+      # appears here. Each port is a relay on rent: 2224 to rent.oci's sshd, 2223 to rent.sandbox's sshd.
+      { hostname = local.rent.oci, service = "ssh://rent.home.arpa:2224" },
+      { hostname = local.rent.sandbox, service = "ssh://rent.home.arpa:2223" },
       { service = "http_status:404" },
     ]
   }
 }
 
 resource "cloudflare_dns_record" "versa" {
-  for_each = toset([local.ssh, local.http])
+  for_each = toset(concat([local.ssh, local.http], values(local.rent)))
   zone_id  = var.zone_id
   name     = each.value
   type     = "CNAME"
@@ -117,6 +127,16 @@ resource "cloudflare_zero_trust_access_application" "ssh" {
   account_id = var.account_id
   name       = "versa-ssh"
   domain     = local.ssh
+  type       = "self_hosted"
+  policies   = [{ id = cloudflare_zero_trust_access_policy.ssh.id, precedence = 1 }]
+}
+
+# The rent SSH names reuse the versa-ssh Service Auth policy: the same single muse token, no new policy or token.
+resource "cloudflare_zero_trust_access_application" "rent" {
+  for_each   = local.rent
+  account_id = var.account_id
+  name       = "versa-rent-${each.key}"
+  domain     = each.value
   type       = "self_hosted"
   policies   = [{ id = cloudflare_zero_trust_access_policy.ssh.id, precedence = 1 }]
 }
